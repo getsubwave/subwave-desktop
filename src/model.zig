@@ -7,6 +7,7 @@ const native_sdk = @import("native_sdk");
 const api = @import("api.zig");
 const json = @import("json.zig");
 const color = @import("color.zig");
+const spectrum = @import("spectrum.zig");
 
 const base = api.default_base;
 
@@ -53,6 +54,11 @@ pub const Model = struct {
     elapsed_ms: i64 = 0,
     spectrum_events: i64 = 0,
     retry: u6 = 0,
+
+    // spectrum visualiser: displayed band levels (0..1) + a slice view the
+    // chart series binds; refreshed by syncDisplay each update.
+    band_levels: [spectrum.band_count]f32 = [_]f32{0} ** spectrum.band_count,
+    bands: []const f32 = &[_]f32{},
 
     // feed bookkeeping
     feed_count: i64 = 0,
@@ -233,6 +239,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 },
                 .spectrum => {
                     model.spectrum_events += 1;
+                    spectrum.step(&model.band_levels, e.bands[0..], 0.06);
                 },
                 .failed, .rejected => {
                     if (model.transport == .playing) scheduleReconnect(model, fx);
@@ -282,6 +289,8 @@ fn syncDisplay(model: *Model) void {
         std.fmt.bufPrint(&model.elapsed_buf, "{d}:0{d}", .{ mins, secs })
     else
         std.fmt.bufPrint(&model.elapsed_buf, "{d}:{d}", .{ mins, secs })) catch "0:00";
+    // Point the chart-bound slice at the (stable, heap-allocated) band array.
+    model.bands = model.band_levels[0..];
 }
 
 pub fn initialModel() Model {

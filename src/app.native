@@ -17,6 +17,10 @@
     </row>
   </column>
 
+  <chart height="72" y-min="0" y-max="1" baseline="0">
+    <series values="{bands}" kind="bar" color="accent" label="Spectrum"/>
+  </chart>
+
   <row gap="10" cross="center" main="center">
     <button variant="secondary" on-press="vol_down" icon="volume" label="Quieter"/>
     <text foreground="text_muted">{vol_pct}%</text>

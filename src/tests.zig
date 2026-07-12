@@ -5,9 +5,10 @@ const main = @import("main.zig");
 const canvas = native_sdk.canvas;
 const testing = std.testing;
 
-// Pull the color resolver's fixture tests into the suite.
+// Pull the pure modules' unit tests into the suite.
 comptime {
     _ = @import("color.zig");
+    _ = @import("spectrum.zig");
 }
 
 const AppUi = main.AppUi;
