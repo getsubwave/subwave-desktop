@@ -44,6 +44,29 @@ pub const StationState = struct {
     theme: ?Theme = null,
 };
 
+// /api/themes — the 7 CSS tokens carry "--" prefixes, so the struct fields use
+// @"--…" names, which std.json matches to the JSON keys verbatim.
+pub const Tokens = struct {
+    @"--bg": ?[]const u8 = null,
+    @"--ink": ?[]const u8 = null,
+    @"--muted": ?[]const u8 = null,
+    @"--accent": ?[]const u8 = null,
+    @"--overlay": ?[]const u8 = null,
+    @"--soft-border": ?[]const u8 = null,
+    @"--field": ?[]const u8 = null,
+};
+
+pub const ThemeEntry = struct {
+    id: ?[]const u8 = null,
+    mode: ?[]const u8 = null,
+    tokens: ?Tokens = null,
+};
+
+pub const ThemesPayload = struct {
+    active: ?[]const u8 = null,
+    themes: ?[]ThemeEntry = null,
+};
+
 // Parse `body` into T, tolerating unknown/extra fields. Caller owns the result
 // and MUST `defer parsed.deinit()`; copy any strings before that.
 pub fn parse(comptime T: type, alloc: std.mem.Allocator, body: []const u8) !std.json.Parsed(T) {

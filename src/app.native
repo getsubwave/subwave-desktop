@@ -25,5 +25,5 @@
     <button variant="secondary" on-press="vol_up" icon="volume" label="Louder"/>
   </row>
 
-  <status-bar>{audio_state} · feed {feed_count} · spectrum {spectrum_events}</status-bar>
+  <status-bar>{audio_state} · {theme_id} · feed {feed_count} · spectrum {spectrum_events}</status-bar>
 </column>
