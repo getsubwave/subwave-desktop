@@ -18,6 +18,10 @@ pub const Dj = struct {
     name: ?[]const u8 = null,
 };
 
+pub const ActiveShow = struct {
+    name: ?[]const u8 = null,
+};
+
 // listeners is an object {current, peak}, not a scalar.
 pub const Listeners = struct {
     current: ?i64 = null,
@@ -27,6 +31,7 @@ pub const Listeners = struct {
 pub const NowPlaying = struct {
     nowPlaying: ?Track = null,
     dj: ?Dj = null,
+    activeShow: ?ActiveShow = null,
     listeners: ?Listeners = null,
     streamOnline: ?bool = null,
 };

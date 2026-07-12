@@ -25,6 +25,7 @@ pub const keys = struct {
     pub const fetch_np: u64 = 20;
     pub const fetch_state: u64 = 21;
     pub const fetch_themes: u64 = 22;
+    pub const fetch_cover: u64 = 23;
 };
 
 pub const Transport = enum { stopped, playing, paused };
@@ -37,13 +38,24 @@ pub const Model = struct {
     album_buf: [256]u8 = undefined,
     genre_buf: [64]u8 = undefined,
     dj_buf: [128]u8 = undefined,
+    show_buf: [128]u8 = undefined,
     title: []const u8 = "Tuning in…",
     artist: []const u8 = "",
     album: []const u8 = "",
     genre: []const u8 = "",
     dj: []const u8 = "",
+    show: []const u8 = "",
     listeners: i64 = 0,
     stream_online: bool = true,
+
+    // cover art (registered image ids; 0 = disc/initials fallback)
+    cover_id: u64 = 0,
+    next_cover_id: u64 = 1,
+    cover_sid_buf: [64]u8 = undefined,
+    cover_sid: []const u8 = "",
+    cover_url_buf: [256]u8 = undefined,
+    initials_buf: [4]u8 = undefined,
+    initials: []const u8 = "◎",
 
     // transport / audio
     transport: Transport = .playing,
@@ -76,6 +88,8 @@ pub const Model = struct {
     vol_pct: i64 = 0,
     elapsed_buf: [16]u8 = undefined,
     elapsed_str: []const u8 = "0:00",
+    state_line: []const u8 = "",
+    has_state: bool = false,
 };
 
 pub const App = native_sdk.UiApp(Model, Msg);
@@ -88,6 +102,7 @@ pub const Msg = union(enum) {
     got_np: native_sdk.EffectResponse,
     got_state: native_sdk.EffectResponse,
     got_themes: native_sdk.EffectResponse,
+    got_cover: native_sdk.EffectResponse,
     audio_event: native_sdk.EffectAudio,
     toggle_play,
     tune_out,
@@ -166,9 +181,23 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 if (t.artist) |v| setStr(&model.artist_buf, &model.artist, v);
                 if (t.album) |v| setStr(&model.album_buf, &model.album, v);
                 if (t.genre) |v| setStr(&model.genre_buf, &model.genre, v);
+                // Fetch cover art when the track's subsonic id changes.
+                if (t.subsonic_id) |sid| {
+                    if (sid.len > 0 and !std.mem.eql(u8, sid, model.cover_sid)) {
+                        setStr(&model.cover_sid_buf, &model.cover_sid, sid);
+                        if (api.coverUrl(&model.cover_url_buf, base, sid)) |url| {
+                            fx.fetch(.{ .key = keys.fetch_cover, .url = url, .on_response = Effects.responseMsg(.got_cover) });
+                        } else |_| {}
+                    }
+                }
             }
             if (np.dj) |d| {
                 if (d.name) |v| setStr(&model.dj_buf, &model.dj, v);
+            }
+            if (np.activeShow) |s| {
+                if (s.name) |v| setStr(&model.show_buf, &model.show, v);
+            } else {
+                model.show = "";
             }
             if (np.listeners) |l| {
                 if (l.current) |c| model.listeners = c;
@@ -223,6 +252,14 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 }
                 break;
             }
+        },
+        .got_cover => |r| {
+            if (r.outcome != .ok or r.status != 200 or r.truncated) return;
+            const nid = model.next_cover_id;
+            _ = fx.registerImageBytes(nid, r.body) catch return;
+            if (model.cover_id != 0) _ = fx.unregisterImage(model.cover_id);
+            model.cover_id = nid;
+            model.next_cover_id += 1;
         },
         .audio_event => |e| {
             model.audio_state = @tagName(e.kind);
@@ -291,6 +328,43 @@ fn syncDisplay(model: *Model) void {
         std.fmt.bufPrint(&model.elapsed_buf, "{d}:{d}", .{ mins, secs })) catch "0:00";
     // Point the chart-bound slice at the (stable, heap-allocated) band array.
     model.bands = model.band_levels[0..];
+
+    // Transient state banner (priority: failure > buffering > offline > paused).
+    if (model.stream_failed) {
+        model.state_line = "STREAM LOST — reconnecting…";
+        model.has_state = true;
+    } else if (model.buffering) {
+        model.state_line = "BUFFERING…";
+        model.has_state = true;
+    } else if (!model.stream_online) {
+        model.state_line = "OFF AIR";
+        model.has_state = true;
+    } else if (model.transport == .paused) {
+        model.state_line = "PAUSED";
+        model.has_state = true;
+    } else if (model.transport == .stopped) {
+        model.state_line = "TUNED OUT";
+        model.has_state = true;
+    } else {
+        model.state_line = "";
+        model.has_state = false;
+    }
+
+    // Disc initials fallback: up to two leading letters of the artist.
+    model.initials = initialsFrom(&model.initials_buf, model.artist);
+}
+
+fn initialsFrom(buf: []u8, artist: []const u8) []const u8 {
+    var n: usize = 0;
+    for (artist) |ch| {
+        if (std.ascii.isAlphabetic(ch)) {
+            buf[n] = std.ascii.toUpper(ch);
+            n += 1;
+            if (n >= 2) break;
+        }
+    }
+    if (n == 0) return "◎";
+    return buf[0..n];
 }
 
 pub fn initialModel() Model {

@@ -30,11 +30,11 @@ pub fn request(comptime base: []const u8) []const u8 {
     return base ++ "/api/request";
 }
 
-// Runtime cover URL into `buf`: <base>/api/cover/<id>?size=<px>. A sized cover
-// keeps the fetch under the 256 KiB body cap and the decode under the 512x512
-// image-registry limit.
-pub fn coverUrl(buf: []u8, comptime base: []const u8, id: []const u8, size: u32) ![]const u8 {
-    return std.fmt.bufPrint(buf, base ++ "/api/cover/{s}?size={d}", .{ id, size });
+// Runtime cover URL into `buf`: <base>/api/cover/<id>. The proxy already
+// returns a compact 300x300 JPEG (~10 KB), within the 256 KiB fetch cap and
+// the 512x512 image-registry decode limit.
+pub fn coverUrl(buf: []u8, comptime base: []const u8, id: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, base ++ "/api/cover/{s}", .{id});
 }
 
 // Runtime request-status URL into `buf`: <base>/api/request/<id>.

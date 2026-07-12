@@ -1,21 +1,28 @@
-<!-- SUB/WAVE player view. Phase 1: now-playing card + transport.
+<!-- SUB/WAVE player view. Phase 3: cover disc, show, states.
      Validate: native markup check src/app.native -->
 <column gap="14" padding="20" grow="1">
   <row cross="center" main="space_between">
     <text size="heading">SUB/WAVE</text>
+    <text foreground="text_muted" wrap="false" overflow="ellipsis">{show}</text>
     <text foreground="text_muted">{listeners} listening</text>
   </row>
 
-  <column gap="4" grow="1" main="center">
-    <text size="display" wrap="false" overflow="ellipsis">{title}</text>
-    <text size="heading" foreground="text_muted" wrap="false" overflow="ellipsis">{artist}</text>
-    <text foreground="text_muted" wrap="false" overflow="ellipsis">{album}</text>
-    <row gap="8" cross="center">
-      <text foreground="accent">{genre}</text>
-      <text foreground="text_muted">on air {elapsed_str}</text>
-      <text foreground="text_muted">{dj}</text>
-    </row>
-  </column>
+  <row gap="20" cross="center" grow="1" main="start">
+    <avatar image="{cover_id}" size="lg" label="{album}">{initials}</avatar>
+    <column gap="4" grow="1" main="center">
+      <if test="{has_state}">
+        <text foreground="accent">{state_line}</text>
+      </if>
+      <text size="display" wrap="false" overflow="ellipsis">{title}</text>
+      <text size="heading" foreground="text_muted" wrap="false" overflow="ellipsis">{artist}</text>
+      <text foreground="text_muted" wrap="false" overflow="ellipsis">{album}</text>
+      <row gap="8" cross="center">
+        <text foreground="accent">{genre}</text>
+        <text foreground="text_muted">on air {elapsed_str}</text>
+        <text foreground="text_muted">{dj}</text>
+      </row>
+    </column>
+  </row>
 
   <chart height="72" y-min="0" y-max="1" baseline="0">
     <series values="{bands}" kind="bar" color="accent" label="Spectrum"/>
@@ -29,5 +36,5 @@
     <button variant="secondary" on-press="vol_up" icon="volume" label="Louder"/>
   </row>
 
-  <status-bar>{audio_state} · {theme_id} · feed {feed_count} · spectrum {spectrum_events}</status-bar>
+  <status-bar>{audio_state} · {theme_id} · {listeners} listening</status-bar>
 </column>
