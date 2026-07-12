@@ -32,6 +32,11 @@ pub fn tokensFn(model: *const model_mod.Model) canvas.DesignTokens {
         .light => .light,
         .dark => .dark,
     };
-    const base = canvas.DesignTokens.theme(.{ .color_scheme = scheme });
+    // The skin's "material": Deck is a compact hi-fi strip, Card is roomier.
+    const density: canvas.Density = switch (model.skin) {
+        .deck => .compact,
+        .card => .regular,
+    };
+    const base = canvas.DesignTokens.theme(.{ .color_scheme = scheme, .density = density });
     return base.withOverrides(stationOverrides(model.station_colors));
 }

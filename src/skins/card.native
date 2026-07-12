@@ -1,10 +1,10 @@
-<!-- SUB/WAVE player view. Phase 3: cover disc, show, states.
-     Validate: native markup check src/app.native -->
+<!-- Card skin: roomy now-playing card with cover disc, spectrum, transport.
+     Validate: native markup check src/skins/card.native -->
 <column gap="14" padding="20" grow="1">
   <row cross="center" main="space_between">
     <text size="heading">SUB/WAVE</text>
     <text foreground="text_muted" wrap="false" overflow="ellipsis">{show}</text>
-    <text foreground="text_muted">{listeners} listening</text>
+    <button variant="ghost" size="sm" on-press="switch_skin">{skin_label}</button>
   </row>
 
   <row gap="20" cross="center" grow="1" main="start">

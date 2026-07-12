@@ -6,6 +6,7 @@ const runner = @import("runner");
 const native_sdk = @import("native_sdk");
 const model = @import("model.zig");
 const theme = @import("theme.zig");
+const skins = @import("skins.zig");
 
 pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
 
@@ -20,7 +21,6 @@ const window_height: f32 = 400;
 pub const Model = model.Model;
 pub const Msg = model.Msg;
 pub const AppUi = canvas.Ui(Msg);
-pub const app_markup = @embedFile("app.native");
 
 const app_permissions = [_][]const u8{ native_sdk.security.permission_command, native_sdk.security.permission_view };
 const shell_views = [_]native_sdk.ShellView{
@@ -46,7 +46,7 @@ pub fn main(init: std.process.Init) !void {
         .update_fx = model.update,
         .init_fx = model.boot,
         .tokens_fn = theme.tokensFn,
-        .markup = .{ .source = app_markup, .watch_path = "src/app.native", .io = init.io },
+        .view = skins.rootView,
     });
     defer app_state.destroy();
     app_state.model = model.initialModel();

@@ -30,6 +30,11 @@ pub const keys = struct {
 
 pub const Transport = enum { stopped, playing, paused };
 
+// App skin (chrome/layout). Both honor the live station theme; they differ in
+// layout markup and material density (see theme.tokensFn). Defined here (not in
+// skins.zig) so model has no import cycle with the skin registry.
+pub const Skin = enum { card, deck };
+
 // ------------------------------------------------------------------ model
 pub const Model = struct {
     // now playing (slices point into the *_buf fixed buffers)
@@ -56,6 +61,10 @@ pub const Model = struct {
     cover_url_buf: [256]u8 = undefined,
     initials_buf: [4]u8 = undefined,
     initials: []const u8 = "◎",
+
+    // skin (read by skins.rootView + theme.tokensFn)
+    skin: Skin = .card,
+    skin_label: []const u8 = "Deck view",
 
     // transport / audio
     transport: Transport = .playing,
@@ -108,6 +117,7 @@ pub const Msg = union(enum) {
     tune_out,
     vol_up,
     vol_down,
+    switch_skin,
 };
 
 // ---------------------------------------------------------------- helpers
@@ -310,6 +320,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.volume = @max(model.volume - 0.1, 0.0);
             fx.setAudioVolume(model.volume);
         },
+        .switch_skin => {
+            model.skin = if (model.skin == .card) .deck else .card;
+        },
     }
     syncDisplay(model);
 }
@@ -352,6 +365,9 @@ fn syncDisplay(model: *Model) void {
 
     // Disc initials fallback: up to two leading letters of the artist.
     model.initials = initialsFrom(&model.initials_buf, model.artist);
+
+    // Label for the skin-switch button (names the OTHER skin).
+    model.skin_label = if (model.skin == .card) "Deck view" else "Card view";
 }
 
 fn initialsFrom(buf: []u8, artist: []const u8) []const u8 {
