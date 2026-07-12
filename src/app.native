@@ -1,11 +1,29 @@
-<!-- Phase 0 spike view: everything the probe observes, rendered flat so
-     `native automate snapshot` can read it. Validate: native markup check src/app.native -->
-<column gap="6" padding="16">
-  <text size="heading">SUB/WAVE stream probe</text>
-  <text>audio: {audio_state}  buffering: {buffering}</text>
-  <text>positions: {pos_count}  elapsed_ms: {elapsed_ms}</text>
-  <text>feed: {feed_count}  outcome: {last_outcome}  http: {http_status}</text>
-  <text>title: {title}</text>
-  <text>artist: {artist}</text>
-  <status-bar>probe · {audio_state} · feeds {feed_count}</status-bar>
+<!-- SUB/WAVE player view. Phase 1: now-playing card + transport.
+     Validate: native markup check src/app.native -->
+<column gap="14" padding="20" grow="1">
+  <row cross="center" main="space_between">
+    <text size="heading">SUB/WAVE</text>
+    <text foreground="text_muted">{listeners} listening</text>
+  </row>
+
+  <column gap="4" grow="1" main="center">
+    <text size="display" wrap="false" overflow="ellipsis">{title}</text>
+    <text size="heading" foreground="text_muted" wrap="false" overflow="ellipsis">{artist}</text>
+    <text foreground="text_muted" wrap="false" overflow="ellipsis">{album}</text>
+    <row gap="8" cross="center">
+      <text foreground="accent">{genre}</text>
+      <text foreground="text_muted">on air {elapsed_str}</text>
+      <text foreground="text_muted">{dj}</text>
+    </row>
+  </column>
+
+  <row gap="10" cross="center" main="center">
+    <button variant="secondary" on-press="vol_down" icon="volume" label="Quieter"/>
+    <text foreground="text_muted">{vol_pct}%</text>
+    <button variant="primary" size="lg" on-press="toggle_play">{play_label}</button>
+    <button variant="secondary" on-press="tune_out">Tune out</button>
+    <button variant="secondary" on-press="vol_up" icon="volume" label="Louder"/>
+  </row>
+
+  <status-bar>{audio_state} · feed {feed_count} · spectrum {spectrum_events}</status-bar>
 </column>
