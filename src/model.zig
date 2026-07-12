@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const native_sdk = @import("native_sdk");
+const canvas = native_sdk.canvas;
 const api = @import("api.zig");
 const json = @import("json.zig");
 const color = @import("color.zig");
@@ -22,10 +23,14 @@ pub const keys = struct {
     pub const feed_timer: u64 = 1;
     pub const theme_timer: u64 = 2;
     pub const reconnect: u64 = 3;
+    pub const request_poll: u64 = 4;
     pub const fetch_np: u64 = 20;
     pub const fetch_state: u64 = 21;
     pub const fetch_themes: u64 = 22;
     pub const fetch_cover: u64 = 23;
+    pub const fetch_session: u64 = 24;
+    pub const post_request: u64 = 25;
+    pub const fetch_reqstat: u64 = 26;
 };
 
 pub const Transport = enum { stopped, playing, paused };
@@ -91,6 +96,17 @@ pub const Model = struct {
     theme_id_buf: [64]u8 = undefined,
     theme_id: []const u8 = "classic-light",
 
+    // song request (TEA text-field mirror + POST/poll status)
+    req_buffer: canvas.TextBuffer(120) = .{},
+    req_status: []const u8 = "",
+    req_id_buf: [64]u8 = undefined,
+    req_id: []const u8 = "",
+
+    // booth ticker: the DJ's latest utterance
+    booth_buf: [280]u8 = undefined,
+    booth_line: []const u8 = "",
+    has_booth: bool = false,
+
     // derived display fields, recomputed by syncDisplay() at the end of update
     is_playing: bool = true,
     play_label: []const u8 = "Pause",
@@ -99,6 +115,11 @@ pub const Model = struct {
     elapsed_str: []const u8 = "0:00",
     state_line: []const u8 = "",
     has_state: bool = false,
+
+    // The text the request field binds (derived from the edit buffer).
+    pub fn req_text(self: *const Model) []const u8 {
+        return self.req_buffer.text();
+    }
 };
 
 pub const App = native_sdk.UiApp(Model, Msg);
@@ -112,12 +133,18 @@ pub const Msg = union(enum) {
     got_state: native_sdk.EffectResponse,
     got_themes: native_sdk.EffectResponse,
     got_cover: native_sdk.EffectResponse,
+    got_session: native_sdk.EffectResponse,
+    got_reqpost: native_sdk.EffectResponse,
+    got_reqstat: native_sdk.EffectResponse,
+    tick_reqpoll: native_sdk.EffectTimer,
     audio_event: native_sdk.EffectAudio,
     toggle_play,
     tune_out,
     vol_up,
     vol_down,
     switch_skin,
+    req_edit: canvas.TextInputEvent,
+    submit_req,
 };
 
 // ---------------------------------------------------------------- helpers
@@ -144,6 +171,38 @@ fn startStream(model: *Model, fx: *Effects) void {
 fn fetchFeed(fx: *Effects) void {
     fx.fetch(.{ .key = keys.fetch_np, .url = api.nowPlaying(base), .on_response = Effects.responseMsg(.got_np) });
     fx.fetch(.{ .key = keys.fetch_state, .url = api.state(base), .on_response = Effects.responseMsg(.got_state) });
+    fx.fetch(.{ .key = keys.fetch_session, .url = api.session(base), .on_response = Effects.responseMsg(.got_session) });
+}
+
+// Minimal JSON string escape for the request text (quotes/backslashes/newlines).
+fn jsonEscape(buf: []u8, s: []const u8) []const u8 {
+    var w: usize = 0;
+    for (s) |ch| {
+        if (w + 2 > buf.len) break;
+        switch (ch) {
+            '"' => {
+                buf[w] = '\\';
+                buf[w + 1] = '"';
+                w += 2;
+            },
+            '\\' => {
+                buf[w] = '\\';
+                buf[w + 1] = '\\';
+                w += 2;
+            },
+            '\n' => {
+                buf[w] = '\\';
+                buf[w + 1] = 'n';
+                w += 2;
+            },
+            '\r', '\t' => {},
+            else => {
+                buf[w] = ch;
+                w += 1;
+            },
+        }
+    }
+    return buf[0..w];
 }
 
 fn fetchThemes(fx: *Effects) void {
@@ -271,6 +330,105 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.cover_id = nid;
             model.next_cover_id += 1;
         },
+        .got_session => |r| {
+            if (r.outcome != .ok or r.status != 200) return;
+            const parsed = json.parse(json.Session, std.heap.page_allocator, r.body) catch return;
+            defer parsed.deinit();
+            // Booth ticker: the most recent DJ-spoken line (skip internal
+            // event/user/segment turns — only role "dj" is on-air speech).
+            if (parsed.value.messages) |msgs| {
+                var i: usize = msgs.len;
+                while (i > 0) {
+                    i -= 1;
+                    const role = msgs[i].role orelse continue;
+                    if (!std.mem.eql(u8, role, "dj")) continue;
+                    // Skip the DJ's internal pick reasoning — only on-air speech.
+                    if (msgs[i].kind) |k| {
+                        if (std.mem.eql(u8, k, "pick")) continue;
+                    }
+                    if (msgs[i].text) |txt| {
+                        if (txt.len > 0) {
+                            setStr(&model.booth_buf, &model.booth_line, txt);
+                            break;
+                        }
+                    }
+                }
+            }
+        },
+        .req_edit => |edit| model.req_buffer.apply(edit),
+        .submit_req => {
+            const text = model.req_buffer.text();
+            if (text.len == 0) {
+                model.req_status = "type a song first";
+            } else {
+                var esc_buf: [200]u8 = undefined;
+                var body_buf: [280]u8 = undefined;
+                const esc = jsonEscape(&esc_buf, text);
+                if (std.fmt.bufPrint(&body_buf, "{{\"text\":\"{s}\",\"name\":\"Desktop\"}}", .{esc})) |body| {
+                    fx.fetch(.{
+                        .key = keys.post_request,
+                        .method = .POST,
+                        .url = api.request(base),
+                        .headers = &.{.{ .name = "content-type", .value = "application/json" }},
+                        .body = body,
+                        .on_response = Effects.responseMsg(.got_reqpost),
+                    });
+                    model.req_status = "sending…";
+                    model.req_buffer.clear();
+                } else |_| {
+                    model.req_status = "request too long";
+                }
+            }
+        },
+        .got_reqpost => |r| {
+            if (r.outcome != .ok) {
+                model.req_status = "request failed";
+                return;
+            }
+            if (r.status == 429) {
+                model.req_status = "slow down — try again shortly";
+                return;
+            }
+            if (r.status != 202 and r.status != 200) {
+                model.req_status = "request not accepted";
+                return;
+            }
+            const parsed = json.parse(json.RequestPost, std.heap.page_allocator, r.body) catch {
+                model.req_status = "queued";
+                return;
+            };
+            defer parsed.deinit();
+            if (parsed.value.requestId) |id| {
+                setStr(&model.req_id_buf, &model.req_id, id);
+                model.req_status = "queued — finding it…";
+                fx.startTimer(.{ .key = keys.request_poll, .interval_ms = 2000, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick_reqpoll) });
+            } else {
+                model.req_status = "queued";
+            }
+        },
+        .tick_reqpoll => |t| {
+            if (t.outcome == .fired and model.req_id.len > 0) {
+                var url_buf: [256]u8 = undefined;
+                if (api.requestStatus(&url_buf, base, model.req_id)) |url| {
+                    fx.fetch(.{ .key = keys.fetch_reqstat, .url = url, .on_response = Effects.responseMsg(.got_reqstat) });
+                } else |_| {}
+            }
+        },
+        .got_reqstat => |r| {
+            if (r.outcome != .ok or r.status != 200) return;
+            const parsed = json.parse(json.RequestStatus, std.heap.page_allocator, r.body) catch return;
+            defer parsed.deinit();
+            const st = parsed.value.status orelse "pending";
+            if (std.mem.eql(u8, st, "resolved")) {
+                model.req_status = "playing soon ✓";
+            } else if (std.mem.eql(u8, st, "failed")) {
+                model.req_status = "couldn't find that one";
+            } else {
+                model.req_status = "queued — finding it…";
+                // Keep polling until terminal.
+                fx.startTimer(.{ .key = keys.request_poll, .interval_ms = 2000, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick_reqpoll) });
+            }
+        },
         .audio_event => |e| {
             model.audio_state = @tagName(e.kind);
             switch (e.kind) {
@@ -368,6 +526,8 @@ fn syncDisplay(model: *Model) void {
 
     // Label for the skin-switch button (names the OTHER skin).
     model.skin_label = if (model.skin == .card) "Deck view" else "Card view";
+
+    model.has_booth = model.booth_line.len > 0;
 }
 
 fn initialsFrom(buf: []u8, artist: []const u8) []const u8 {

@@ -21,12 +21,21 @@
         <text foreground="text_muted">on air {elapsed_str}</text>
         <text foreground="text_muted">{dj}</text>
       </row>
+      <if test="{has_booth}">
+        <text foreground="text_muted" wrap="true" overflow="ellipsis">“{booth_line}”</text>
+      </if>
     </column>
   </row>
 
-  <chart height="72" y-min="0" y-max="1" baseline="0">
+  <chart height="60" y-min="0" y-max="1" baseline="0">
     <series values="{bands}" kind="bar" color="accent" label="Spectrum"/>
   </chart>
+
+  <row gap="8" cross="center">
+    <text-field text="{req_text}" placeholder="Request a song…" on-input="req_edit" on-submit="submit_req" grow="1"/>
+    <button variant="primary" on-press="submit_req">Send</button>
+    <text foreground="text_muted" wrap="false" overflow="ellipsis">{req_status}</text>
+  </row>
 
   <row gap="10" cross="center" main="center">
     <button variant="secondary" on-press="vol_down" icon="volume" label="Quieter"/>

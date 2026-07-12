@@ -72,6 +72,29 @@ pub const ThemesPayload = struct {
     themes: ?[]ThemeEntry = null,
 };
 
+// POST /api/request → 202 { success, requestId, status }
+pub const RequestPost = struct {
+    requestId: ?[]const u8 = null,
+    status: ?[]const u8 = null,
+};
+
+// GET /api/request/:id → { status, message, queuePosition, ... }
+pub const RequestStatus = struct {
+    status: ?[]const u8 = null,
+    message: ?[]const u8 = null,
+    queuePosition: ?i64 = null,
+};
+
+// GET /api/session → { messages: [{ role, kind, text }] }
+pub const SessionMsg = struct {
+    role: ?[]const u8 = null,
+    kind: ?[]const u8 = null,
+    text: ?[]const u8 = null,
+};
+pub const Session = struct {
+    messages: ?[]SessionMsg = null,
+};
+
 // Parse `body` into T, tolerating unknown/extra fields. Caller owns the result
 // and MUST `defer parsed.deinit()`; copy any strings before that.
 pub fn parse(comptime T: type, alloc: std.mem.Allocator, body: []const u8) !std.json.Parsed(T) {
