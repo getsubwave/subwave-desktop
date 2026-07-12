@@ -1,24 +1,26 @@
 .{
     .id = "dev.subwave.player",
     .name = "subwave-desktop",
-    .display_name = "Subwave Desktop",
-    .description = "A counter that lives in one native window.",
+    // No "/" in packaging metadata (safer for generated .app/.desktop names);
+    // the in-app header still renders the branded "SUB/WAVE".
+    .display_name = "SUBWAVE Player",
+    .description = "Native desktop player for the SUB/WAVE internet radio station.",
     .version = "0.1.0",
     .icons = .{"assets/icon.png"},
-    .platforms = .{"macos"},
+    .platforms = .{ "macos", "linux" },
     .permissions = .{ "view", "command" },
     .capabilities = .{ "native_views", "gpu_surfaces" },
     .shell = .{
         .windows = .{
             .{
                 .label = "main",
-                .title = "Subwave Desktop",
-                .width = 480,
-                .height = 320,
+                .title = "SUBWAVE",
+                .width = 620,
+                .height = 400,
                 .restore_state = false,
                 .restore_policy = "center_on_primary",
                 .views = .{
-                    .{ .label = "main-canvas", .kind = "gpu_surface", .fill = true, .role = "Counter canvas", .accessibility_label = "Counter", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },
+                    .{ .label = "main-canvas", .kind = "gpu_surface", .fill = true, .role = "Player canvas", .accessibility_label = "Player", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },
                 },
             },
         },
@@ -30,5 +32,4 @@
         },
     },
     .web_engine = "system",
-    .cef = .{ .dir = "third_party/cef/macos", .auto_install = false },
 }

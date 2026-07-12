@@ -120,6 +120,23 @@ pub const Model = struct {
     pub fn req_text(self: *const Model) []const u8 {
         return self.req_buffer.text();
     }
+
+    // Names read/dispatched only by update/fx (never bound in markup) — opt out
+    // of the dead-state lint. Effect-result Msgs, backing buffers, and internal
+    // or derived-source state.
+    pub const view_unbound = .{
+        // fixed backing buffers behind the bound slice fields
+        "title_buf",       "artist_buf",     "album_buf",     "genre_buf",
+        "dj_buf",          "show_buf",       "cover_sid_buf", "cover_url_buf",
+        "initials_buf",    "theme_id_buf",   "elapsed_buf",   "req_id_buf",
+        "booth_buf",
+        // internal / derived-source state
+        "skin",            "transport",      "volume",        "buffering",
+        "feed_count",      "is_playing",     "elapsed_ms",    "spectrum_events",
+        "band_levels",     "req_buffer",     "retry",         "offline_streak",
+        "stream_failed",   "stream_online",  "cover_sid",     "next_cover_id",
+        "req_id",          "theme_scheme",   "station_colors",
+    };
 };
 
 pub const App = native_sdk.UiApp(Model, Msg);
@@ -145,6 +162,13 @@ pub const Msg = union(enum) {
     switch_skin,
     req_edit: canvas.TextInputEvent,
     submit_req,
+
+    // Effect-result Msgs dispatched by the runtime/fx, not markup.
+    pub const view_unbound = .{
+        "tick_feed",   "tick_reconnect", "tick_theme",  "tick_reqpoll",
+        "got_np",      "got_state",      "got_themes",  "got_cover",
+        "got_session", "got_reqpost",    "got_reqstat", "audio_event",
+    };
 };
 
 // ---------------------------------------------------------------- helpers
