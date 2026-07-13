@@ -95,6 +95,22 @@ pub const Session = struct {
     messages: ?[]SessionMsg = null,
 };
 
+// /api/schedule (the show catalogue + personas; the 7x24 grid is ignored here)
+pub const SchedPersona = struct {
+    id: ?[]const u8 = null,
+    name: ?[]const u8 = null,
+};
+pub const SchedShow = struct {
+    id: ?[]const u8 = null,
+    name: ?[]const u8 = null,
+    topic: ?[]const u8 = null,
+    personaId: ?[]const u8 = null,
+};
+pub const SchedulePayload = struct {
+    personas: ?[]SchedPersona = null,
+    shows: ?[]SchedShow = null,
+};
+
 // settings.json on disk
 pub const Settings = struct {
     volume: ?f32 = null,

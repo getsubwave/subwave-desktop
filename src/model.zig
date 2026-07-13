@@ -28,10 +28,21 @@ pub const keys = struct {
     pub const fetch_session: u64 = 24;
     pub const post_request: u64 = 25;
     pub const fetch_reqstat: u64 = 26;
+    pub const fetch_schedule: u64 = 27;
     pub const save_settings: u64 = 30;
 };
 
 pub const max_themes = 12;
+pub const max_shows = 16;
+
+// One row in the schedule/guide list (bound by the <for> in card.native). The
+// string slices point into the parallel *_store buffers on the model.
+pub const ShowRow = struct {
+    name: []const u8 = "",
+    topic: []const u8 = "",
+    persona: []const u8 = "",
+    live: bool = false,
+};
 
 pub const Transport = enum { stopped, playing, paused };
 
@@ -115,6 +126,15 @@ pub const Model = struct {
     station_buffer: canvas.TextBuffer(200) = .{},
     settings_json_buf: [640]u8 = undefined,
 
+    // schedule / station guide
+    show_schedule: bool = false,
+    show_names_store: [max_shows][48]u8 = undefined,
+    show_topics_store: [max_shows][140]u8 = undefined,
+    show_personas_store: [max_shows][40]u8 = undefined,
+    show_rows: [max_shows]ShowRow = [_]ShowRow{.{}} ** max_shows,
+    show_count: usize = 0,
+    shows_list: []const ShowRow = &[_]ShowRow{},
+
     // song request (TEA text-field mirror + POST/poll status)
     req_buffer: canvas.TextBuffer(120) = .{},
     req_status: []const u8 = "",
@@ -136,6 +156,8 @@ pub const Model = struct {
     has_state: bool = false,
     theme_label_buf: [80]u8 = undefined,
     theme_label: []const u8 = "Theme: station",
+    showing_now: bool = true,
+    schedule_label: []const u8 = "Schedule",
 
     // The text the request field binds (derived from the edit buffer).
     pub fn req_text(self: *const Model) []const u8 {
@@ -166,6 +188,9 @@ pub const Model = struct {
         "settings_path_buf", "settings_json_buf", "station_buffer",
         "theme_override",  "theme_override_buf", "theme_label_buf",
         "theme_ids",       "theme_ids_store", "theme_count",
+        // schedule / guide backing storage
+        "show_names_store", "show_topics_store", "show_personas_store",
+        "show_rows",        "show_count",        "show_schedule",
     };
 };
 
@@ -181,6 +206,7 @@ pub const Msg = union(enum) {
     got_themes: native_sdk.EffectResponse,
     got_cover: native_sdk.EffectResponse,
     got_session: native_sdk.EffectResponse,
+    got_schedule: native_sdk.EffectResponse,
     got_reqpost: native_sdk.EffectResponse,
     got_reqstat: native_sdk.EffectResponse,
     tick_reqpoll: native_sdk.EffectTimer,
@@ -196,13 +222,14 @@ pub const Msg = union(enum) {
     station_edit: canvas.TextInputEvent,
     tune_station,
     cycle_theme,
+    toggle_schedule,
 
     // Effect-result Msgs dispatched by the runtime/fx, not markup.
     pub const view_unbound = .{
         "tick_feed",   "tick_reconnect", "tick_theme",  "tick_reqpoll",
         "got_np",      "got_state",      "got_themes",  "got_cover",
         "got_session", "got_reqpost",    "got_reqstat", "audio_event",
-        "saved",
+        "saved",       "got_schedule",
     };
 };
 
@@ -275,6 +302,11 @@ fn fetchThemes(model: *Model, fx: *Effects) void {
     if (api.themes(&b, model.base)) |u| fx.fetch(.{ .key = keys.fetch_themes, .url = u, .on_response = Effects.responseMsg(.got_themes) }) else |_| {}
 }
 
+fn fetchSchedule(model: *Model, fx: *Effects) void {
+    var b: [256]u8 = undefined;
+    if (api.schedule(&b, model.base)) |u| fx.fetch(.{ .key = keys.fetch_schedule, .url = u, .on_response = Effects.responseMsg(.got_schedule) }) else |_| {}
+}
+
 // Apply a settings.json blob (called at startup from settings.loadFromDisk).
 pub fn applySettingsJson(model: *Model, bytes: []const u8) void {
     const parsed = json.parse(json.Settings, std.heap.page_allocator, bytes) catch return;
@@ -313,6 +345,7 @@ pub fn boot(model: *Model, fx: *Effects) void {
     startStream(model, fx);
     fetchFeed(model, fx);
     fetchThemes(model, fx);
+    fetchSchedule(model, fx);
     fx.startTimer(.{ .key = keys.feed_timer, .interval_ms = 5000, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_feed) });
     fx.startTimer(.{ .key = keys.theme_timer, .interval_ms = 30_000, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_theme) });
 }
@@ -465,6 +498,37 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 }
             }
         },
+        .got_schedule => |r| {
+            if (r.outcome != .ok or r.status != 200) return;
+            const parsed = json.parse(json.SchedulePayload, std.heap.page_allocator, r.body) catch return;
+            defer parsed.deinit();
+            const shows = parsed.value.shows orelse return;
+            const personas = parsed.value.personas orelse &[_]json.SchedPersona{};
+            model.show_count = 0;
+            for (shows) |s| {
+                if (model.show_count >= max_shows) break;
+                const i = model.show_count;
+                const name = s.name orelse continue;
+                setStr(&model.show_names_store[i], &model.show_rows[i].name, name);
+                setStr(&model.show_topics_store[i], &model.show_rows[i].topic, s.topic orelse "");
+                // Resolve persona name from personaId.
+                var persona_name: []const u8 = "";
+                if (s.personaId) |pid| {
+                    for (personas) |p| {
+                        if (p.id) |id| {
+                            if (std.mem.eql(u8, id, pid)) {
+                                persona_name = p.name orelse "";
+                                break;
+                            }
+                        }
+                    }
+                }
+                setStr(&model.show_personas_store[i], &model.show_rows[i].persona, persona_name);
+                model.show_rows[i].live = false;
+                model.show_count += 1;
+            }
+        },
+        .toggle_schedule => model.show_schedule = !model.show_schedule,
         .req_edit => |edit| model.req_buffer.apply(edit),
         .submit_req => {
             const text = model.req_buffer.text();
@@ -694,6 +758,15 @@ fn syncDisplay(model: *Model) void {
         "Theme: station"
     else
         (std.fmt.bufPrint(&model.theme_label_buf, "Theme: {s}", .{model.theme_override}) catch "Theme");
+
+    model.showing_now = !model.show_schedule;
+    model.schedule_label = if (model.show_schedule) "Now playing" else "Schedule";
+
+    // Schedule list: publish the filled rows and flag the on-air show.
+    model.shows_list = model.show_rows[0..model.show_count];
+    for (0..model.show_count) |i| {
+        model.show_rows[i].live = model.show.len > 0 and std.mem.eql(u8, model.show_rows[i].name, model.show);
+    }
 }
 
 fn initialsFrom(buf: []u8, artist: []const u8) []const u8 {

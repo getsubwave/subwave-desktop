@@ -4,10 +4,12 @@
   <row cross="center" main="space_between" gap="8">
     <text size="heading">SUB/WAVE</text>
     <text grow="1" foreground="text_muted" wrap="false" overflow="ellipsis">{show}</text>
+    <button variant="ghost" size="sm" on-press="toggle_schedule">{schedule_label}</button>
     <button variant="ghost" size="sm" on-press="cycle_theme">{theme_label}</button>
     <button variant="ghost" size="sm" on-press="switch_skin">{skin_label}</button>
   </row>
 
+  <if test="{showing_now}">
   <row gap="20" cross="center" grow="1" main="start">
     <avatar image="{cover_id}" size="lg" label="{album}">{initials}</avatar>
     <column gap="4" grow="1" main="center">
@@ -27,6 +29,24 @@
       </if>
     </column>
   </row>
+  </if>
+
+  <if test="{show_schedule}">
+  <scroll grow="1">
+    <column gap="6">
+      <for each="shows_list" key="name" as="s">
+        <row gap="10" cross="center">
+          <if test="{s.live}"><text foreground="accent">●</text></if>
+          <column gap="0" grow="1">
+            <text wrap="false" overflow="ellipsis">{s.name}</text>
+            <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{s.topic}</text>
+          </column>
+          <text size="sm" foreground="text_muted" wrap="false">{s.persona}</text>
+        </row>
+      </for>
+    </column>
+  </scroll>
+  </if>
 
   <chart height="60" y-min="0" y-max="1" baseline="0">
     <series values="{bands}" kind="bar" color="accent" label="Spectrum"/>
