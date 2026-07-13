@@ -12,10 +12,9 @@ const spectrum = @import("spectrum.zig");
 
 const base = api.default_base;
 
-// Muted during the autonomous build so verification runs don't play through
-// the speakers. Flip to 0.8 for real listening (decode/position/spectrum all
-// report regardless of output volume).
-pub const boot_volume: f32 = 0.0;
+// Default listening volume on tune-in. (Decode/position/spectrum report
+// regardless of output volume; set to 0.0 to boot muted for headless runs.)
+pub const boot_volume: f32 = 0.8;
 
 // ---------------------------------------------------------------- effect keys
 pub const keys = struct {
