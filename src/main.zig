@@ -7,6 +7,8 @@ const native_sdk = @import("native_sdk");
 const model = @import("model.zig");
 const theme = @import("theme.zig");
 const skins = @import("skins.zig");
+const settings = @import("settings.zig");
+const api = @import("api.zig");
 
 pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
 
@@ -51,12 +53,31 @@ pub fn main(init: std.process.Init) !void {
     defer app_state.destroy();
     app_state.model = model.initialModel();
 
+    // Load persisted settings (volume/skin/theme/station) BEFORE the window
+    // opens, so the startup window size can follow the saved skin. Also honor a
+    // SUBWAVE_STATION_URL env override (wins over the persisted station).
+    settings.resolvePath(&app_state.model, init.environ_map);
+    settings.loadFromDisk(&app_state.model, init.io);
+    if (init.environ_map.get("SUBWAVE_STATION_URL")) |env_station| {
+        if (env_station.len > 0) {
+            if (api.normalizeBase(&app_state.model.base_buf, env_station)) |b| app_state.model.base = b else |_| {}
+        }
+    }
+
+    // The SDK can't resize a live window, so the window SHAPE follows the saved
+    // skin at startup: Deck opens compact, Card roomy. (Live skin switch changes
+    // the layout in place; the shape applies on next launch.)
+    const frame = if (app_state.model.skin == .deck)
+        geometry.RectF.init(0, 0, 540, 300)
+    else
+        geometry.RectF.init(0, 0, window_width, window_height);
+
     try runner.runWithOptions(app_state.app(), .{
         .app_name = "subwave",
         .window_title = "SUB/WAVE",
         .bundle_id = "dev.subwave.player",
         .icon_path = "assets/icon.png",
-        .default_frame = geometry.RectF.init(0, 0, window_width, window_height),
+        .default_frame = frame,
         .restore_state = false,
         .js_window_api = false,
         .security = .{

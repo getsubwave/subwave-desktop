@@ -1,9 +1,10 @@
 <!-- Card skin: roomy now-playing card with cover disc, spectrum, transport.
      Validate: native markup check src/skins/card.native -->
 <column gap="14" padding="20" grow="1">
-  <row cross="center" main="space_between">
+  <row cross="center" main="space_between" gap="8">
     <text size="heading">SUB/WAVE</text>
-    <text foreground="text_muted" wrap="false" overflow="ellipsis">{show}</text>
+    <text grow="1" foreground="text_muted" wrap="false" overflow="ellipsis">{show}</text>
+    <button variant="ghost" size="sm" on-press="cycle_theme">{theme_label}</button>
     <button variant="ghost" size="sm" on-press="switch_skin">{skin_label}</button>
   </row>
 
@@ -43,6 +44,11 @@
     <button variant="primary" size="lg" on-press="toggle_play">{play_label}</button>
     <button variant="secondary" on-press="tune_out">Tune out</button>
     <button variant="secondary" on-press="vol_up" icon="volume" label="Louder"/>
+  </row>
+
+  <row gap="8" cross="center">
+    <text-field text="{station_text}" placeholder="Tune to another station (address)…" on-input="station_edit" on-submit="tune_station" grow="1"/>
+    <button variant="secondary" on-press="tune_station">Tune</button>
   </row>
 
   <status-bar>{audio_state} · {theme_id} · {listeners} listening</status-bar>

@@ -95,6 +95,14 @@ pub const Session = struct {
     messages: ?[]SessionMsg = null,
 };
 
+// settings.json on disk
+pub const Settings = struct {
+    volume: ?f32 = null,
+    skin: ?[]const u8 = null,
+    themeOverride: ?[]const u8 = null,
+    station: ?[]const u8 = null,
+};
+
 // Parse `body` into T, tolerating unknown/extra fields. Caller owns the result
 // and MUST `defer parsed.deinit()`; copy any strings before that.
 pub fn parse(comptime T: type, alloc: std.mem.Allocator, body: []const u8) !std.json.Parsed(T) {

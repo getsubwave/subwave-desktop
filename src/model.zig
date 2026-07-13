@@ -10,8 +10,6 @@ const json = @import("json.zig");
 const color = @import("color.zig");
 const spectrum = @import("spectrum.zig");
 
-const base = api.default_base;
-
 // Default listening volume on tune-in. (Decode/position/spectrum report
 // regardless of output volume; set to 0.0 to boot muted for headless runs.)
 pub const boot_volume: f32 = 0.8;
@@ -30,7 +28,10 @@ pub const keys = struct {
     pub const fetch_session: u64 = 24;
     pub const post_request: u64 = 25;
     pub const fetch_reqstat: u64 = 26;
+    pub const save_settings: u64 = 30;
 };
+
+pub const max_themes = 12;
 
 pub const Transport = enum { stopped, playing, paused };
 
@@ -41,6 +42,14 @@ pub const Skin = enum { card, deck };
 
 // ------------------------------------------------------------------ model
 pub const Model = struct {
+    // station base URL (runtime-switchable). settings_path is resolved in main()
+    // before run; stream_url_buf holds the stable URL fed to the audio effect.
+    base_buf: [256]u8 = undefined,
+    base: []const u8 = api.default_base,
+    stream_url_buf: [256]u8 = undefined,
+    settings_path_buf: [768]u8 = undefined,
+    settings_path: []const u8 = "",
+
     // now playing (slices point into the *_buf fixed buffers)
     title_buf: [512]u8 = undefined,
     artist_buf: [256]u8 = undefined,
@@ -94,6 +103,17 @@ pub const Model = struct {
     theme_scheme: color.Scheme = .light,
     theme_id_buf: [64]u8 = undefined,
     theme_id: []const u8 = "classic-light",
+    // per-listener theme override ("" = follow the station's active theme) +
+    // the catalogue of theme ids captured from /api/themes (for the cycle).
+    theme_override_buf: [64]u8 = undefined,
+    theme_override: []const u8 = "",
+    theme_ids_store: [max_themes][64]u8 = undefined,
+    theme_ids: [max_themes][]const u8 = [_][]const u8{""} ** max_themes,
+    theme_count: usize = 0,
+
+    // station switcher (TEA text field for the address) + settings scratch
+    station_buffer: canvas.TextBuffer(200) = .{},
+    settings_json_buf: [640]u8 = undefined,
 
     // song request (TEA text-field mirror + POST/poll status)
     req_buffer: canvas.TextBuffer(120) = .{},
@@ -114,10 +134,16 @@ pub const Model = struct {
     elapsed_str: []const u8 = "0:00",
     state_line: []const u8 = "",
     has_state: bool = false,
+    theme_label_buf: [80]u8 = undefined,
+    theme_label: []const u8 = "Theme: station",
 
     // The text the request field binds (derived from the edit buffer).
     pub fn req_text(self: *const Model) []const u8 {
         return self.req_buffer.text();
+    }
+    // The text the station-address field binds.
+    pub fn station_text(self: *const Model) []const u8 {
+        return self.station_buffer.text();
     }
 
     // Names read/dispatched only by update/fx (never bound in markup) — opt out
@@ -135,6 +161,11 @@ pub const Model = struct {
         "band_levels",     "req_buffer",     "retry",         "offline_streak",
         "stream_failed",   "stream_online",  "cover_sid",     "next_cover_id",
         "req_id",          "theme_scheme",   "station_colors",
+        // station / settings / theme-override state
+        "base",            "base_buf",       "stream_url_buf", "settings_path",
+        "settings_path_buf", "settings_json_buf", "station_buffer",
+        "theme_override",  "theme_override_buf", "theme_label_buf",
+        "theme_ids",       "theme_ids_store", "theme_count",
     };
 };
 
@@ -153,6 +184,7 @@ pub const Msg = union(enum) {
     got_reqpost: native_sdk.EffectResponse,
     got_reqstat: native_sdk.EffectResponse,
     tick_reqpoll: native_sdk.EffectTimer,
+    saved: native_sdk.EffectFileResult,
     audio_event: native_sdk.EffectAudio,
     toggle_play,
     tune_out,
@@ -161,12 +193,16 @@ pub const Msg = union(enum) {
     switch_skin,
     req_edit: canvas.TextInputEvent,
     submit_req,
+    station_edit: canvas.TextInputEvent,
+    tune_station,
+    cycle_theme,
 
     // Effect-result Msgs dispatched by the runtime/fx, not markup.
     pub const view_unbound = .{
         "tick_feed",   "tick_reconnect", "tick_theme",  "tick_reqpoll",
         "got_np",      "got_state",      "got_themes",  "got_cover",
         "got_session", "got_reqpost",    "got_reqstat", "audio_event",
+        "saved",
     };
 };
 
@@ -178,10 +214,13 @@ fn setStr(buf: []u8, out: *[]const u8, v: []const u8) void {
 }
 
 fn startStream(model: *Model, fx: *Effects) void {
+    // Stream URL lives in a stable model buffer (the audio effect streams from
+    // it continuously; a stack buffer could dangle).
+    const url = api.streamUrl(&model.stream_url_buf, model.base) catch return;
     fx.playAudio(.{
         .key = keys.audio,
         .path = "",
-        .url = api.streamUrl(base),
+        .url = url,
         .cache_path = "", // stream-only: endless Icecast, no disk cache
         .expected_bytes = 0,
         .on_event = Effects.audioMsg(.audio_event),
@@ -191,10 +230,13 @@ fn startStream(model: *Model, fx: *Effects) void {
     model.audio_state = "starting";
 }
 
-fn fetchFeed(fx: *Effects) void {
-    fx.fetch(.{ .key = keys.fetch_np, .url = api.nowPlaying(base), .on_response = Effects.responseMsg(.got_np) });
-    fx.fetch(.{ .key = keys.fetch_state, .url = api.state(base), .on_response = Effects.responseMsg(.got_state) });
-    fx.fetch(.{ .key = keys.fetch_session, .url = api.session(base), .on_response = Effects.responseMsg(.got_session) });
+fn fetchFeed(model: *Model, fx: *Effects) void {
+    var b1: [256]u8 = undefined;
+    var b2: [256]u8 = undefined;
+    var b3: [256]u8 = undefined;
+    if (api.nowPlaying(&b1, model.base)) |u| fx.fetch(.{ .key = keys.fetch_np, .url = u, .on_response = Effects.responseMsg(.got_np) }) else |_| {}
+    if (api.state(&b2, model.base)) |u| fx.fetch(.{ .key = keys.fetch_state, .url = u, .on_response = Effects.responseMsg(.got_state) }) else |_| {}
+    if (api.session(&b3, model.base)) |u| fx.fetch(.{ .key = keys.fetch_session, .url = u, .on_response = Effects.responseMsg(.got_session) }) else |_| {}
 }
 
 // Minimal JSON string escape for the request text (quotes/backslashes/newlines).
@@ -228,8 +270,33 @@ fn jsonEscape(buf: []u8, s: []const u8) []const u8 {
     return buf[0..w];
 }
 
-fn fetchThemes(fx: *Effects) void {
-    fx.fetch(.{ .key = keys.fetch_themes, .url = api.themes(base), .on_response = Effects.responseMsg(.got_themes) });
+fn fetchThemes(model: *Model, fx: *Effects) void {
+    var b: [256]u8 = undefined;
+    if (api.themes(&b, model.base)) |u| fx.fetch(.{ .key = keys.fetch_themes, .url = u, .on_response = Effects.responseMsg(.got_themes) }) else |_| {}
+}
+
+// Apply a settings.json blob (called at startup from settings.loadFromDisk).
+pub fn applySettingsJson(model: *Model, bytes: []const u8) void {
+    const parsed = json.parse(json.Settings, std.heap.page_allocator, bytes) catch return;
+    defer parsed.deinit();
+    const s = parsed.value;
+    if (s.volume) |v| model.volume = std.math.clamp(v, 0.0, 1.0);
+    if (s.skin) |sk| model.skin = if (std.mem.eql(u8, sk, "deck")) .deck else .card;
+    if (s.themeOverride) |t| setStr(&model.theme_override_buf, &model.theme_override, t);
+    if (s.station) |st| {
+        if (st.len > 0) {
+            if (api.normalizeBase(&model.base_buf, st)) |b| model.base = b else |_| {}
+        }
+    }
+}
+
+// Persist the current settings (async, fire-and-forget via fx.writeFile).
+fn saveSettings(model: *Model, fx: *Effects) void {
+    if (model.settings_path.len == 0) return;
+    const skin = if (model.skin == .deck) "deck" else "card";
+    if (std.fmt.bufPrint(&model.settings_json_buf, "{{\"volume\":{d:.2},\"skin\":\"{s}\",\"themeOverride\":\"{s}\",\"station\":\"{s}\"}}", .{ model.volume, skin, model.theme_override, model.base })) |body| {
+        fx.writeFile(.{ .key = keys.save_settings, .path = model.settings_path, .bytes = body, .on_result = Effects.fileMsg(.saved) });
+    } else |_| {}
 }
 
 fn scheduleReconnect(model: *Model, fx: *Effects) void {
@@ -244,8 +311,8 @@ fn scheduleReconnect(model: *Model, fx: *Effects) void {
 // ------------------------------------------------------------------ boot
 pub fn boot(model: *Model, fx: *Effects) void {
     startStream(model, fx);
-    fetchFeed(fx);
-    fetchThemes(fx);
+    fetchFeed(model, fx);
+    fetchThemes(model, fx);
     fx.startTimer(.{ .key = keys.feed_timer, .interval_ms = 5000, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_feed) });
     fx.startTimer(.{ .key = keys.theme_timer, .interval_ms = 30_000, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_theme) });
 }
@@ -254,13 +321,13 @@ pub fn boot(model: *Model, fx: *Effects) void {
 pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
     switch (msg) {
         .tick_feed => |t| {
-            if (t.outcome == .fired) fetchFeed(fx);
+            if (t.outcome == .fired) fetchFeed(model, fx);
         },
         .tick_reconnect => |t| {
             if (t.outcome == .fired and model.transport == .playing) startStream(model, fx);
         },
         .tick_theme => |t| {
-            if (t.outcome == .fired) fetchThemes(fx);
+            if (t.outcome == .fired) fetchThemes(model, fx);
         },
         .got_np => |r| {
             model.feed_count += 1;
@@ -277,7 +344,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 if (t.subsonic_id) |sid| {
                     if (sid.len > 0 and !std.mem.eql(u8, sid, model.cover_sid)) {
                         setStr(&model.cover_sid_buf, &model.cover_sid, sid);
-                        if (api.coverUrl(&model.cover_url_buf, base, sid)) |url| {
+                        if (api.coverUrl(&model.cover_url_buf, model.base, sid)) |url| {
                             fx.fetch(.{ .key = keys.fetch_cover, .url = url, .on_response = Effects.responseMsg(.got_cover) });
                         } else |_| {}
                     }
@@ -319,9 +386,29 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             const p = parsed.value;
             const active = p.active orelse return;
             const list = p.themes orelse return;
+            // Capture the theme-id catalogue for the cycle button.
+            model.theme_count = 0;
             for (list) |t| {
                 const id = t.id orelse continue;
-                if (!std.mem.eql(u8, id, active)) continue;
+                if (model.theme_count >= max_themes) break;
+                setStr(&model.theme_ids_store[model.theme_count], &model.theme_ids[model.theme_count], id);
+                model.theme_count += 1;
+            }
+            // Target = a valid override, else the station's active theme.
+            var target = active;
+            if (model.theme_override.len > 0) {
+                for (list) |t| {
+                    if (t.id) |id| {
+                        if (std.mem.eql(u8, id, model.theme_override)) {
+                            target = model.theme_override;
+                            break;
+                        }
+                    }
+                }
+            }
+            for (list) |t| {
+                const id = t.id orelse continue;
+                if (!std.mem.eql(u8, id, target)) continue;
                 const scheme: color.Scheme = if (t.mode) |m|
                     (if (std.mem.eql(u8, m, "dark")) .dark else .light)
                 else
@@ -387,11 +474,16 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 var esc_buf: [200]u8 = undefined;
                 var body_buf: [280]u8 = undefined;
                 const esc = jsonEscape(&esc_buf, text);
+                var req_url_buf: [256]u8 = undefined;
+                const req_url = api.request(&req_url_buf, model.base) catch {
+                    model.req_status = "bad station url";
+                    return;
+                };
                 if (std.fmt.bufPrint(&body_buf, "{{\"text\":\"{s}\",\"name\":\"Desktop\"}}", .{esc})) |body| {
                     fx.fetch(.{
                         .key = keys.post_request,
                         .method = .POST,
-                        .url = api.request(base),
+                        .url = req_url,
                         .headers = &.{.{ .name = "content-type", .value = "application/json" }},
                         .body = body,
                         .on_response = Effects.responseMsg(.got_reqpost),
@@ -432,7 +524,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .tick_reqpoll => |t| {
             if (t.outcome == .fired and model.req_id.len > 0) {
                 var url_buf: [256]u8 = undefined;
-                if (api.requestStatus(&url_buf, base, model.req_id)) |url| {
+                if (api.requestStatus(&url_buf, model.base, model.req_id)) |url| {
                     fx.fetch(.{ .key = keys.fetch_reqstat, .url = url, .on_response = Effects.responseMsg(.got_reqstat) });
                 } else |_| {}
             }
@@ -496,13 +588,59 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .vol_up => {
             model.volume = @min(model.volume + 0.1, 1.0);
             fx.setAudioVolume(model.volume);
+            saveSettings(model, fx);
         },
         .vol_down => {
             model.volume = @max(model.volume - 0.1, 0.0);
             fx.setAudioVolume(model.volume);
+            saveSettings(model, fx);
         },
         .switch_skin => {
             model.skin = if (model.skin == .card) .deck else .card;
+            saveSettings(model, fx);
+        },
+        .saved => {},
+        .station_edit => |edit| model.station_buffer.apply(edit),
+        .tune_station => {
+            const raw = model.station_buffer.text();
+            if (api.normalizeBase(&model.base_buf, raw)) |b| {
+                model.base = b;
+                // Re-point everything at the new station: fresh stream + feeds.
+                model.cover_id = 0;
+                model.cover_sid = "";
+                model.title = "Tuning in…";
+                model.artist = "";
+                model.album = "";
+                model.booth_line = "";
+                fx.stopAudio();
+                startStream(model, fx);
+                fetchFeed(model, fx);
+                fetchThemes(model, fx);
+                saveSettings(model, fx);
+            } else |_| {}
+        },
+        .cycle_theme => {
+            // "" (follow station) → id[0] → id[1] → … → "" .
+            if (model.theme_count == 0) {
+                // no catalogue yet
+            } else if (model.theme_override.len == 0) {
+                setStr(&model.theme_override_buf, &model.theme_override, model.theme_ids[0]);
+            } else {
+                var idx: usize = model.theme_count; // = "not found" sentinel
+                for (0..model.theme_count) |i| {
+                    if (std.mem.eql(u8, model.theme_ids[i], model.theme_override)) {
+                        idx = i;
+                        break;
+                    }
+                }
+                if (idx + 1 < model.theme_count) {
+                    setStr(&model.theme_override_buf, &model.theme_override, model.theme_ids[idx + 1]);
+                } else {
+                    model.theme_override = ""; // wrap back to follow-station
+                }
+            }
+            fetchThemes(model, fx); // re-apply with the new override
+            saveSettings(model, fx);
         },
     }
     syncDisplay(model);
@@ -551,6 +689,11 @@ fn syncDisplay(model: *Model) void {
     model.skin_label = if (model.skin == .card) "Deck view" else "Card view";
 
     model.has_booth = model.booth_line.len > 0;
+
+    model.theme_label = if (model.theme_override.len == 0)
+        "Theme: station"
+    else
+        (std.fmt.bufPrint(&model.theme_label_buf, "Theme: {s}", .{model.theme_override}) catch "Theme");
 }
 
 fn initialsFrom(buf: []u8, artist: []const u8) []const u8 {

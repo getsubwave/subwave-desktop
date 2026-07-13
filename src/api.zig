@@ -1,43 +1,54 @@
-//! Station endpoint URLs. Pure string building — the one authority on the API
-//! shape (mirrors app/src/lib/api.ts in the subwave monorepo). The base is a
-//! compile-time default for now; Phase 7 makes it runtime-configurable.
+//! Station endpoint URLs. Runtime base (so the station is switchable at
+//! runtime) — every builder writes into a caller buffer. The one authority on
+//! the API shape (mirrors app/src/lib/api.ts in the subwave monorepo).
 
 const std = @import("std");
 
 pub const default_base = "https://www.getsubwave.com";
 
-// Comptime URL builders for the fixed endpoints — no allocation, embedded in
-// the binary. Runtime-base variants land in Phase 7.
-pub fn streamUrl(comptime base: []const u8) []const u8 {
-    return base ++ "/stream.mp3";
-}
-pub fn nowPlaying(comptime base: []const u8) []const u8 {
-    return base ++ "/api/now-playing";
-}
-pub fn state(comptime base: []const u8) []const u8 {
-    return base ++ "/api/state";
-}
-pub fn themes(comptime base: []const u8) []const u8 {
-    return base ++ "/api/themes";
-}
-pub fn session(comptime base: []const u8) []const u8 {
-    return base ++ "/api/session";
-}
-pub fn schedule(comptime base: []const u8) []const u8 {
-    return base ++ "/api/schedule";
-}
-pub fn request(comptime base: []const u8) []const u8 {
-    return base ++ "/api/request";
+fn build(buf: []u8, base: []const u8, path: []const u8) ![]const u8 {
+    const b = std.mem.trimEnd(u8, base, "/");
+    return std.fmt.bufPrint(buf, "{s}{s}", .{ b, path });
 }
 
-// Runtime cover URL into `buf`: <base>/api/cover/<id>. The proxy already
-// returns a compact 300x300 JPEG (~10 KB), within the 256 KiB fetch cap and
-// the 512x512 image-registry decode limit.
-pub fn coverUrl(buf: []u8, comptime base: []const u8, id: []const u8) ![]const u8 {
-    return std.fmt.bufPrint(buf, base ++ "/api/cover/{s}", .{id});
+pub fn streamUrl(buf: []u8, base: []const u8) ![]const u8 {
+    return build(buf, base, "/stream.mp3");
+}
+pub fn nowPlaying(buf: []u8, base: []const u8) ![]const u8 {
+    return build(buf, base, "/api/now-playing");
+}
+pub fn state(buf: []u8, base: []const u8) ![]const u8 {
+    return build(buf, base, "/api/state");
+}
+pub fn themes(buf: []u8, base: []const u8) ![]const u8 {
+    return build(buf, base, "/api/themes");
+}
+pub fn session(buf: []u8, base: []const u8) ![]const u8 {
+    return build(buf, base, "/api/session");
+}
+pub fn schedule(buf: []u8, base: []const u8) ![]const u8 {
+    return build(buf, base, "/api/schedule");
+}
+pub fn request(buf: []u8, base: []const u8) ![]const u8 {
+    return build(buf, base, "/api/request");
 }
 
-// Runtime request-status URL into `buf`: <base>/api/request/<id>.
-pub fn requestStatus(buf: []u8, comptime base: []const u8, id: []const u8) ![]const u8 {
-    return std.fmt.bufPrint(buf, base ++ "/api/request/{s}", .{id});
+pub fn coverUrl(buf: []u8, base: []const u8, id: []const u8) ![]const u8 {
+    const b = std.mem.trimEnd(u8, base, "/");
+    return std.fmt.bufPrint(buf, "{s}/api/cover/{s}", .{ b, id });
+}
+pub fn requestStatus(buf: []u8, base: []const u8, id: []const u8) ![]const u8 {
+    const b = std.mem.trimEnd(u8, base, "/");
+    return std.fmt.bufPrint(buf, "{s}/api/request/{s}", .{ b, id });
+}
+
+// Normalize an operator-entered station address into a base URL: trim spaces,
+// default to https:// when no scheme, drop any trailing slash. Writes into buf.
+pub fn normalizeBase(buf: []u8, raw: []const u8) ![]const u8 {
+    var s = std.mem.trim(u8, raw, " \t\r\n");
+    s = std.mem.trimEnd(u8, s, "/");
+    if (s.len == 0) return error.EmptyBase;
+    const has_scheme = std.mem.startsWith(u8, s, "http://") or std.mem.startsWith(u8, s, "https://");
+    if (has_scheme) return std.fmt.bufPrint(buf, "{s}", .{s});
+    return std.fmt.bufPrint(buf, "https://{s}", .{s});
 }
