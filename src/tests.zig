@@ -9,6 +9,8 @@ const testing = std.testing;
 comptime {
     _ = @import("color.zig");
     _ = @import("spectrum.zig");
+    _ = @import("api.zig");
+    _ = @import("model.zig");
 }
 
 const AppUi = main.AppUi;

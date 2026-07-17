@@ -83,30 +83,23 @@ pub const Model = struct {
     cover_sid_buf: [64]u8 = undefined,
     cover_sid: []const u8 = "",
     cover_url_buf: [256]u8 = undefined,
-    initials_buf: [4]u8 = undefined,
-    initials: []const u8 = "◎",
 
     // skin (read by skins.rootView + theme.tokensFn)
     skin: Skin = .card,
-    skin_label: []const u8 = "Deck view",
 
     // transport / audio
     transport: Transport = .playing,
     volume: f32 = boot_volume,
     buffering: bool = false,
     stream_failed: bool = false,
-    audio_state: []const u8 = "idle",
     elapsed_ms: i64 = 0,
-    spectrum_events: i64 = 0,
     retry: u6 = 0,
 
-    // spectrum visualiser: displayed band levels (0..1) + a slice view the
-    // chart series binds; refreshed by syncDisplay each update.
+    // spectrum visualiser: displayed band levels (0..1); bands() is the
+    // chart-bound view.
     band_levels: [spectrum.band_count]f32 = [_]f32{0} ** spectrum.band_count,
-    bands: []const f32 = &[_]f32{},
 
     // feed bookkeeping
-    feed_count: i64 = 0,
     offline_streak: u8 = 0,
 
     // theme (read live by theme.tokensFn)
@@ -122,9 +115,14 @@ pub const Model = struct {
     theme_ids: [max_themes][]const u8 = [_][]const u8{""} ** max_themes,
     theme_count: usize = 0,
 
-    // station switcher (TEA text field for the address) + settings scratch
+    // station switcher (TEA text field for the address) + settings scratch.
+    // save_inflight/save_dirty serialize fx.writeFile calls: a second save
+    // while one is in flight would be rejected (duplicate active key), so it
+    // is deferred until the .saved result arrives.
     station_buffer: canvas.TextBuffer(200) = .{},
     settings_json_buf: [640]u8 = undefined,
+    save_inflight: bool = false,
+    save_dirty: bool = false,
 
     // schedule / station guide
     show_schedule: bool = false,
@@ -133,7 +131,6 @@ pub const Model = struct {
     show_personas_store: [max_shows][40]u8 = undefined,
     show_rows: [max_shows]ShowRow = [_]ShowRow{.{}} ** max_shows,
     show_count: usize = 0,
-    shows_list: []const ShowRow = &[_]ShowRow{},
 
     // song request (TEA text-field mirror + POST/poll status)
     req_buffer: canvas.TextBuffer(120) = .{},
@@ -144,20 +141,11 @@ pub const Model = struct {
     // booth ticker: the DJ's latest utterance
     booth_buf: [280]u8 = undefined,
     booth_line: []const u8 = "",
-    has_booth: bool = false,
 
-    // derived display fields, recomputed by syncDisplay() at the end of update
-    is_playing: bool = true,
-    play_label: []const u8 = "Pause",
-    vol_pct: i64 = 0,
-    elapsed_buf: [16]u8 = undefined,
-    elapsed_str: []const u8 = "0:00",
-    state_line: []const u8 = "",
-    has_state: bool = false,
-    theme_label_buf: [80]u8 = undefined,
-    theme_label: []const u8 = "Theme: station",
-    showing_now: bool = true,
-    schedule_label: []const u8 = "Schedule",
+    // ------------------------------------------------- derived view bindings
+    // Everything the markup shows that is computable from the state above is a
+    // method, never a cached field ("derive, don't store") — so no label can
+    // ever be stale, including before the first update runs.
 
     // The text the request field binds (derived from the edit buffer).
     pub fn req_text(self: *const Model) []const u8 {
@@ -168,6 +156,122 @@ pub const Model = struct {
         return self.station_buffer.text();
     }
 
+    pub fn play_label(self: *const Model) []const u8 {
+        return if (self.transport == .playing) "Pause" else "Play";
+    }
+
+    pub fn play_icon(self: *const Model) []const u8 {
+        return if (self.transport == .playing) "pause" else "play";
+    }
+
+    pub fn has_genre(self: *const Model) bool {
+        return self.genre.len > 0;
+    }
+
+    // The muted meta line under the artist: on-air time, then the DJ when known.
+    pub fn np_meta(self: *const Model, arena: std.mem.Allocator) []const u8 {
+        const elapsed = self.elapsed_str(arena);
+        if (self.dj.len == 0)
+            return std.fmt.allocPrint(arena, "on air {s}", .{elapsed}) catch "";
+        return std.fmt.allocPrint(arena, "on air {s} · DJ {s}", .{ elapsed, self.dj }) catch "";
+    }
+
+    pub fn vol_pct(self: *const Model) i64 {
+        return @intFromFloat(@round(self.volume * 100));
+    }
+
+    // Player-elapsed as m:ss, rolling to h:mm:ss past the hour (radio sessions
+    // easily exceed 60 minutes).
+    pub fn elapsed_str(self: *const Model, arena: std.mem.Allocator) []const u8 {
+        const total_secs: u64 = @intCast(@max(0, @divTrunc(self.elapsed_ms, 1000)));
+        const hours = total_secs / 3600;
+        const mins = (total_secs / 60) % 60;
+        const secs = total_secs % 60;
+        if (hours > 0)
+            return std.fmt.allocPrint(arena, "{d}:{d:0>2}:{d:0>2}", .{ hours, mins, secs }) catch "0:00";
+        return std.fmt.allocPrint(arena, "{d}:{d:0>2}", .{ mins, secs }) catch "0:00";
+    }
+
+    // Transient state banner (priority: failure > buffering > offline > idle).
+    pub fn state_line(self: *const Model) []const u8 {
+        if (self.stream_failed) return "STREAM LOST — reconnecting…";
+        if (self.buffering) return "BUFFERING…";
+        if (!self.stream_online) return "OFF AIR";
+        return switch (self.transport) {
+            .paused => "PAUSED",
+            .stopped => "TUNED OUT",
+            .playing => "",
+        };
+    }
+
+    pub fn has_state(self: *const Model) bool {
+        return self.state_line().len > 0;
+    }
+
+    // Disc initials fallback: up to two leading letters of the artist.
+    pub fn initials(self: *const Model, arena: std.mem.Allocator) []const u8 {
+        const out = arena.alloc(u8, 2) catch return "◎";
+        var n: usize = 0;
+        for (self.artist) |ch| {
+            if (std.ascii.isAlphabetic(ch)) {
+                out[n] = std.ascii.toUpper(ch);
+                n += 1;
+                if (n >= 2) break;
+            }
+        }
+        if (n == 0) return "◎";
+        return out[0..n];
+    }
+
+    // Label for the skin-switch button (names the OTHER skin).
+    pub fn skin_label(self: *const Model) []const u8 {
+        return if (self.skin == .card) "Deck view" else "Card view";
+    }
+
+    pub fn has_booth(self: *const Model) bool {
+        return self.booth_line.len > 0;
+    }
+
+    pub fn theme_label(self: *const Model, arena: std.mem.Allocator) []const u8 {
+        if (self.theme_override.len == 0) return "Theme: station";
+        return std.fmt.allocPrint(arena, "Theme: {s}", .{self.theme_override}) catch "Theme";
+    }
+
+    pub fn showing_now(self: *const Model) bool {
+        return !self.show_schedule;
+    }
+
+    pub fn schedule_label(self: *const Model) []const u8 {
+        return if (self.show_schedule) "Now playing" else "Schedule";
+    }
+
+    // The chart-bound spectrum series.
+    pub fn bands(self: *const Model) []const f32 {
+        return self.band_levels[0..];
+    }
+
+    // Schedule rows with the on-air show flagged live.
+    pub fn shows_list(self: *const Model, arena: std.mem.Allocator) []const ShowRow {
+        const out = arena.alloc(ShowRow, self.show_count) catch return &.{};
+        for (out, self.show_rows[0..self.show_count]) |*row, src| {
+            row.* = src;
+            row.live = self.show.len > 0 and std.mem.eql(u8, src.name, self.show);
+        }
+        return out;
+    }
+
+    // One-word transport status for the status bar.
+    pub fn status_word(self: *const Model) []const u8 {
+        if (self.stream_failed) return "reconnecting";
+        if (self.buffering) return "buffering";
+        if (!self.stream_online) return "off air";
+        return switch (self.transport) {
+            .paused => "paused",
+            .stopped => "tuned out",
+            .playing => "live",
+        };
+    }
+
     // Names read/dispatched only by update/fx (never bound in markup) — opt out
     // of the dead-state lint. Effect-result Msgs, backing buffers, and internal
     // or derived-source state.
@@ -175,22 +279,23 @@ pub const Model = struct {
         // fixed backing buffers behind the bound slice fields
         "title_buf",       "artist_buf",     "album_buf",     "genre_buf",
         "dj_buf",          "show_buf",       "cover_sid_buf", "cover_url_buf",
-        "initials_buf",    "theme_id_buf",   "elapsed_buf",   "req_id_buf",
-        "booth_buf",
+        "theme_id_buf",    "req_id_buf",     "booth_buf",
         // internal / derived-source state
         "skin",            "transport",      "volume",        "buffering",
-        "feed_count",      "is_playing",     "elapsed_ms",    "spectrum_events",
-        "band_levels",     "req_buffer",     "retry",         "offline_streak",
-        "stream_failed",   "stream_online",  "cover_sid",     "next_cover_id",
-        "req_id",          "theme_scheme",   "station_colors",
+        "elapsed_ms",      "band_levels",    "req_buffer",    "retry",
+        "offline_streak",  "stream_failed",  "stream_online", "cover_sid",
+        "next_cover_id",   "req_id",         "theme_scheme",  "station_colors",
         // station / settings / theme-override state
         "base",            "base_buf",       "stream_url_buf", "settings_path",
         "settings_path_buf", "settings_json_buf", "station_buffer",
-        "theme_override",  "theme_override_buf", "theme_label_buf",
+        "theme_override",  "theme_override_buf",
         "theme_ids",       "theme_ids_store", "theme_count",
+        "save_inflight",   "save_dirty",
+        // consumed by derived methods (np_meta), not bound directly in markup
+        "elapsed_str",     "dj",
         // schedule / guide backing storage
         "show_names_store", "show_topics_store", "show_personas_store",
-        "show_rows",        "show_count",        "show_schedule",
+        "show_rows",        "show_count",
     };
 };
 
@@ -235,7 +340,12 @@ pub const Msg = union(enum) {
 
 // ---------------------------------------------------------------- helpers
 fn setStr(buf: []u8, out: *[]const u8, v: []const u8) void {
-    const n = @min(v.len, buf.len);
+    var n = @min(v.len, buf.len);
+    // Never truncate mid-codepoint: back off past any UTF-8 continuation bytes
+    // so the copy stays valid UTF-8.
+    if (n < v.len) {
+        while (n > 0 and v[n] & 0xC0 == 0x80) n -= 1;
+    }
     @memcpy(buf[0..n], v[0..n]);
     out.* = buf[0..n];
 }
@@ -254,7 +364,6 @@ fn startStream(model: *Model, fx: *Effects) void {
     });
     fx.setAudioVolume(model.volume);
     model.transport = .playing;
-    model.audio_state = "starting";
 }
 
 fn fetchFeed(model: *Model, fx: *Effects) void {
@@ -287,7 +396,8 @@ fn jsonEscape(buf: []u8, s: []const u8) []const u8 {
                 buf[w + 1] = 'n';
                 w += 2;
             },
-            '\r', '\t' => {},
+            // Any other control byte would make the JSON body invalid — drop it.
+            0x00...0x09, 0x0b...0x1f => {},
             else => {
                 buf[w] = ch;
                 w += 1;
@@ -322,12 +432,20 @@ pub fn applySettingsJson(model: *Model, bytes: []const u8) void {
     }
 }
 
-// Persist the current settings (async, fire-and-forget via fx.writeFile).
+// Persist the current settings (async via fx.writeFile). While a write is in
+// flight further saves set save_dirty; the .saved result re-saves once, so the
+// last state always lands on disk (a concurrent writeFile on the same key
+// would be rejected).
 fn saveSettings(model: *Model, fx: *Effects) void {
     if (model.settings_path.len == 0) return;
+    if (model.save_inflight) {
+        model.save_dirty = true;
+        return;
+    }
     const skin = if (model.skin == .deck) "deck" else "card";
     if (std.fmt.bufPrint(&model.settings_json_buf, "{{\"volume\":{d:.2},\"skin\":\"{s}\",\"themeOverride\":\"{s}\",\"station\":\"{s}\"}}", .{ model.volume, skin, model.theme_override, model.base })) |body| {
         fx.writeFile(.{ .key = keys.save_settings, .path = model.settings_path, .bytes = body, .on_result = Effects.fileMsg(.saved) });
+        model.save_inflight = true;
     } else |_| {}
 }
 
@@ -363,7 +481,6 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (t.outcome == .fired) fetchThemes(model, fx);
         },
         .got_np => |r| {
-            model.feed_count += 1;
             if (r.outcome != .ok or r.status != 200) return;
             const parsed = json.parse(json.NowPlaying, std.heap.page_allocator, r.body) catch return;
             defer parsed.deinit();
@@ -409,8 +526,17 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (r.outcome != .ok or r.status != 200) return;
             const parsed = json.parse(json.StationState, std.heap.page_allocator, r.body) catch return;
             defer parsed.deinit();
-            // The active theme id also rides /api/state; the token maps come
-            // from /api/themes (got_themes), so nothing to apply here yet.
+            // The active theme id rides /api/state on the 5 s feed cadence; the
+            // token maps come from /api/themes (30 s poll). When the station
+            // flips its theme, refresh the tokens right away instead of waiting
+            // out the slow poll (unless a listener override pins the theme).
+            if (parsed.value.theme) |t| {
+                if (t.active) |active| {
+                    if (model.theme_override.len == 0 and !std.mem.eql(u8, active, model.theme_id)) {
+                        fetchThemes(model, fx);
+                    }
+                }
+            }
         },
         .got_themes => |r| {
             if (r.outcome != .ok or r.status != 200) return;
@@ -524,7 +650,6 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     }
                 }
                 setStr(&model.show_personas_store[i], &model.show_rows[i].persona, persona_name);
-                model.show_rows[i].live = false;
                 model.show_count += 1;
             }
         },
@@ -609,7 +734,6 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             }
         },
         .audio_event => |e| {
-            model.audio_state = @tagName(e.kind);
             switch (e.kind) {
                 .loaded => {
                     model.stream_failed = false;
@@ -622,13 +746,14 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     model.retry = 0;
                 },
                 .spectrum => {
-                    model.spectrum_events += 1;
                     spectrum.step(&model.band_levels, e.bands[0..], 0.06);
                 },
-                .failed, .rejected => {
+                // An endless Icecast stream never completes naturally — a
+                // .completed means the server closed the connection, so it
+                // reconnects exactly like a failure.
+                .failed, .rejected, .completed => {
                     if (model.transport == .playing) scheduleReconnect(model, fx);
                 },
-                .completed => {},
             }
         },
         .toggle_play => {
@@ -639,15 +764,20 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     model.transport = .paused;
                 },
                 .paused => {
-                    fx.resumeAudio();
-                    model.transport = .playing;
+                    // If the stream died while paused there is nothing to
+                    // resume — reconnect instead.
+                    if (model.stream_failed) {
+                        startStream(model, fx);
+                    } else {
+                        fx.resumeAudio();
+                        model.transport = .playing;
+                    }
                 },
             }
         },
         .tune_out => {
             fx.stopAudio();
             model.transport = .stopped;
-            model.audio_state = "stopped";
         },
         .vol_up => {
             model.volume = @min(model.volume + 0.1, 1.0);
@@ -663,23 +793,42 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.skin = if (model.skin == .card) .deck else .card;
             saveSettings(model, fx);
         },
-        .saved => {},
+        .saved => {
+            model.save_inflight = false;
+            if (model.save_dirty) {
+                model.save_dirty = false;
+                saveSettings(model, fx);
+            }
+        },
         .station_edit => |edit| model.station_buffer.apply(edit),
         .tune_station => {
             const raw = model.station_buffer.text();
             if (api.normalizeBase(&model.base_buf, raw)) |b| {
                 model.base = b;
-                // Re-point everything at the new station: fresh stream + feeds.
+                // Re-point everything at the new station: fresh stream + feeds,
+                // nothing left over from the old one.
+                if (model.cover_id != 0) _ = fx.unregisterImage(model.cover_id);
                 model.cover_id = 0;
                 model.cover_sid = "";
                 model.title = "Tuning in…";
                 model.artist = "";
                 model.album = "";
+                model.genre = "";
+                model.dj = "";
+                model.show = "";
+                model.listeners = 0;
                 model.booth_line = "";
+                model.show_count = 0;
+                model.req_id = "";
+                model.req_status = "";
+                model.stream_failed = false;
+                model.retry = 0;
+                fx.cancelTimer(keys.reconnect);
                 fx.stopAudio();
                 startStream(model, fx);
                 fetchFeed(model, fx);
                 fetchThemes(model, fx);
+                fetchSchedule(model, fx);
                 saveSettings(model, fx);
             } else |_| {}
         },
@@ -707,81 +856,62 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             saveSettings(model, fx);
         },
     }
-    syncDisplay(model);
-}
-
-// Recompute the markup-bound display fields from state. One place, called after
-// every update, so the view never reads a stale label.
-fn syncDisplay(model: *Model) void {
-    model.is_playing = model.transport == .playing;
-    model.play_label = if (model.transport == .playing) "Pause" else "Play";
-    model.vol_pct = @intFromFloat(@round(model.volume * 100));
-    const mins = @divTrunc(model.elapsed_ms, 60_000);
-    const secs = @mod(@divTrunc(model.elapsed_ms, 1000), 60);
-    model.elapsed_str = (if (secs < 10)
-        std.fmt.bufPrint(&model.elapsed_buf, "{d}:0{d}", .{ mins, secs })
-    else
-        std.fmt.bufPrint(&model.elapsed_buf, "{d}:{d}", .{ mins, secs })) catch "0:00";
-    // Point the chart-bound slice at the (stable, heap-allocated) band array.
-    model.bands = model.band_levels[0..];
-
-    // Transient state banner (priority: failure > buffering > offline > paused).
-    if (model.stream_failed) {
-        model.state_line = "STREAM LOST — reconnecting…";
-        model.has_state = true;
-    } else if (model.buffering) {
-        model.state_line = "BUFFERING…";
-        model.has_state = true;
-    } else if (!model.stream_online) {
-        model.state_line = "OFF AIR";
-        model.has_state = true;
-    } else if (model.transport == .paused) {
-        model.state_line = "PAUSED";
-        model.has_state = true;
-    } else if (model.transport == .stopped) {
-        model.state_line = "TUNED OUT";
-        model.has_state = true;
-    } else {
-        model.state_line = "";
-        model.has_state = false;
-    }
-
-    // Disc initials fallback: up to two leading letters of the artist.
-    model.initials = initialsFrom(&model.initials_buf, model.artist);
-
-    // Label for the skin-switch button (names the OTHER skin).
-    model.skin_label = if (model.skin == .card) "Deck view" else "Card view";
-
-    model.has_booth = model.booth_line.len > 0;
-
-    model.theme_label = if (model.theme_override.len == 0)
-        "Theme: station"
-    else
-        (std.fmt.bufPrint(&model.theme_label_buf, "Theme: {s}", .{model.theme_override}) catch "Theme");
-
-    model.showing_now = !model.show_schedule;
-    model.schedule_label = if (model.show_schedule) "Now playing" else "Schedule";
-
-    // Schedule list: publish the filled rows and flag the on-air show.
-    model.shows_list = model.show_rows[0..model.show_count];
-    for (0..model.show_count) |i| {
-        model.show_rows[i].live = model.show.len > 0 and std.mem.eql(u8, model.show_rows[i].name, model.show);
-    }
-}
-
-fn initialsFrom(buf: []u8, artist: []const u8) []const u8 {
-    var n: usize = 0;
-    for (artist) |ch| {
-        if (std.ascii.isAlphabetic(ch)) {
-            buf[n] = std.ascii.toUpper(ch);
-            n += 1;
-            if (n >= 2) break;
-        }
-    }
-    if (n == 0) return "◎";
-    return buf[0..n];
 }
 
 pub fn initialModel() Model {
     return .{};
+}
+
+// -------------------------------------------------------------- tests
+const testing = std.testing;
+
+test "elapsed_str rolls to h:mm:ss past the hour" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var m: Model = .{};
+    m.elapsed_ms = 754_000; // 12:34
+    try testing.expectEqualStrings("12:34", m.elapsed_str(arena));
+    m.elapsed_ms = 5_025_000; // 1:23:45
+    try testing.expectEqualStrings("1:23:45", m.elapsed_str(arena));
+    m.elapsed_ms = 9_000; // 0:09
+    try testing.expectEqualStrings("0:09", m.elapsed_str(arena));
+}
+
+test "initials take the artist's first two letters, with a fallback" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var m: Model = .{};
+    m.artist = "the Midnight";
+    try testing.expectEqualStrings("TH", m.initials(arena));
+    m.artist = "";
+    try testing.expectEqualStrings("◎", m.initials(arena));
+}
+
+test "state banner priority: failure > buffering > offline > paused" {
+    var m: Model = .{};
+    try testing.expect(!m.has_state()); // playing + online: no banner
+    m.transport = .paused;
+    try testing.expectEqualStrings("PAUSED", m.state_line());
+    m.stream_online = false;
+    try testing.expectEqualStrings("OFF AIR", m.state_line());
+    m.buffering = true;
+    try testing.expectEqualStrings("BUFFERING…", m.state_line());
+    m.stream_failed = true;
+    try testing.expectEqualStrings("STREAM LOST — reconnecting…", m.state_line());
+}
+
+test "setStr never splits a UTF-8 codepoint on truncation" {
+    var buf: [5]u8 = undefined;
+    var out: []const u8 = "";
+    setStr(&buf, &out, "ab날개"); // 2 + 3 + 3 bytes; byte cut would land mid-'날'
+    try testing.expectEqualStrings("ab날", out);
+    try testing.expect(std.unicode.utf8ValidateSlice(out));
+}
+
+test "jsonEscape escapes quotes and drops raw control bytes" {
+    var buf: [32]u8 = undefined;
+    try testing.expectEqualStrings("say \\\"hi\\\"\\n", jsonEscape(&buf, "say \"hi\"\n"));
+    try testing.expectEqualStrings("ab", jsonEscape(&buf, "a\x01b\r"));
 }

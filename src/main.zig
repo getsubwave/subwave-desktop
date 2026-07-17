@@ -17,7 +17,7 @@ const geometry = native_sdk.geometry;
 
 const canvas_label = "main-canvas";
 const window_width: f32 = 620;
-const window_height: f32 = 400;
+const window_height: f32 = 460;
 
 // Re-exports for tests.zig.
 pub const Model = model.Model;

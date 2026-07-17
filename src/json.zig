@@ -36,16 +36,11 @@ pub const NowPlaying = struct {
     streamOnline: ?bool = null,
 };
 
-pub const Current = struct {
-    startedAt: ?[]const u8 = null,
-};
-
 pub const Theme = struct {
     active: ?[]const u8 = null,
 };
 
 pub const StationState = struct {
-    current: ?Current = null,
     theme: ?Theme = null,
 };
 

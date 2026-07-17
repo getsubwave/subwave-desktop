@@ -52,3 +52,18 @@ pub fn normalizeBase(buf: []u8, raw: []const u8) ![]const u8 {
     if (has_scheme) return std.fmt.bufPrint(buf, "{s}", .{s});
     return std.fmt.bufPrint(buf, "https://{s}", .{s});
 }
+
+const testing = std.testing;
+
+test "normalizeBase defaults the scheme and drops trailing slashes" {
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("https://radio.example", try normalizeBase(&buf, "  radio.example/ "));
+    try testing.expectEqualStrings("http://localhost:3000", try normalizeBase(&buf, "http://localhost:3000/"));
+    try testing.expectError(error.EmptyBase, normalizeBase(&buf, "  / "));
+}
+
+test "url builders join base and path" {
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("https://x.test/stream.mp3", try streamUrl(&buf, "https://x.test/"));
+    try testing.expectEqualStrings("https://x.test/api/cover/ab12", try coverUrl(&buf, "https://x.test", "ab12"));
+}
