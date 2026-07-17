@@ -351,6 +351,10 @@ fn setStr(buf: []u8, out: *[]const u8, v: []const u8) void {
 }
 
 fn startStream(model: *Model, fx: *Effects) void {
+    // A manual (re)start supersedes any scheduled reconnect — otherwise a
+    // pending backoff timer would fire later and restart the fresh stream
+    // mid-listen a second time.
+    fx.cancelTimer(keys.reconnect);
     // Stream URL lives in a stable model buffer (the audio effect streams from
     // it continuously; a stack buffer could dangle).
     const url = api.streamUrl(&model.stream_url_buf, model.base) catch return;
@@ -494,6 +498,13 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 if (t.subsonic_id) |sid| {
                     if (sid.len > 0 and !std.mem.eql(u8, sid, model.cover_sid)) {
                         setStr(&model.cover_sid_buf, &model.cover_sid, sid);
+                        // Drop the previous track's art right away — the
+                        // initials disc is honest while the new cover loads,
+                        // and stays honest if the fetch fails or truncates.
+                        if (model.cover_id != 0) {
+                            _ = fx.unregisterImage(model.cover_id);
+                            model.cover_id = 0;
+                        }
                         if (api.coverUrl(&model.cover_url_buf, model.base, sid)) |url| {
                             fx.fetch(.{ .key = keys.fetch_cover, .url = url, .on_response = Effects.responseMsg(.got_cover) });
                         } else |_| {}
@@ -719,6 +730,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             }
         },
         .got_reqstat => |r| {
+            // A late status for a request the model already dropped (station
+            // switch) must not resurrect the ticker.
+            if (model.req_id.len == 0) return;
             if (r.outcome != .ok or r.status != 200) return;
             const parsed = json.parse(json.RequestStatus, std.heap.page_allocator, r.body) catch return;
             defer parsed.deinit();
@@ -777,7 +791,14 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .tune_out => {
             fx.stopAudio();
+            // Tuning out ends any reconnect story: without this a prior
+            // failure would keep the "STREAM LOST — reconnecting…" banner up
+            // over a deliberately stopped player.
+            fx.cancelTimer(keys.reconnect);
             model.transport = .stopped;
+            model.stream_failed = false;
+            model.buffering = false;
+            model.retry = 0;
         },
         .vol_up => {
             model.volume = @min(model.volume + 0.1, 1.0);
@@ -823,6 +844,19 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 model.req_status = "";
                 model.stream_failed = false;
                 model.retry = 0;
+                // Cancel everything still in flight for the OLD station so a
+                // late response can't repopulate the fresh state (a cancelled
+                // fetch delivers a non-ok outcome, which every handler
+                // already ignores).
+                fx.cancel(keys.fetch_np);
+                fx.cancel(keys.fetch_state);
+                fx.cancel(keys.fetch_session);
+                fx.cancel(keys.fetch_themes);
+                fx.cancel(keys.fetch_cover);
+                fx.cancel(keys.fetch_schedule);
+                fx.cancel(keys.post_request);
+                fx.cancel(keys.fetch_reqstat);
+                fx.cancelTimer(keys.request_poll);
                 fx.cancelTimer(keys.reconnect);
                 fx.stopAudio();
                 startStream(model, fx);
@@ -908,6 +942,21 @@ test "setStr never splits a UTF-8 codepoint on truncation" {
     setStr(&buf, &out, "ab날개"); // 2 + 3 + 3 bytes; byte cut would land mid-'날'
     try testing.expectEqualStrings("ab날", out);
     try testing.expect(std.unicode.utf8ValidateSlice(out));
+}
+
+test "tune_out clears the failure banner, not just the transport" {
+    var fx = Effects.init(testing.allocator);
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.transport = .playing;
+    m.stream_failed = true;
+    m.buffering = true;
+    m.retry = 3;
+    update(&m, .tune_out, &fx);
+    try testing.expectEqual(Transport.stopped, m.transport);
+    try testing.expect(!m.stream_failed);
+    try testing.expectEqualStrings("TUNED OUT", m.state_line());
+    try testing.expectEqualStrings("tuned out", m.status_word());
 }
 
 test "jsonEscape escapes quotes and drops raw control bytes" {

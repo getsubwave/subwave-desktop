@@ -22,6 +22,16 @@ repo from the main `subwave` monorepo; it tracks the same station HTTP API.
   strip), switchable at runtime; both honor the station theme.
 - **Song requests** — a text field posts to `/api/request` and polls the result.
 - **Booth ticker** — the DJ's latest on-air line from `/api/session`.
+- **Station guide** — `/api/schedule` show list with topics, personas, and a
+  live-show dot, toggled from the header.
+- **Settings persistence** — volume/skin/theme-override/station survive
+  restarts (`settings.json` in the OS per-app config dir); the window shape
+  follows the saved skin at launch (Card 620×460, Deck 540×300).
+- **Menu-bar extra** — a status item (macOS `NSStatusItem`) with the live
+  now-playing lines and Play/Pause + Tune out, so the player is controllable
+  while the window is buried.
+- **Keyboard transport** — space = play/pause, ↑/↓ = volume (app-level
+  fallback; never steals typing from the request/station fields).
 
 ## Layout
 
@@ -65,20 +75,48 @@ native build -Dautomation=true
 native automate wait && native automate screenshot main-canvas
 ```
 
-## Notes & follow-ups
+## Codecs & platform integration (current status)
+
+**Stream codec: MP3 only, by design.** The player tunes the station's
+`/stream.mp3` mount; Opus/FLAC/AAC mounts are out of scope for v1 (see
+`docs/…plan.md`). If that changes, backend support is:
+
+| Codec over Icecast | macOS (AVPlayer) | Linux (GStreamer `playbin`) |
+|---|---|---|
+| MP3 | ✅ | ✅ |
+| AAC (ADTS) | ✅ | ✅ where `gst-plugins-bad`/`libav` present |
+| Ogg Opus | ❌ not supported by AVFoundation | ✅ (`gst-plugins-base`) |
+| FLAC | ❌ no endless-stream FLAC | ✅ (`gst-plugins-good`) |
+
+**OS media integration.** The SDK (0.5.1) has no system now-playing or
+media-key surface — no `MPNowPlayingInfoCenter`/`MPRemoteCommandCenter` on
+macOS, no MPRIS on Linux — so hardware play/pause keys and the OS Now Playing
+widget can't be wired up yet (SDK feature request). What IS wired up: the
+menu-bar status item (tray on Linux where supported), the in-window keyboard
+transport, and per-track fetch of the station's own metadata (the app polls
+`/api/now-playing` rather than relying on ICY in-stream metadata).
+
+## Notes & gotchas
 
 - **Audio playback works on Linux** (GTK + GStreamer) in this SDK build, despite
-  the docs marking GTK/Win32 audio as unsupported. macOS uses AVFoundation.
-- `model.zig` `boot_volume` is **0.0** (muted) so automated runs don't play out
-  loud — set it to `0.8` for real listening. Audio still decodes; the spectrum
-  and elapsed still report while muted.
+  the docs marking GTK/Win32 audio as unsupported. macOS uses AVFoundation
+  (one `AVPlayer` + `MTAudioProcessingTap` for the spectrum feed).
+- `model.zig` `boot_volume` defaults to **0.8**; the persisted volume from
+  `settings.json` wins after first run. Decode/position/spectrum report even
+  at volume 0.
 - **Gotcha:** a `/` in the *scene* window title crashes GTK at `app_start`; keep
   the branded slash out of `app.zon`/`shell_windows` titles (it's fine in
   `runWithOptions.window_title`).
-- **Not yet done:** settings persistence (skin/volume across restarts — the SDK's
-  config-dir path story in the TEA model needs sorting), a runtime station
-  switcher UI (the base URL is a compile-time default today; the API contract is
-  fully factored in `api.zig` for a runtime refactor), a per-skin window shape
-  (Deck as a chromeless strip window), and a branded disc icon.
+- The SDK can't resize a live window: a runtime skin switch relays out in the
+  old shape; the per-skin window shape applies at next launch.
+
+## Shipping checklist
+
+- `native package --target macos --output dist` builds the `.app`;
+  sign + notarize with a Developer ID identity (the CLI wraps
+  `codesign`/`notarytool`). Linux: `native package --target linux`.
+- Not yet done for release: CI (a `native check && native test` workflow),
+  auto-update (out of scope v1), crash reporting beyond the SDK's panic
+  capture, and a version bump past `0.1.0` in `app.zon`.
 
 Design + plan live under `docs/`.
