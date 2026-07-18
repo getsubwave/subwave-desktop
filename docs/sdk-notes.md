@@ -9,7 +9,11 @@ native test   # verify
 
 The unified diff lives at `patches/native-sdk-local.patch` (generated against
 the pristine 0.5.3 npm tarball; if a future SDK version shifts the context
-lines, regenerate it from the sections below). Symptoms of lost patches:
+lines, regenerate it from the sections below). Reported upstream — drop each
+patch once its fix ships: quota bug in
+[vercel-labs/native#148](https://github.com/vercel-labs/native/issues/148),
+close-policy + tray commands in
+[vercel-labs/native#149](https://github.com/vercel-labs/native/issues/149). Symptoms of lost patches:
 `native build` fails at ui_markup.zig ~line 1014, and/or the red close
 button quits the app.
 
