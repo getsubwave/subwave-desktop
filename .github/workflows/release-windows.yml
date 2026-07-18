@@ -1,0 +1,116 @@
+# Attach the Windows x64 zip to a published GitHub release.
+#
+# scripts/make-release.sh cross-compiles Windows from the Mac, which produces a
+# binary nobody has ever run: the release notes have carried a "cross-compiled,
+# not yet tested on real hardware" caveat since v0.1.0. This builds NATIVELY on
+# a Windows runner and then launches the app under the SDK's automation harness,
+# so the caveat can come out.
+#
+# The smoke test gates the upload on purpose. A Windows binary that cannot start
+# is not something to hand to listeners, and shipping it silently is exactly the
+# failure the caveat was apologising for.
+name: Release (Windows)
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to attach the Windows build to (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Resolve and validate tag
+        id: tag
+        # The tag reaches both a shell and actions/checkout's `ref:`, so it goes
+        # through env rather than straight interpolation, and is rejected unless
+        # it matches a strict vMAJOR.MINOR.PATCH shape. Git permits `$`, `(`,
+        # `)` and `;` in ref names.
+        env:
+          RAW_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          if ! printf '%s' "$RAW_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$'; then
+            echo "error: refusing tag '$RAW_TAG' — expected vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+          echo "tag=$RAW_TAG" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - uses: ./.github/actions/setup-native
+
+      - name: Verify tag matches app.zon version
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          version="$(sed -n 's/.*\.version = "\([^"]*\)".*/\1/p' app.zon | head -1)"
+          [ -n "$version" ] || { echo "error: could not read .version from app.zon" >&2; exit 1; }
+          if [ "v$version" != "$TAG" ]; then
+            echo "error: tag $TAG does not match app.zon version $version (expected v$version)" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_ENV"
+
+      - name: Test
+        run: native test
+
+      - name: Build and package
+        run: |
+          native build
+          native package --target windows --binary zig-out/bin/subwave-desktop.exe
+          test -f zig-out/package/subwave-desktop-windows/subwave-desktop.exe
+
+      - name: Create zip
+        run: |
+          mkdir -p dist
+          winzip="dist/SUBWAVE-Player-${version}-windows-x64.zip"
+          # Compress-Archive rather than `zip`, which git-bash does not ship.
+          powershell -NoProfile -Command "Compress-Archive -Force -Path 'zig-out/package/subwave-desktop-windows' -DestinationPath '${winzip}'"
+          ls -lh "$winzip"
+          echo "winzip=$winzip" >> "$GITHUB_ENV"
+
+      - name: Smoke-test on real Windows
+        # The whole reason this job runs on windows-latest instead of
+        # cross-compiling. Rebuilds with the automation harness (the shipped zip
+        # is already sealed above, so this binary never reaches anyone) and
+        # waits for the app to report ready.
+        #
+        # UNPROVEN: GitHub's Windows runners execute in a service session, and
+        # the app opens a GPU surface. If `automate wait` turns out to be
+        # unreachable there, narrow this to a launch-and-survive check rather
+        # than deleting it.
+        timeout-minutes: 6
+        run: |
+          native build -Dautomation=true
+          ./zig-out/bin/subwave-desktop.exe &
+          app_pid=$!
+          if native automate wait; then
+            echo "app reported ready on Windows"
+          else
+            echo "error: app did not come up under automation" >&2
+            kill "$app_pid" 2>/dev/null || true
+            exit 1
+          fi
+          kill "$app_pid" 2>/dev/null || true
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          gh release upload "$TAG" --clobber \
+            "${winzip}#SUBWAVE Player ${version} (Windows x64)"
+          gh release view "$TAG" --json assets --jq '.assets[].name'

@@ -152,21 +152,40 @@ transport, and per-track fetch of the station's own metadata (the app polls
 
 ## Shipping checklist
 
-- `./scripts/make-release.sh --publish` cuts the release from a Mac: macOS DMG
-  (signed; ad-hoc unless `SIGN_IDENTITY` is set) plus a cross-compiled Windows
-  x64 zip, then creates the GitHub release.
-- Linux rides in on CI. `.github/workflows/release-linux.yml` fires on
-  `release: published`, builds on `ubuntu-24.04` and uploads a
-  `-linux-x64.tar.gz` onto the same release. It cannot be cross-compiled from
-  the Mac — the binary links the GTK4 system stack (113 shared libraries,
-  nothing bundled), so it has to be built on Linux. The runner pin is load
-  bearing: ubuntu-22.04's GTK 4.6 would compile the fractional-HiDPI fix out
-  (it is gated on GTK 4.12+) and ship pixelated text.
-- Linux artifact requirements: glibc 2.39+ and GTK4 installed — so Ubuntu
-  24.04+, Fedora 40+, Arch; **not** Ubuntu 22.04 or Debian 12. Those build
-  from source.
-- Not yet done for release: a CI check on every push (the Linux workflow only
-  runs at release time), auto-update (out of scope v1), crash reporting beyond
-  the SDK's panic capture, and a version bump past `0.1.0` in `app.zon`.
+All three artifacts are built by CI. Publishing a GitHub release fires
+`release: published`, and one workflow per platform builds, verifies and
+uploads its asset onto that release:
+
+| Workflow | Runner | Asset | Notes |
+| --- | --- | --- | --- |
+| `release-macos.yml` | `macos-15` | `.dmg` | ad-hoc signed, so first launch needs right-click → Open |
+| `release-windows.yml` | `windows-latest` | `-windows-x64.zip` | built and launched on real Windows |
+| `release-linux.yml` | `ubuntu-24.04` | `-linux-x64.tar.gz` | needs glibc 2.39+ and GTK4 |
+
+Each one applies the local SDK patches before building
+(`scripts/apply-sdk-patches.sh`), so a release cannot ship without them, and
+each refuses to run if the tag disagrees with `.version` in `app.zon`. Shared
+toolchain setup and the Zig/SDK version pins live in
+`.github/actions/setup-native`.
+
+Two runner pins are deliberate. `ubuntu-24.04` because Linux can't be
+cross-compiled (the binary links the GTK4 system stack, 113 shared libraries,
+nothing bundled) and because ubuntu-22.04's GTK 4.6 would compile the
+fractional-HiDPI fix out — it's gated on GTK 4.12+ — and quietly ship
+pixelated text. `windows-latest` because building there means the app is
+actually launched on Windows under `-Dautomation=true` rather than
+cross-compiled and hoped for.
+
+`./scripts/make-release.sh --publish` still cuts a release by hand from a Mac
+and remains the way to do it locally; CI then rebuilds and re-uploads the same
+assets.
+
+Linux reach: Ubuntu 24.04+, Fedora 40+, Arch. **Not** Ubuntu 22.04 or
+Debian 12 (glibc 2.35/2.36) — those build from source.
+
+Not yet done for release: a CI check on every push (these only run at release
+time), signing macOS with a real Developer ID and notarizing, auto-update (out
+of scope v1), crash reporting beyond the SDK's panic capture, and a version
+bump past `0.1.0` in `app.zon`.
 
 Design + plan live under `docs/`.

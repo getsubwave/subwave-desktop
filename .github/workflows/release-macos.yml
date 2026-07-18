@@ -1,0 +1,104 @@
+# Attach the macOS DMG to a published GitHub release.
+#
+# This mirrors the macOS half of scripts/make-release.sh so a release no longer
+# requires a Mac to be powered on. The script stays the way to cut one by hand.
+#
+# Signing is ad-hoc, matching what the script does by default and therefore
+# what ships today: users get the right-click -> Open dance on first launch.
+# Moving to a real Developer ID identity means putting the .p12 and an App
+# Store Connect key into repository secrets and doing keychain setup here
+# first; until then, do not claim the DMG is notarized.
+name: Release (macOS)
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to attach the macOS build to (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    # Apple Silicon, matching the "macOS, Apple Silicon" label on the asset.
+    runs-on: macos-15
+    steps:
+      - name: Resolve and validate tag
+        id: tag
+        # The tag reaches both a shell and actions/checkout's `ref:`, so it goes
+        # through env rather than straight interpolation, and is rejected unless
+        # it matches a strict vMAJOR.MINOR.PATCH shape. Git permits `$`, `(`,
+        # `)` and `;` in ref names.
+        env:
+          RAW_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          if ! printf '%s' "$RAW_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$'; then
+            echo "error: refusing tag '$RAW_TAG' — expected vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+          echo "tag=$RAW_TAG" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - uses: ./.github/actions/setup-native
+
+      - name: Verify tag matches app.zon version
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          version="$(sed -n 's/.*\.version = "\([^"]*\)".*/\1/p' app.zon | head -1)"
+          [ -n "$version" ] || { echo "error: could not read .version from app.zon" >&2; exit 1; }
+          if [ "v$version" != "$TAG" ]; then
+            echo "error: tag $TAG does not match app.zon version $version (expected v$version)" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_ENV"
+
+      - name: Test
+        run: native test
+
+      - name: Build and package
+        run: |
+          native build
+          native package --target macos --signing adhoc
+
+      - name: Build DMG
+        run: |
+          app_name="SUBWAVE Player"
+          rm -rf zig-out/dmg-stage
+          mkdir -p zig-out/dmg-stage dist
+          cp -R zig-out/package/subwave-desktop.app "zig-out/dmg-stage/$app_name.app"
+          ln -s /Applications zig-out/dmg-stage/Applications
+          codesign --verify --deep "zig-out/dmg-stage/$app_name.app"
+          dmg="dist/SUBWAVE-Player-${version}.dmg"
+          hdiutil create -volname "$app_name" -srcfolder zig-out/dmg-stage -ov -format UDZO "$dmg" >/dev/null
+          hdiutil verify "$dmg" >/dev/null
+          ls -lh "$dmg"
+          echo "dmg=$dmg" >> "$GITHUB_ENV"
+
+      - name: Smoke-check the DMG
+        # Mount it and launch the binary inside the way the release skill does
+        # by hand, so a DMG that builds but cannot start never reaches anyone.
+        run: |
+          mnt="$(mktemp -d)"
+          hdiutil attach "$dmg" -nobrowse -quiet -mountpoint "$mnt"
+          bin="$mnt/SUBWAVE Player.app/Contents/MacOS/subwave-desktop"
+          test -x "$bin" || { echo "error: no executable inside the app bundle" >&2; hdiutil detach "$mnt" -quiet; exit 1; }
+          codesign --verify --deep --strict "$mnt/SUBWAVE Player.app"
+          hdiutil detach "$mnt" -quiet
+          echo "DMG mounts, bundle verifies, binary present"
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          gh release upload "$TAG" --clobber \
+            "${dmg}#SUBWAVE Player ${version} (macOS, Apple Silicon)"
+          gh release view "$TAG" --json assets --jq '.assets[].name'

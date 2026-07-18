@@ -27,14 +27,6 @@ on:
 permissions:
   contents: write
 
-env:
-  # Pinned: patches/native-sdk-local.patch is generated against this exact
-  # tarball, and a version bump can shift its context lines. Bump both
-  # together, then regenerate the patch (docs/sdk-notes.md).
-  NATIVE_SDK_VERSION: "0.5.3"
-  ZIG_VERSION: "0.16.0"
-  ZIG_SHA256: "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00"
-
 jobs:
   linux:
     runs-on: ubuntu-24.04
@@ -71,31 +63,10 @@ jobs:
           sudo apt-get install -y --no-install-recommends libgtk-4-dev pkg-config
           pkg-config --modversion gtk4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: Install Zig
-        run: |
-          url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
-          curl -fsSL "$url" -o zig.tar.xz
-          echo "${ZIG_SHA256}  zig.tar.xz" | sha256sum -c -
-          sudo mkdir -p /opt/zig
-          sudo tar -xJf zig.tar.xz -C /opt/zig --strip-components=1
-          echo "/opt/zig" >> "$GITHUB_PATH"
-
-      - name: Install Native SDK
-        run: |
-          npm i -g "@native-sdk/cli@${NATIVE_SDK_VERSION}"
-          zig version
-          native --version
-
-      - name: Apply local SDK patches
-        # Without patch #3 this build ships the pixelated-text bug on every
-        # fractional-scale desktop. The script fails loudly on partial
-        # application, so a drifted patch file breaks the release instead of
-        # quietly degrading it.
-        run: ./scripts/apply-sdk-patches.sh
+      # Installs Zig + Node + the SDK and applies the local patches. Without
+      # patch #3 this build would ship the pixelated-text bug on every
+      # fractional-scale desktop, so that step is not optional here.
+      - uses: ./.github/actions/setup-native
 
       - name: Verify tag matches app.zon version
         env:
