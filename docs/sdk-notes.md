@@ -1,5 +1,18 @@
 # Local SDK notes
 
+**Quick re-apply after any SDK upgrade** (both patches below, idempotent):
+
+```bash
+./scripts/apply-sdk-patches.sh
+native test   # verify
+```
+
+The unified diff lives at `patches/native-sdk-local.patch` (generated against
+the pristine 0.5.3 npm tarball; if a future SDK version shifts the context
+lines, regenerate it from the sections below). Symptoms of lost patches:
+`native build` fails at ui_markup.zig ~line 1014, and/or the red close
+button quits the app.
+
 ## canonicalizeComptime quota patch (REQUIRED for player.native)
 
 `@native-sdk/cli` 0.5.2 has a comptime bug that breaks `CompiledMarkupView`
@@ -52,3 +65,13 @@ player) keep their real close + `on_close` dispatch.
 quota patch. Symptom of a lost patch: closing the player window quits the
 app. Worth requesting upstream as a proper option (e.g.
 `ShellWindow.close_policy = "hide"`).
+
+## Reserved tray item ids (Open player / Quit)
+
+Same file (`appkit_host.m`, `trayMenuItemClicked:`): tray item id **100**
+unhides + activates the app before forwarding (the tray's "Open player" row —
+pairs with the close-hides patch), and id **101** calls `[NSApp terminate:]`
+(the "Quit SUB/WAVE" row). The runtime's update loop cannot perform either.
+The app assigns these ids in `main.zig`'s `statusItem`. Covered by the same
+patch file / apply script. Symptom of a lost patch: those two tray rows
+dispatch their (unmapped) commands and do nothing.

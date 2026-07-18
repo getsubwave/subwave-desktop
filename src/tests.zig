@@ -19,9 +19,13 @@ const Msg = main.Msg;
 
 const AppMarkup = canvas.MarkupView(Model, Msg);
 
-const player_markup = @embedFile("views/player.native");
 const onboarding_markup = @embedFile("views/onboarding.native");
 const mini_markup = @embedFile("views/mini.native");
+const player_top_markup = @embedFile("views/player-top.native");
+const player_sidebar_markup = @embedFile("views/player-sidebar.native");
+const player_panel_markup = @embedFile("views/player-panel.native");
+const player_deck_markup = @embedFile("views/player-deck.native");
+const player_sheets_markup = @embedFile("views/player-sheets.native");
 
 fn buildAndLayout(arena: std.mem.Allocator, source: []const u8, model: *const Model, w: f32, h: f32) !void {
     var view = try AppMarkup.init(arena, source);
@@ -41,39 +45,46 @@ fn buildAndLayout(arena: std.mem.Allocator, source: []const u8, model: *const Mo
 // Every view must bind cleanly to the Model and lay out — a field drift
 // becomes a build error here (and, via CompiledMarkupView in views.zig, at
 // app build).
-test "player view builds and lays out (LIVE + every panel + sheets)" {
-    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena_state.deinit();
+test "player fragments build and lay out (every panel + sheets)" {
     var model: Model = .{};
     model.phase = .player;
-    try buildAndLayout(arena_state.allocator(), player_markup, &model, 980, 660);
-    // Panels + sidebar + sheets: every conditional branch must build too.
+    model.sidebar_open = true;
+    inline for (.{ player_top_markup, player_sidebar_markup, player_deck_markup }) |source| {
+        var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena_state.deinit();
+        try buildAndLayout(arena_state.allocator(), source, &model, 980, 660);
+    }
+    // Section panel: every tab branch must build.
     inline for (.{ .schedule, .timeline, .booth, .request }) |tab| {
         var arena2 = std.heap.ArenaAllocator.init(testing.allocator);
         defer arena2.deinit();
         model.active_tab = tab;
-        try buildAndLayout(arena2.allocator(), player_markup, &model, 980, 660);
+        try buildAndLayout(arena2.allocator(), player_panel_markup, &model, 980, 660);
     }
-    model.sidebar_open = true;
-    model.sheet = .panel;
-    {
+    // Sheets: every surface must build.
+    inline for (.{ .panel, .sleep, .themes }) |sheet| {
         var arena3 = std.heap.ArenaAllocator.init(testing.allocator);
         defer arena3.deinit();
-        try buildAndLayout(arena3.allocator(), player_markup, &model, 980, 660);
+        model.sheet = sheet;
+        model.sleep_deadline_ms = 1;
+        try buildAndLayout(arena3.allocator(), player_sheets_markup, &model, 980, 660);
     }
-    model.sheet = .sleep;
-    model.sleep_deadline_ms = 1;
-    {
-        var arena4 = std.heap.ArenaAllocator.init(testing.allocator);
-        defer arena4.deinit();
-        try buildAndLayout(arena4.allocator(), player_markup, &model, 980, 660);
-    }
-    model.sheet = .themes;
-    {
-        var arena5 = std.heap.ArenaAllocator.init(testing.allocator);
-        defer arena5.deinit();
-        try buildAndLayout(arena5.allocator(), player_markup, &model, 980, 660);
-    }
+}
+
+test "composed player view (Zig stage + fragments) builds and lays out" {
+    const views = @import("views.zig");
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var model: Model = .{};
+    model.phase = .player;
+    model.sidebar_open = true;
+    model.active_tab = .booth;
+    var ui = AppUi.init(arena);
+    const tree = try ui.finalize(views.rootView(&ui, &model));
+    var nodes: [1024]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(tree.root, native_sdk.geometry.RectF.init(0, 0, 980, 660), &nodes);
+    try testing.expect(layout.nodes.len > 0);
 }
 
 test "onboarding view builds in entry and check phases" {

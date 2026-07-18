@@ -1,0 +1,35 @@
+<!-- Player fragment: masthead + dial band (composed by views.zig). -->
+<column>
+  <!-- Masthead — the working titlebar (window-drag under hidden_inset_tall) -->
+  <row cross="center" gap="12" height="52" padding="8" window-drag="true">
+    <spacer width="{chrome_leading}"/>
+    <row on-press="toggle_sidebar" gap="7" cross="center" label="Stations">
+      <icon name="app:disc" width="16" height="16" foreground="accent"/>
+      <text size="sm">{upper(station_name)}</text>
+      <icon name="chevron-down" width="13" height="13" foreground="text_muted"/>
+    </row>
+    <if test="{has_show}">
+      <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{show_upper}</text>
+    </if>
+    <if test="{has_host}">
+      <text size="sm" foreground="accent" wrap="false">WITH {host_upper}</text>
+    </if>
+    <spacer grow="1"/>
+    <if test="{has_ctx}">
+      <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{ctx_meta}</text>
+    </if>
+    <button variant="ghost" icon="settings" label="Back panel" on-press="open_panel"/>
+  </row>
+  <separator/>
+
+  <!-- Dial band — toggle-chip strip (the accent chip is the needle) -->
+  <row main="center" cross="center" padding="10">
+    <toggle-group gap="8" label="Dial">
+      <for each="dial_stops" as="s">
+        <toggle-button size="sm" selected="{s.tab == active_tab}" on-toggle="pick_tab:{s.tab}" label="{s.label}">{s.abbr}</toggle-button>
+      </for>
+    </toggle-group>
+  </row>
+  <separator/>
+
+</column>

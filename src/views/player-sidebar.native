@@ -1,0 +1,74 @@
+<!-- Player fragment: stations sidebar column (composed by views.zig when open). -->
+<template name="section-label" args="title">
+  <row gap="10" cross="center">
+    <text size="sm" foreground="text_muted">{title}</text>
+    <panel height="1" grow="1" background="border"/>
+  </row>
+</template>
+
+<row gap="0">
+      <column width="320" gap="0">
+        <row cross="center" main="space_between" padding="14">
+          <text size="heading">Stations</text>
+          <button variant="ghost" size="sm" icon="x" label="Close stations" on-press="toggle_sidebar"/>
+        </row>
+        <scroll grow="1">
+          <column gap="10" padding="14">
+            <use template="section-label" title="TUNED IN"/>
+            <card padding="13" border-color="accent">
+              <column gap="4">
+                <row main="space_between" cross="center" gap="10">
+                  <text><span weight="medium">{station_name}</span></text>
+                  <if test="{live_now}">
+                    <text size="sm" foreground="accent">ON AIR</text>
+                  </if>
+                  <else>
+                    <text size="sm" foreground="text_muted">{upper(status_word)}</text>
+                  </else>
+                </row>
+                <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{base_display}</text>
+              </column>
+            </card>
+            <if test="{has_recents}">
+              <use template="section-label" title="RECENT"/>
+              <column gap="0">
+                <for each="recents_list" key="url" as="st">
+                  <row on-press="pick_recent:{st.url}" gap="12" cross="center" padding="9" label="{st.name}">
+                    <column gap="1" grow="1">
+                      <text><span weight="medium">{st.name}</span></text>
+                      <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{st.url}</text>
+                    </column>
+                    <icon name="chevron-right" width="14" height="14" foreground="text_muted"/>
+                  </row>
+                  <separator/>
+                </for>
+              </column>
+            </if>
+            <if test="{has_discover}">
+              <use template="section-label" title="DISCOVER"/>
+              <column gap="0">
+                <for each="discover_list" key="url" as="st">
+                  <row on-press="pick_discover:{st.url}" gap="12" cross="center" padding="9" label="{st.name}">
+                    <column gap="2" grow="1">
+                      <text><span weight="medium">{st.name}</span></text>
+                      <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{st.sub}</text>
+                    </column>
+                    <icon name="chevron-right" width="14" height="14" foreground="text_muted"/>
+                  </row>
+                  <separator/>
+                </for>
+              </column>
+            </if>
+            <use template="section-label" title="ADD A STATION"/>
+            <row gap="8" cross="center">
+              <search-field text="{station_text}" placeholder="radio.yourhost.com" on-input="station_edit" on-submit="tune_station" grow="1"/>
+              <button variant="secondary" icon="plus" label="Tune to this station" on-press="tune_station"/>
+            </row>
+            <if test="{station_status}">
+              <text size="sm" foreground="accent">{station_status}</text>
+            </if>
+          </column>
+        </scroll>
+      </column>
+      <separator/>
+</row>

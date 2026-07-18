@@ -257,6 +257,8 @@ pub const Model = struct {
     theme_ids: [max_themes][]const u8 = [_][]const u8{""} ** max_themes,
     theme_names_store: [max_themes][48]u8 = undefined,
     theme_names: [max_themes][]const u8 = [_][]const u8{""} ** max_themes,
+    theme_descs_store: [max_themes][96]u8 = undefined,
+    theme_descs: [max_themes][]const u8 = [_][]const u8{""} ** max_themes,
     theme_count: usize = 0,
 
     // station switcher (TEA text field for the address; shared by the
@@ -300,6 +302,14 @@ pub const Model = struct {
     hist_time_store: [max_history][8]u8 = undefined,
     history_rows: [max_history]QueueRow = [_]QueueRow{.{}} ** max_history,
     history_count: usize = 0,
+
+    // tray now-playing rows ("Title — Artist", "0:52 · on air · 2 listening")
+    // — formatted update-side because status-item labels must point at
+    // stable memory.
+    tray_track_buf: [96]u8 = undefined,
+    tray_track: []const u8 = "",
+    tray_status_buf: [64]u8 = undefined,
+    tray_status: []const u8 = "",
 
     // booth feed (/api/session turns, newest first) + the ticker line
     booth_time_store: [max_booth][8]u8 = undefined,
@@ -624,6 +634,7 @@ pub const Model = struct {
         range: []const u8 = "",
         show_name: []const u8 = "",
         persona: []const u8 = "",
+        initials: []const u8 = "", // persona initials for the row avatar
         has_host: bool = false,
         on_air: bool = false, // the active show, on today's column
         autopilot: bool = false,
@@ -650,6 +661,7 @@ pub const Model = struct {
                         .range = range,
                         .show_name = row.name,
                         .persona = row.persona,
+                        .initials = wordInitials(arena, row.persona),
                         .has_host = row.persona.len > 0,
                         .on_air = row.live,
                     }) catch return out.items;
@@ -824,6 +836,18 @@ pub const Model = struct {
     pub fn has_ob_diag(self: *const Model) bool {
         return self.ob_diag.len > 0;
     }
+    pub const SchemeRow = struct {
+        label: []const u8 = "",
+        https: bool = true,
+        on: bool = false,
+    };
+    pub fn scheme_rows(self: *const Model, arena: std.mem.Allocator) []const SchemeRow {
+        const out = arena.alloc(SchemeRow, 2) catch return &.{};
+        out[0] = .{ .label = "HTTPS", .https = true, .on = self.ob_https };
+        out[1] = .{ .label = "HTTP", .https = false, .on = !self.ob_https };
+        return out;
+    }
+
     pub const ObStepRow = struct {
         label: []const u8,
         stat: []const u8,
@@ -855,6 +879,8 @@ pub const Model = struct {
     pub const ThemeRow = struct {
         id: []const u8 = "",
         name: []const u8 = "",
+        desc: []const u8 = "",
+        has_desc: bool = false,
         on: bool = false,
     };
     pub fn theme_rows(self: *const Model, arena: std.mem.Allocator) []const ThemeRow {
@@ -864,6 +890,8 @@ pub const Model = struct {
             row.* = .{
                 .id = self.theme_ids[i],
                 .name = name,
+                .desc = self.theme_descs[i],
+                .has_desc = self.theme_descs[i].len > 0,
                 .on = self.theme_override.len > 0 and std.mem.eql(u8, self.theme_ids[i], self.theme_override),
             };
         }
@@ -919,12 +947,17 @@ pub const Model = struct {
         "sleep_deadline_ms",  "sleep_minutes",       "now_wall_ms",         "latency_ms",
         "probe_t0",           "probe_fails",         "probe_inflight",      "probe_slow",
         "sched_grid",         "dj",                  "ob_https",            "ob_checking",
+        "ob_scheme",          "sidebar_open",        "booth_line",          "has_tokens",
+        "meta_line",          "has_meta",            "mood_line",           "has_mood",
+        "state_line",         "has_state",           "has_booth",           "panel_open",
         "ob_steps",           "ob_done",             "chrome_top",
         // station / settings / theme-override state
         "base",               "base_buf",            "stream_url_buf",      "settings_path",
         "settings_path_buf",  "settings_json_buf",   "station_buffer",      "theme_override",
         "theme_override_buf", "theme_ids",           "theme_ids_store",     "theme_names",
-        "theme_names_store",  "theme_count",         "save_inflight",       "save_dirty",
+        "theme_names_store",  "theme_descs",         "theme_descs_store",   "tray_status",
+        "tray_status_buf",    "tray_track",          "tray_track_buf",
+        "theme_count",        "save_inflight",       "save_dirty",
         "recents_name_store", "recents_url_store",   "recents",             "recents_count",
         "discover_name_store", "discover_url_store", "discover_sub_store",  "discover_rows",
         "discover_count",
@@ -987,6 +1020,8 @@ pub const Msg = union(enum) {
 
     // navigation
     pick_tab: Tab,
+    open_timeline,
+    open_booth,
     close_panel,
     toggle_sidebar,
     escape,
@@ -1000,6 +1035,7 @@ pub const Msg = union(enum) {
 
     // sleep timer
     sleep_pick: i64,
+    sleep_cycle, // tray: off -> 15 -> 30 -> 45 -> 60 -> 90 -> off
     cancel_sleep,
 
     // booth / schedule
@@ -1022,7 +1058,7 @@ pub const Msg = union(enum) {
     pick_theme: []const u8, // payload = theme id
 
     // onboarding
-    ob_toggle_scheme,
+    ob_pick_scheme: bool,
     ob_run_check,
     ob_pick_known: []const u8, // payload = url (known/discover rows)
     ob_back,
@@ -1038,6 +1074,7 @@ pub const Msg = union(enum) {
         "audio_event",   "saved",          "got_schedule", "tick_save",
         "chrome_changed", "toggle_play",   "vol_up",      "vol_down",
         "escape",        "mini_closed",    "tune_out",    "toggle_mini",
+        "sleep_cycle",   "open_timeline",  "open_booth",
     };
 };
 
@@ -1051,6 +1088,26 @@ fn setStr(buf: []u8, out: *[]const u8, v: []const u8) void {
     }
     @memcpy(buf[0..n], v[0..n]);
     out.* = buf[0..n];
+}
+
+// First letters of the first two words, uppercased ("Juno Reyes" -> "JR").
+fn wordInitials(arena: std.mem.Allocator, s: []const u8) []const u8 {
+    const out = arena.alloc(u8, 2) catch return "";
+    var n: usize = 0;
+    var at_word = true;
+    for (s) |ch| {
+        if (ch == ' ') {
+            at_word = true;
+        } else if (at_word and std.ascii.isAlphabetic(ch)) {
+            out[n] = std.ascii.toUpper(ch);
+            n += 1;
+            if (n >= 2) break;
+            at_word = false;
+        } else {
+            at_word = false;
+        }
+    }
+    return out[0..n];
 }
 
 fn asciiUpper(arena: std.mem.Allocator, s: []const u8) []const u8 {
@@ -1346,6 +1403,29 @@ fn retune(model: *Model, fx: *Effects) void {
     saveSettings(model, fx);
 }
 
+// "Title — Artist" + "0:52 · on air · 2 listening" — the tray's two
+// disabled now-playing rows.
+fn refreshTrayStatus(model: *Model) void {
+    if (model.artist.len > 0) {
+        if (std.fmt.bufPrint(&model.tray_track_buf, "{s} — {s}", .{ model.title, model.artist })) |line| {
+            model.tray_track = line;
+        } else |_| {
+            model.tray_track = model.title;
+        }
+    } else {
+        model.tray_track = model.title;
+    }
+    const secs: u64 = @intCast(@max(0, @divTrunc(model.elapsed_ms, 1000)));
+    if (std.fmt.bufPrint(&model.tray_status_buf, "{d}:{d:0>2} · {s} · {d} listening", .{
+        secs / 60,
+        secs % 60,
+        model.status_word(),
+        model.listeners,
+    })) |line| {
+        model.tray_status = line;
+    } else |_| {}
+}
+
 fn startPlayerTimers(fx: *Effects) void {
     fx.startTimer(.{ .key = keys.feed_timer, .interval_ms = 5000, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_feed) });
     fx.startTimer(.{ .key = keys.theme_timer, .interval_ms = 30_000, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_theme) });
@@ -1528,6 +1608,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (np.listeners) |l| {
                 if (l.current) |c| model.listeners = c;
             }
+            refreshTrayStatus(model);
             if (np.llmTokens) |tok| model.llm_tokens = tok;
             // Offline debounce: 4 consecutive offline reads before we believe it.
             if (np.streamOnline) |on| {
@@ -1591,6 +1672,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 if (model.theme_count >= max_themes) break;
                 setStr(&model.theme_ids_store[model.theme_count], &model.theme_ids[model.theme_count], id);
                 setStr(&model.theme_names_store[model.theme_count], &model.theme_names[model.theme_count], t.name orelse "");
+                setStr(&model.theme_descs_store[model.theme_count], &model.theme_descs[model.theme_count], t.description orelse "");
                 model.theme_count += 1;
             }
             // Target = a valid override, else the station's active theme.
@@ -1936,6 +2018,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     model.buffering = e.buffering;
                     model.stream_failed = false;
                     model.retry = 0;
+                    refreshTrayStatus(model);
                 },
                 .spectrum => {
                     spectrum.step(&model.band_levels, e.bands[0..], 0.06);
@@ -2011,6 +2094,8 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.active_tab = tab;
             if (tab == .schedule) model.day_sel = utcWeekday(native_sdk.nowMs());
         },
+        .open_timeline => model.active_tab = .timeline,
+        .open_booth => model.active_tab = .booth,
         .close_panel => model.active_tab = .live,
         .toggle_sidebar => {
             model.sidebar_open = !model.sidebar_open;
@@ -2037,6 +2122,15 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .sleep_pick => |min| {
             armSleep(model, fx, min);
             model.sheet = .panel; // back to the panel with the countdown showing
+        },
+        .sleep_cycle => {
+            const order = [_]i64{ 0, 15, 30, 45, 60, 90 };
+            var idx: usize = 0;
+            for (order, 0..) |min, i| {
+                if (model.sleep_minutes == min) idx = i;
+            }
+            const next = order[(idx + 1) % order.len];
+            if (next == 0) disarmSleep(model, fx) else armSleep(model, fx, next);
         },
         .cancel_sleep => disarmSleep(model, fx),
 
@@ -2092,7 +2186,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
 
         // -------------------------------------------------------- onboarding
-        .ob_toggle_scheme => model.ob_https = !model.ob_https,
+        .ob_pick_scheme => |https| model.ob_https = https,
         .ob_run_check => {
             const raw = std.mem.trim(u8, model.station_buffer.text(), " \t\r\n");
             if (raw.len == 0) return;

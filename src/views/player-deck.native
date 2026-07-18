@@ -1,0 +1,28 @@
+<!-- Player fragment: transport deck. -->
+<column>
+  <!-- Transport deck -->
+  <separator/>
+  <row gap="14" cross="center" padding="12">
+    <button variant="outline" size="lg" icon="app:power" label="{tune_label}" on-press="tune_toggle"/>
+    <if test="{connecting}">
+      <spinner/>
+    </if>
+    <column grow="1" gap="6">
+      <row main="space_between" cross="center">
+        <row gap="6" cross="center">
+          <text size="sm" foreground="text_muted">SIGNAL ·</text>
+          <text size="sm"><span weight="bold">{upper(signal_label)}</span></text>
+        </row>
+        <text size="sm" foreground="text_muted">{signal_readout}</text>
+      </row>
+      <progress value="{signal_frac}" label="Signal"/>
+    </column>
+    <row gap="10" cross="center" width="300">
+      <icon name="volume" width="16" height="16" foreground="text_muted"/>
+      <slider value="{volume}" on-change="volume_changed" label="Volume" grow="1"/>
+      <text size="sm" foreground="text_muted" width="40" wrap="false" overflow="clip">{vol_display}</text>
+      <toggle-button size="sm" selected="{muted}" on-toggle="toggle_mute" icon="volume" label="{mute_label}"/>
+    </row>
+  </row>
+
+</column>

@@ -1,0 +1,227 @@
+<!-- Player fragment: section panel (Shows/Timeline/Booth/Request). -->
+<template name="section-label" args="title">
+  <row gap="10" cross="center">
+    <text size="sm" foreground="text_muted">{title}</text>
+    <panel height="1" grow="1" background="border"/>
+  </row>
+</template>
+
+<row gap="0">
+      <separator/>
+      <column width="380" gap="0">
+        <row cross="end" main="space_between" gap="12" padding="14">
+          <text size="heading">{panel_title}</text>
+          <row gap="8" cross="center">
+            <text size="sm" foreground="text_muted">{panel_sub}</text>
+            <button variant="ghost" size="sm" icon="x" label="Back to LIVE" on-press="close_panel"/>
+          </row>
+        </row>
+        <separator/>
+        <scroll grow="1">
+          <column gap="12" padding="14">
+
+            <!-- SHOWS -->
+            <if test="{tab_shows}">
+              <if test="{has_station_loc}">
+                <row main="space_between" cross="center">
+                  <text size="sm" foreground="text_muted">LOCATION</text>
+                  <text size="sm">{station_loc}</text>
+                </row>
+              </if>
+              <if test="{has_show}">
+                <card padding="12" border-color="accent">
+                  <column gap="3">
+                    <text size="sm" foreground="accent">ON NOW</text>
+                    <text><span weight="medium">{show}</span></text>
+                    <if test="{has_host}">
+                      <text size="sm" foreground="text_muted">with {host}</text>
+                    </if>
+                  </column>
+                </card>
+              </if>
+              <toggle-group gap="4" label="Day">
+                <for each="day_tabs" as="d">
+                  <toggle-button size="sm" selected="{d.idx == day_sel}" on-toggle="pick_day:{d.idx}">{d.label}</toggle-button>
+                </for>
+              </toggle-group>
+              <column gap="0">
+                <for each="day_slots" as="slot">
+                  <row gap="12" cross="center" padding="8">
+                    <text size="sm" foreground="text_muted" width="96" wrap="false" overflow="clip">{slot.range}</text>
+                    <if test="{slot.has_host}">
+                      <avatar width="28" height="28" label="{slot.persona}">{slot.initials}</avatar>
+                    </if>
+                    <column gap="1" grow="1">
+                      <if test="{slot.autopilot}">
+                        <text foreground="text_muted">Autopilot</text>
+                      </if>
+                      <else>
+                        <text wrap="false" overflow="ellipsis">{slot.show_name}</text>
+                      </else>
+                      <if test="{slot.has_host}">
+                        <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{slot.persona}</text>
+                      </if>
+                    </column>
+                    <if test="{slot.on_air}">
+                      <text size="sm" foreground="accent">NOW</text>
+                    </if>
+                  </row>
+                  <separator/>
+                </for>
+                <else>
+                  <text foreground="text_muted">No schedule published yet.</text>
+                </else>
+              </column>
+            </if>
+
+            <!-- TIMELINE -->
+            <if test="{tab_timeline}">
+              <use template="section-label" title="UP NEXT"/>
+              <column gap="0">
+                <for each="upcoming_list" key="n" as="t">
+                  <row gap="14" cross="start" padding="8">
+                    <text size="sm" width="28"><span weight="bold" foreground="text_muted">{t.n}</span></text>
+                    <column gap="2" grow="1">
+                      <text><span weight="medium">{t.title}</span></text>
+                      <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{t.artist}</text>
+                      <if test="{t.has_req}">
+                        <text size="sm" foreground="accent">REQUESTED BY {upper(t.req_by)}</text>
+                      </if>
+                    </column>
+                  </row>
+                  <separator/>
+                </for>
+                <else>
+                  <text foreground="text_muted">Nothing queued yet.</text>
+                </else>
+              </column>
+              <use template="section-label" title="PLAYED"/>
+              <column gap="0">
+                <for each="history_list" as="t">
+                  <row gap="12" cross="center" padding="7">
+                    <column gap="1" grow="1">
+                      <text wrap="false" overflow="ellipsis">{t.title}</text>
+                      <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{t.artist}</text>
+                    </column>
+                    <text size="sm" foreground="text_muted" wrap="false" overflow="clip">{t.hhmm}</text>
+                  </row>
+                  <separator/>
+                </for>
+                <else>
+                  <text foreground="text_muted">Nothing aired yet.</text>
+                </else>
+              </column>
+            </if>
+
+            <!-- BOOTH -->
+            <if test="{tab_booth}">
+              <toggle-group gap="6" label="Booth filter">
+                <for each="booth_filter_rows" as="f">
+                  <toggle-button size="sm" selected="{f.on}" on-toggle="set_booth_filter:{f.val}">{f.label}</toggle-button>
+                </for>
+              </toggle-group>
+              <column gap="0">
+                <for each="booth_list" as="t">
+                  <column gap="4" padding="8">
+                    <row gap="8" cross="center">
+                      <text size="sm" foreground="text_muted" width="44" wrap="false" overflow="clip">{t.hhmm}</text>
+                      <if test="{t.is_voice}">
+                        <badge background="accent" foreground="accent_text">{t.kind}</badge>
+                      </if>
+                      <else>
+                        <badge background="surface" foreground="text_muted">{t.kind}</badge>
+                      </else>
+                    </row>
+                    <if test="{t.is_track}">
+                      <row gap="6" cross="center">
+                        <icon name="music" width="14" height="14" foreground="text_muted"/>
+                        <text foreground="text_muted" wrap="false" overflow="ellipsis">{t.text}</text>
+                      </row>
+                    </if>
+                    <else>
+                      <if test="{t.is_voice}">
+                        <text><span italic="true">{t.text}</span></text>
+                      </if>
+                      <else>
+                        <text size="sm" foreground="text_muted" wrap="true">{t.text}</text>
+                      </else>
+                    </else>
+                  </column>
+                  <separator/>
+                </for>
+                <else>
+                  <text foreground="text_muted">The booth is quiet right now.</text>
+                </else>
+              </column>
+            </if>
+
+            <!-- REQUEST -->
+            <if test="{tab_request}">
+              <if test="{req_idle}">
+                <card>
+                  <column gap="0">
+                    <row main="space_between" cross="center" padding="10">
+                      <text size="sm" foreground="accent">LINE OPEN</text>
+                      <text size="sm" foreground="text_muted">REQUEST SLIP</text>
+                    </row>
+                    <separator/>
+                    <column gap="8" padding="12">
+                      <text size="sm" foreground="text_muted">DEAR DJ —</text>
+                      <textarea text="{req_text}" placeholder="play me something for late-night driving…" on-input="req_edit" on-submit="submit_req" height="88"/>
+                      <input text="{req_name_text}" placeholder="signed, your name (optional)" on-input="req_name_edit" label="Signed name"/>
+                    </column>
+                  </column>
+                </card>
+                <text size="sm" foreground="text_muted" wrap="true">Describe a mood, a memory, an artist. The DJ reads your note, digs the library, and answers you on-air.</text>
+                <use template="section-label" title="ON THE WIRE"/>
+                <grid columns="2" gap="6">
+                  <for each="chips" as="c">
+                    <button variant="outline" size="sm" on-press="chip_pick:{c.t}">{c.t}</button>
+                  </for>
+                </grid>
+                <button variant="primary" on-press="submit_req">Send to the booth</button>
+                <if test="{has_req_status}">
+                  <text size="sm" foreground="accent">{req_status}</text>
+                </if>
+              </if>
+              <else>
+                <column gap="12">
+                  <text size="sm" foreground="accent">{req_state_label}</text>
+                  <card padding="14">
+                    <text><span italic="true">“{req_ack_line}”</span></text>
+                  </card>
+                  <separator/>
+                  <text size="sm" foreground="text_muted">{req_card_label}</text>
+                  <if test="{req_pending}">
+                    <row gap="10" cross="center">
+                      <spinner/>
+                      <text foreground="text_muted"><span italic="true">finding your track…</span></text>
+                    </row>
+                  </if>
+                  <if test="{req_done}">
+                    <column gap="2">
+                      <if test="{has_req_track}">
+                        <text><span weight="bold">{req_track_title}</span></text>
+                        <text size="sm" foreground="text_muted">{req_track_artist}</text>
+                      </if>
+                      <if test="{has_req_pos}">
+                        <text size="sm" foreground="text_muted">POSITION #{req_queue_pos} IN QUEUE</text>
+                      </if>
+                    </column>
+                  </if>
+                  <if test="{req_failed}">
+                    <text size="sm" foreground="accent">{req_status}</text>
+                  </if>
+                  <separator/>
+                  <if test="{req_footnote}">
+                    <text size="sm" foreground="text_muted">{req_footnote}</text>
+                  </if>
+                  <button variant="outline" size="sm" on-press="reset_request">New request</button>
+                </column>
+              </else>
+            </if>
+
+          </column>
+        </scroll>
+      </column>
+</row>

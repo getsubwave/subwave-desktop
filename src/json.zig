@@ -113,6 +113,7 @@ pub const Tokens = struct {
 pub const ThemeEntry = struct {
     id: ?[]const u8 = null,
     name: ?[]const u8 = null,
+    description: ?[]const u8 = null,
     mode: ?[]const u8 = null,
     tokens: ?Tokens = null,
 };
