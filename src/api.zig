@@ -14,6 +14,11 @@ fn build(buf: []u8, base: []const u8, path: []const u8) ![]const u8 {
 pub fn streamUrl(buf: []u8, base: []const u8) ![]const u8 {
     return build(buf, base, "/stream.mp3");
 }
+// Format-mount variant — `mount` comes from stream_format.StreamFormat.mount()
+// ("/stream.opus", …); streamUrl above stays the MP3-floor authority.
+pub fn streamMount(buf: []u8, base: []const u8, mount: []const u8) ![]const u8 {
+    return build(buf, base, mount);
+}
 pub fn nowPlaying(buf: []u8, base: []const u8) ![]const u8 {
     return build(buf, base, "/api/now-playing");
 }
@@ -80,5 +85,6 @@ test "normalizeBase defaults the scheme and drops trailing slashes" {
 test "url builders join base and path" {
     var buf: [256]u8 = undefined;
     try testing.expectEqualStrings("https://x.test/stream.mp3", try streamUrl(&buf, "https://x.test/"));
+    try testing.expectEqualStrings("https://x.test/stream.opus", try streamMount(&buf, "https://x.test/", "/stream.opus"));
     try testing.expectEqualStrings("https://x.test/api/cover/ab12", try coverUrl(&buf, "https://x.test", "ab12"));
 }

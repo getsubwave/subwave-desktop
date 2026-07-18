@@ -53,12 +53,21 @@ pub const Context = struct {
     dominantMood: ?[]const u8 = null,
 };
 
+// Optional-mount flags on /now-playing — which extra stream formats the
+// station serves (MP3 is the always-on floor and carries no flag).
+pub const StreamInfo = struct {
+    opusEnabled: ?bool = null,
+    flacEnabled: ?bool = null,
+    aacEnabled: ?bool = null,
+};
+
 pub const NowPlaying = struct {
     nowPlaying: ?Track = null,
     context: ?Context = null,
     dj: ?Dj = null,
     activeShow: ?ActiveShow = null,
     listeners: ?Listeners = null,
+    stream: ?StreamInfo = null,
     streamOnline: ?bool = null,
     llmTokens: ?i64 = null,
 };
@@ -210,6 +219,7 @@ pub const SettingsRecent = struct {
 pub const Settings = struct {
     volume: ?f32 = null,
     themeOverride: ?[]const u8 = null,
+    streamFormat: ?[]const u8 = null,
     station: ?[]const u8 = null,
     stationName: ?[]const u8 = null,
     recents: ?[]SettingsRecent = null,

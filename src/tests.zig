@@ -11,6 +11,7 @@ comptime {
     _ = @import("spectrum.zig");
     _ = @import("api.zig");
     _ = @import("model.zig");
+    _ = @import("stream_format.zig");
 }
 
 const AppUi = main.AppUi;
@@ -68,6 +69,15 @@ test "player fragments build and lay out (every panel + sheets)" {
         model.sheet = sheet;
         model.sleep_deadline_ms = 1;
         try buildAndLayout(arena3.allocator(), player_sheets_markup, &model, 980, 660);
+    }
+    // Format sheet with a real choice on offer (station serves AAC).
+    model.sheet = .format;
+    model.stream_flags_known = true;
+    model.stream_aac = true;
+    {
+        var arena6 = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena6.deinit();
+        try buildAndLayout(arena6.allocator(), player_markup, &model, 980, 660);
     }
 }
 
