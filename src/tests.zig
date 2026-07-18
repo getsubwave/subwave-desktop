@@ -77,7 +77,7 @@ test "player fragments build and lay out (every panel + sheets)" {
     {
         var arena6 = std.heap.ArenaAllocator.init(testing.allocator);
         defer arena6.deinit();
-        try buildAndLayout(arena6.allocator(), player_markup, &model, 980, 660);
+        try buildAndLayout(arena6.allocator(), player_sheets_markup, &model, 980, 660);
     }
 }
 
