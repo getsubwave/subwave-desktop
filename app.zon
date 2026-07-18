@@ -7,7 +7,7 @@
     .description = "Native desktop player for the SUB/WAVE internet radio station.",
     .version = "0.1.0",
     .icons = .{"assets/icon.png"},
-    .platforms = .{ "macos", "linux" },
+    .platforms = .{ "macos", "linux", "windows" },
     .permissions = .{ "view", "command" },
     .capabilities = .{ "native_views", "gpu_surfaces" },
     .shell = .{
