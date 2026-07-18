@@ -1,0 +1,148 @@
+# Attach a Linux x64 build to a published GitHub release.
+#
+# macOS and Windows artifacts are cut locally by scripts/make-release.sh on a
+# Mac. Linux cannot ride along with them: the binary links the GTK4 system
+# stack (113 shared libraries, nothing bundled), so it has to be BUILT on
+# Linux rather than cross-compiled. This workflow is that missing leg — it
+# fires when a release is published and uploads the tarball onto it.
+#
+# ubuntu-24.04 is a deliberate pin, not a default:
+#   - GTK 4.14 — the fractional-HiDPI patch in gtk_host.c is gated behind
+#     `#if GTK_CHECK_VERSION(4, 12, 0)`, so building against ubuntu-22.04's
+#     GTK 4.6 would silently compile the fix OUT and ship pixelated text.
+#     See docs/sdk-notes.md and vercel-labs/native#156.
+#   - glibc 2.39 — sets the floor for who can run the artifact
+#     (Ubuntu 24.04+, Fedora 40+, Arch; NOT Ubuntu 22.04 / Debian 12).
+name: Release (Linux)
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to attach the Linux build to (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  # Pinned: patches/native-sdk-local.patch is generated against this exact
+  # tarball, and a version bump can shift its context lines. Bump both
+  # together, then regenerate the patch (docs/sdk-notes.md).
+  NATIVE_SDK_VERSION: "0.5.3"
+  ZIG_VERSION: "0.16.0"
+  ZIG_SHA256: "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00"
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Resolve and validate tag
+        id: tag
+        # The tag reaches both a shell and actions/checkout's `ref:`, so it is
+        # taken through an env var (never interpolated straight into a script)
+        # and rejected unless it matches a strict vMAJOR.MINOR.PATCH shape.
+        # Git permits `$`, `(`, `)` and `;` in ref names, so an unvalidated tag
+        # is a command- and ref-injection vector even though only maintainers
+        # can publish a release.
+        env:
+          RAW_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          if ! printf '%s' "$RAW_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$'; then
+            echo "error: refusing tag '$RAW_TAG' — expected vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+          echo "tag=$RAW_TAG" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          # Safe: constrained to the strict charset validated above.
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          # libgtk-4-dev pulls the whole transitive dev tree (cairo, pango,
+          # gdk-pixbuf, graphene, epoxy...). No WebKitGTK: app.zon declares no
+          # web use, so the build graph compiles gtk_host.c with
+          # -DNATIVE_SDK_ALLOW_WEBKITGTK_STUB and links only gtk4 + dl + c.
+          sudo apt-get install -y --no-install-recommends libgtk-4-dev pkg-config
+          pkg-config --modversion gtk4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Zig
+        run: |
+          url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          curl -fsSL "$url" -o zig.tar.xz
+          echo "${ZIG_SHA256}  zig.tar.xz" | sha256sum -c -
+          sudo mkdir -p /opt/zig
+          sudo tar -xJf zig.tar.xz -C /opt/zig --strip-components=1
+          echo "/opt/zig" >> "$GITHUB_PATH"
+
+      - name: Install Native SDK
+        run: |
+          npm i -g "@native-sdk/cli@${NATIVE_SDK_VERSION}"
+          zig version
+          native --version
+
+      - name: Apply local SDK patches
+        # Without patch #3 this build ships the pixelated-text bug on every
+        # fractional-scale desktop. The script fails loudly on partial
+        # application, so a drifted patch file breaks the release instead of
+        # quietly degrading it.
+        run: ./scripts/apply-sdk-patches.sh
+
+      - name: Verify tag matches app.zon version
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          version="$(sed -n 's/.*\.version = "\([^"]*\)".*/\1/p' app.zon | head -1)"
+          [ -n "$version" ] || { echo "error: could not read .version from app.zon" >&2; exit 1; }
+          if [ "v$version" != "$TAG" ]; then
+            echo "error: tag $TAG does not match app.zon version $version (expected v$version)" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_ENV"
+
+      - name: Test
+        run: native test
+
+      - name: Build and package
+        run: |
+          native build
+          native package --target linux
+          test -x zig-out/package/subwave-desktop-linux/bin/subwave-desktop
+
+      - name: Smoke-check the binary
+        # No display on the runner, so the app cannot be launched — assert the
+        # link shape instead: GTK must be wired up and WebKitGTK must not be.
+        run: |
+          bin=zig-out/package/subwave-desktop-linux/bin/subwave-desktop
+          ldd "$bin" | grep -q libgtk-4 || { echo "error: not linked against GTK4" >&2; exit 1; }
+          if ldd "$bin" | grep -q libwebkit; then
+            echo "error: unexpected WebKitGTK link in a no-web build" >&2
+            exit 1
+          fi
+          echo "glibc floor: $(objdump -T "$bin" | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1)"
+
+      - name: Create tarball
+        run: |
+          mkdir -p dist
+          tarball="dist/SUBWAVE-Player-${version}-linux-x64.tar.gz"
+          tar -czf "$tarball" -C zig-out/package subwave-desktop-linux
+          ls -lh "$tarball"
+          echo "tarball=$tarball" >> "$GITHUB_ENV"
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          gh release upload "$TAG" --clobber \
+            "${tarball}#SUBWAVE Player ${version} (Linux x64, glibc 2.39+, needs GTK4)"
+          gh release view "$TAG" --json assets --jq '.assets[].name'
