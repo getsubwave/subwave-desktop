@@ -71,7 +71,17 @@ jobs:
         run: |
           native build
           native package --target windows --binary zig-out/bin/subwave-desktop.exe
-          test -f zig-out/package/subwave-desktop-windows/subwave-desktop.exe
+          # Locate the exe rather than asserting a hard-coded path: it lives in
+          # bin/ inside the package root, and a bare `test -f` on the wrong
+          # guess fails with nothing but exit 1. Print the tree so any future
+          # layout change diagnoses itself.
+          find zig-out/package/subwave-desktop-windows -type f
+          exe="$(find zig-out/package/subwave-desktop-windows -name subwave-desktop.exe -type f | head -1)"
+          if [ -z "$exe" ]; then
+            echo "error: no subwave-desktop.exe in the packaged tree" >&2
+            exit 1
+          fi
+          echo "packaged exe: $exe"
 
       - name: Create zip
         run: |
@@ -95,7 +105,13 @@ jobs:
         timeout-minutes: 6
         run: |
           native build -Dautomation=true
-          ./zig-out/bin/subwave-desktop.exe &
+          app="zig-out/bin/subwave-desktop.exe"
+          if [ ! -f "$app" ]; then
+            echo "error: automation build produced no exe at $app" >&2
+            ls -la zig-out/bin/ >&2
+            exit 1
+          fi
+          "./$app" &
           app_pid=$!
           if native automate wait; then
             echo "app reported ready on Windows"
