@@ -7,57 +7,88 @@ repo from the main `subwave` monorepo; it tracks the same station HTTP API.
 
 ## Features
 
-- **Live stream** — plays the endless Icecast MP3 (`/stream.mp3`) via
-  `fx.playAudio`, with play/pause/tune-out, volume, and 500 ms→60 s reconnect
-  backoff.
-- **Now playing** — 5 s poll of `/api/now-playing` + `/api/state`: title, artist,
-  album, genre, DJ, active show, listener count, elapsed.
-- **Cover art** — fetches `/api/cover/:id`, decodes and registers it as a disc.
+- **Live stream** — plays the endless Icecast stream via `fx.playAudio` with
+  tune-in/out, pause, volume, session mute, and 500 ms→60 s reconnect backoff.
+  **Listener-selectable format:** MP3 is the universal floor; AAC / Opus / FLAC
+  mounts appear in the back panel's SIGNAL row when the station advertises
+  them *and* the platform can decode them (see Codecs below).
+- **Now playing** — 5 s poll of `/api/now-playing` + `/api/state` +
+  `/api/session`: title, artist, album, year, genre, BPM, key, moods, energy,
+  LLM-token ticker, DJ, active show, listeners, elapsed, and the masthead
+  context line (show · vibe · weather).
+- **Cover art** — fetches `/api/cover/:id`, registers it as the stage's square
+  record sleeve (initials placeholder while it loads).
 - **Real spectrum** — the SDK's FFT `.spectrum` feed (32 bands) rendered as an
   accent-themed bar analyzer with classic attack/decay ballistics.
-- **Station themes** — polls `/api/themes` and repaints live via `DesignTokens`;
+- **Station themes** — 30 s poll of `/api/themes` repaints live via
+  `DesignTokens`, with a per-listener theme override and light/dark schemes;
   the resolver (`color.zig`) converts hex / rgb() / **oklch()** /
   **color-mix(in oklab, …)** to real colors.
-- **Two skins** — **Card** (roomy now-playing) and **Deck** (compact hi-fi
-  strip), switchable at runtime; both honor the station theme.
-- **Song requests** — a text field posts to `/api/request` and polls the result.
-- **Booth ticker** — the DJ's latest on-air line from `/api/session`.
-- **Station guide** — `/api/schedule` show list with topics, personas, and a
-  live-show dot, toggled from the header.
-- **Settings persistence** — volume/skin/theme-override/station survive
-  restarts (`settings.json` in the OS per-app config dir); the window shape
-  follows the saved skin at launch (Card 620×460, Deck 540×300).
-- **Menu-bar extra** — a status item (macOS `NSStatusItem`) with the live
-  now-playing lines and Play/Pause + Tune out, so the player is controllable
-  while the window is buried.
-- **Keyboard transport** — space = play/pause, ↑/↓ = volume (app-level
-  fallback; never steals typing from the request/station fields).
+- **Onboarding** — first run (no saved station) is a station-address form with
+  a four-step health check before tuning.
+- **Station switcher** — Cmd/Ctrl+K sidebar: persisted recents (MRU, 8) plus
+  the community directory (`getsubwave.com/stations.json`). A
+  `SUBWAVE_STATION_URL` env var overrides the persisted station.
+- **Section dial** — five stops (keys 1–5): station guide (`/api/schedule`
+  show list + 7×24 week grid with day tabs), timeline (up next + history), the
+  bare LIVE stage, booth feed (all/DJ/tracks filter; the DJ's latest line
+  tickers on the stage), and the request slip (`POST /api/request` with an
+  optional signed name + status polling).
+- **Signal + sleep** — timed `/api/health` probe → latency readout while
+  playing; sleep timer (15–90 min) from the tray or the back panel.
+- **Mini player** — a compact secondary window (420×168) toggled from the tray.
+- **Menu-bar extra** — macOS `NSStatusItem` (tray on Linux where supported):
+  live now-playing rows, tune in/out, mute, sleep cycle, open player, mini
+  player, quit. The red close button **hides** the main window — playback and
+  the tray stay alive (one of the local SDK patches, see below).
+- **Keyboard transport** — space play/pause, ↑/↓ volume, M mute, Esc back to
+  LIVE, Cmd/Ctrl+K stations, 1–5 dial stops (app-level fallback; never steals
+  typing from the text fields).
+- **Settings persistence** — volume / theme override / stream format / station
+  (+ name) / recents survive restarts (`settings.json` in the OS per-app
+  config dir), saved debounced + serialized via `fx.writeFile`.
 
 ## Layout
 
 ```
-app.zon                 manifest (id, platforms {macos,linux}, window)
+app.zon                 manifest (id, platforms {macos,linux}, window 980×660)
 src/
-  main.zig              App wiring (create + runWithOptions), view = skins.rootView
-  model.zig             Model / Msg / update (the reducer heart) + effects
+  main.zig              App wiring: shell config, key fallback, tray, mini window
+  model.zig             Model / Msg / boot / update (the reducer heart) + effects
   api.zig               endpoint URL builders (pure)
   json.zig              std.json typed decoders for each payload
   color.zig             hex/rgb/oklch/color-mix → canvas.Color (OKLab math) + tests
-  theme.zig             7 station tokens → DesignTokens; tokens_fn (skin-aware)
+  theme.zig             7 station tokens → DesignTokens (tokens_fn)
   spectrum.zig          band ballistics (pure) + tests
-  skins.zig             AppSkin registry; rootView branches on model.skin
-  skins/card.native     Card layout
-  skins/deck.native     Deck layout
-  tests.zig             view build/layout + pulls color/spectrum unit tests
+  stream_format.zig     format ↔ mount table + platform decode gate + tests
+  views.zig             view registry; composes the fragments around a Zig stage
+  views/*.native        onboarding, mini, player-top/-sidebar/-panel/-deck/-sheets
+  icons/*.svg           app icons, registered at boot as icon="app:<name>"
+  tests.zig             view build/layout contract + the pure modules' unit tests
 ```
 
 The player runs entirely through the SDK **effects channel** (`.update_fx`):
 timers drive polling, `fx.fetch` does HTTP, results return as typed Msgs, and
-`fx.playAudio`/`registerImageBytes` handle audio + cover art.
+`fx.playAudio`/`registerImageBytes` handle audio + cover art. The player view
+is **composed**: markup fragments around a Zig-built LIVE stage (the stage
+needs `ui.image` for the square cover art, which markup deliberately excludes).
 
 ## Build & run
 
-Requires **Zig 0.16.0** and the `@native-sdk/cli` (`npm i -g @native-sdk/cli`).
+Requires **Zig 0.16.0** and the `@native-sdk/cli` (`npm i -g @native-sdk/cli`,
+currently 0.5.3) — **plus the local SDK patches**. After every SDK
+install/upgrade:
+
+```bash
+./scripts/apply-sdk-patches.sh && native test
+```
+
+The patches (comptime quota fix for large markup, close-button-hides window,
+reserved tray ids) are documented in `docs/sdk-notes.md`; upstream issues
+[vercel-labs/native#148](https://github.com/vercel-labs/native/issues/148) and
+[#149](https://github.com/vercel-labs/native/issues/149). Symptoms of missing
+patches: `native build` fails in `ui_markup.zig`, and the close button quits
+the app.
 
 ```bash
 native build && ./zig-out/bin/subwave-desktop   # release build + run
@@ -75,20 +106,26 @@ native build -Dautomation=true
 native automate wait && native automate screenshot main-canvas
 ```
 
-## Codecs & platform integration (current status)
+## Codecs & the format picker
 
-**Stream codec: MP3 only, by design.** The player tunes the station's
-`/stream.mp3` mount; Opus/FLAC/AAC mounts are out of scope for v1 (see
-`docs/…plan.md`). If that changes, backend support is:
+The station always serves the `/stream.mp3` floor; operators can enable
+**AAC / Opus / FLAC** mounts, advertised via the `stream` flags on
+`/api/now-playing`. The picker offers a mount only when the station advertises
+it **and** the host engine can decode it (`stream_format.zig`):
 
 | Codec over Icecast | macOS (AVPlayer) | Linux (GStreamer `playbin`) |
 |---|---|---|
 | MP3 | ✅ | ✅ |
 | AAC (ADTS) | ✅ | ✅ where `gst-plugins-bad`/`libav` present |
-| Ogg Opus | ❌ not supported by AVFoundation | ✅ (`gst-plugins-base`) |
-| FLAC | ❌ no endless-stream FLAC | ✅ (`gst-plugins-good`) |
+| Ogg Opus | ❌ AVFoundation has no Ogg demuxer | ✅ offered optimistically |
+| FLAC | ❌ no endless-stream FLAC | ✅ offered optimistically |
 
-**OS media integration.** The SDK (0.5.1) has no system now-playing or
+Linux offers the Ogg mounts optimistically (decode support = installed
+plugins); a non-MP3 pick that keeps failing drops back to the MP3 floor after
+three reconnect attempts. macOS gates are exact, so failures there stay
+network-shaped and never cost the listener their stored pick.
+
+**OS media integration.** The SDK (0.5.3) has no system now-playing or
 media-key surface — no `MPNowPlayingInfoCenter`/`MPRemoteCommandCenter` on
 macOS, no MPRIS on Linux — so hardware play/pause keys and the OS Now Playing
 widget can't be wired up yet (SDK feature request). What IS wired up: the
@@ -107,8 +144,11 @@ transport, and per-track fetch of the station's own metadata (the app polls
 - **Gotcha:** a `/` in the *scene* window title crashes GTK at `app_start`; keep
   the branded slash out of `app.zon`/`shell_windows` titles (it's fine in
   `runWithOptions.window_title`).
-- The SDK can't resize a live window: a runtime skin switch relays out in the
-  old shape; the per-skin window shape applies at next launch.
+- The SDK can't resize a live window — that's why the mini player is its own
+  model-declared window rather than a main-window reshape.
+- The FFT spectrum feed only emits while a window is actually visible on the
+  glass (SDK occlusion gate) — a flat analyzer from an app launched in the
+  background is not a bug; activate the app first.
 
 ## Shipping checklist
 
