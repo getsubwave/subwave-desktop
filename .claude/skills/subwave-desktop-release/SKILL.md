@@ -66,9 +66,11 @@ the previous tag's assets, which is only right for re-cutting a botched build.
 
 ```bash
 gh release view vX.Y.Z --json assets --jq '.assets[].name'
+gh run list --workflow release-linux.yml --limit 1   # Linux leg
 ```
 
-Both assets must be listed. For more than a smoke: mount the DMG
+All three assets must be listed — DMG, Windows zip, and the Linux tarball
+that CI attaches a few minutes later. For more than a smoke: mount the DMG
 (`hdiutil attach … -nobrowse`), launch the app binary inside, detach. The
 running dev copy of the app is unaffected — but if one is running from
 `zig-out/`, rebuilding replaced its binary on disk; relaunch it after.
@@ -78,9 +80,13 @@ running dev copy of the app is unaffected — but if one is running from
 Download URLs follow this pattern:
 
 ```
-https://github.com/perminder-klair/subwave-desktop/releases/download/vX.Y.Z/SUBWAVE-Player-X.Y.Z.dmg
-https://github.com/perminder-klair/subwave-desktop/releases/download/vX.Y.Z/SUBWAVE-Player-X.Y.Z-windows-x64.zip
+https://github.com/getsubwave/subwave-desktop/releases/download/vX.Y.Z/SUBWAVE-Player-X.Y.Z.dmg
+https://github.com/getsubwave/subwave-desktop/releases/download/vX.Y.Z/SUBWAVE-Player-X.Y.Z-windows-x64.zip
+https://github.com/getsubwave/subwave-desktop/releases/download/vX.Y.Z/SUBWAVE-Player-X.Y.Z-linux-x64.tar.gz
 ```
+
+(The repo moved to the `getsubwave` org; `perminder-klair/subwave-desktop`
+URLs still redirect but don't hand those out.)
 
 For Discord/social drafts, read `references/announcement-voice.md` — the user
 has a specific humanized voice for these (first person, concrete numbers, no
@@ -98,5 +104,17 @@ marketing gloss) and approved examples live there.
   `native package --target windows --binary zig-out/bin/subwave-desktop.exe` —
   no Windows machine needed to build, but one IS needed to honestly claim it
   works.
-- Linux is declared in `app.zon` but has no packaged artifact yet — say
-  "builds from source" rather than promising a package.
+- **Linux is built by CI, not by this script.** It cannot be cross-compiled
+  from the Mac (the binary links the GTK4 system stack, 113 shared libraries,
+  nothing bundled), so `.github/workflows/release-linux.yml` builds it on
+  `ubuntu-24.04` and uploads the tarball onto the release. It triggers on
+  `release: published`, so `--publish` starts it automatically — the Linux
+  asset lands a few minutes AFTER the macOS and Windows ones. Don't announce
+  before it appears; re-run it with
+  `gh workflow run release-linux.yml -f tag=vX.Y.Z` if it failed.
+- The ubuntu-24.04 pin is load bearing: ubuntu-22.04 ships GTK 4.6 and the
+  fractional-HiDPI patch is gated on `GTK_CHECK_VERSION(4, 12, 0)`, so an
+  older runner would silently compile the fix out and ship pixelated text.
+- Linux artifact requires glibc 2.39+ and GTK4 — Ubuntu 24.04+, Fedora 40+,
+  Arch. Ubuntu 22.04 and Debian 12 users build from source; say so rather
+  than implying it runs everywhere.

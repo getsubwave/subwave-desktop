@@ -152,11 +152,21 @@ transport, and per-track fetch of the station's own metadata (the app polls
 
 ## Shipping checklist
 
-- `native package --target macos --output dist` builds the `.app`;
-  sign + notarize with a Developer ID identity (the CLI wraps
-  `codesign`/`notarytool`). Linux: `native package --target linux`.
-- Not yet done for release: CI (a `native check && native test` workflow),
-  auto-update (out of scope v1), crash reporting beyond the SDK's panic
-  capture, and a version bump past `0.1.0` in `app.zon`.
+- `./scripts/make-release.sh --publish` cuts the release from a Mac: macOS DMG
+  (signed; ad-hoc unless `SIGN_IDENTITY` is set) plus a cross-compiled Windows
+  x64 zip, then creates the GitHub release.
+- Linux rides in on CI. `.github/workflows/release-linux.yml` fires on
+  `release: published`, builds on `ubuntu-24.04` and uploads a
+  `-linux-x64.tar.gz` onto the same release. It cannot be cross-compiled from
+  the Mac — the binary links the GTK4 system stack (113 shared libraries,
+  nothing bundled), so it has to be built on Linux. The runner pin is load
+  bearing: ubuntu-22.04's GTK 4.6 would compile the fractional-HiDPI fix out
+  (it is gated on GTK 4.12+) and ship pixelated text.
+- Linux artifact requirements: glibc 2.39+ and GTK4 installed — so Ubuntu
+  24.04+, Fedora 40+, Arch; **not** Ubuntu 22.04 or Debian 12. Those build
+  from source.
+- Not yet done for release: a CI check on every push (the Linux workflow only
+  runs at release time), auto-update (out of scope v1), crash reporting beyond
+  the SDK's panic capture, and a version bump past `0.1.0` in `app.zon`.
 
 Design + plan live under `docs/`.
