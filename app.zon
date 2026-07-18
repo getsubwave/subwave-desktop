@@ -5,7 +5,7 @@
     // the in-app header still renders the branded "SUB/WAVE".
     .display_name = "SUBWAVE Player",
     .description = "Native desktop player for the SUB/WAVE internet radio station.",
-    .version = "0.2.0",
+    .version = "0.2.1",
     .icons = .{"assets/icon.png"},
     .platforms = .{ "macos", "linux", "windows" },
     .permissions = .{ "view", "command" },
