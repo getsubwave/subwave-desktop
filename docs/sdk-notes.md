@@ -1,6 +1,6 @@
 # Local SDK notes
 
-**Quick re-apply after any SDK upgrade** (both patches below, idempotent):
+**Quick re-apply after any SDK upgrade** (all three patches below, idempotent):
 
 ```bash
 ./scripts/apply-sdk-patches.sh
@@ -13,9 +13,12 @@ lines, regenerate it from the sections below). Reported upstream — drop each
 patch once its fix ships: quota bug in
 [vercel-labs/native#148](https://github.com/vercel-labs/native/issues/148),
 close-policy + tray commands in
-[vercel-labs/native#149](https://github.com/vercel-labs/native/issues/149). Symptoms of lost patches:
-`native build` fails at ui_markup.zig ~line 1014, and/or the red close
-button quits the app.
+[vercel-labs/native#149](https://github.com/vercel-labs/native/issues/149),
+fractional HiDPI scale in
+[vercel-labs/native#156](https://github.com/vercel-labs/native/issues/156).
+Symptoms of lost patches: `native build` fails at ui_markup.zig ~line 1014,
+the red close button quits the app, and/or text is pixelated on a
+fractional-scale Linux desktop.
 
 ## canonicalizeComptime quota patch (REQUIRED for player.native)
 
@@ -69,6 +72,45 @@ player) keep their real close + `on_close` dispatch.
 quota patch. Symptom of a lost patch: closing the player window quits the
 app. Worth requesting upstream as a proper option (e.g.
 `ShellWindow.close_policy = "hide"`).
+
+## Fractional HiDPI scale patch (Linux text rendering)
+
+On a fractional-scale Linux desktop (Wayland `wp_fractional_scale_v1` — e.g. a
+4K panel at 1.6667 / "167%") all text rendered blurry and pixelated, while
+macOS and Windows were fine. The GTK host derived the surface density from
+`gtk_widget_get_scale_factor()`, which is an **integer** API and rounds up:
+
+```
+gtk_widget_get_scale_factor(drawarea) = 2        <-- what gtk_host.c used
+gdk_surface_get_scale(surface)        = 1.6667   <-- the true scale
+```
+
+So the runtime rasterized the canvas at logical x 2 (2266x2492) for a surface
+that is only 1888x2076, and the surplus had to be resampled away at present
+time. Worse, the filter choice in `native_sdk_gpu_surface_draw` compared the
+buffer's density against that *same* integer, concluded "exact, steady state"
+and picked `CAIRO_FILTER_NEAREST` — so a genuinely fractional 2266->1888
+downscale ran through nearest-neighbour, dropping ~1 pixel column in 6 instead
+of averaging. Hard-edged UI survived that; glyph antialiasing did not, which is
+why only *text* looked broken. The other hosts read fractional densities
+(`backingScaleFactor` on macOS, `GetDpiForWindow()/96.0` on Windows), hence
+Linux-only.
+
+Patched locally on 2026-07-18 in `src/platform/linux/gtk_host.c` by adding
+`native_sdk_surface_device_scale()` / `native_sdk_widget_device_scale()`
+helpers that prefer `gdk_surface_get_scale()` (GTK 4.12+, fractional) and fall
+back to the integer API on older GTK, then routing all seven scale-reporting
+sites through them. The draw path's exactness test now compares the buffer
+against `ceil(logical x scale)` with one-pixel slack (the runtime ceils, so a
+1133-wide surface at 1.6667 yields an 1889px buffer for 1888px of screen) and
+maps buffer pixels 1:1 to device pixels when it matches, letting the surplus
+edge column fall outside the clip.
+
+**Re-apply after every `npm i -g @native-sdk/cli` upgrade** — or drop it once
+[vercel-labs/native#156](https://github.com/vercel-labs/native/issues/156)
+ships. Symptom of a lost patch: pixelated text on a fractional-scale display
+(integer scales such as 100%/200% are unaffected, which is why it can look fine
+on a second machine).
 
 ## Reserved tray item ids (Open player / Quit)
 

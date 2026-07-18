@@ -33,6 +33,7 @@ The globally installed `@native-sdk/cli` carries **required local patches** (`pa
 
 1. **canonicalizeComptime quota fix** in `ui_markup.zig` — without it, `native build` fails with `error: evaluation exceeded 1000 backwards branches` at ui_markup.zig ~line 1014. The markup documents in this app are too large for the SDK's default comptime quota.
 2. **Close-hides-window behavior** in `appkit_host.m` — without it the red close button quits the app instead of hiding to the menu-bar extra. Also reserves tray item ids 100 (unhide) / 101 (quit), which `main.zig`'s `statusItem` depends on.
+3. **Fractional HiDPI scale** in `gtk_host.c` — without it the host reports the integer `gtk_widget_get_scale_factor()` instead of the true `gdk_surface_get_scale()`, so on a fractional-scale Linux desktop (e.g. 167%) the canvas is rasterized oversized and nearest-neighbour-resampled down, which shreds glyph antialiasing and makes all text look pixelated. Linux-only; macOS/Windows already read fractional densities.
 
 **After every `npm i -g @native-sdk/cli` upgrade, run `./scripts/apply-sdk-patches.sh` then `native test`.** The script is idempotent and detects partial application.
 
