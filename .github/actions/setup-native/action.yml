@@ -1,0 +1,86 @@
+# Shared toolchain setup for the three release workflows: Zig, Node, the
+# Native SDK, and the repo's local SDK patches.
+#
+# The version pins live HERE and nowhere else. patches/native-sdk-local.patch
+# is generated against one exact SDK tarball and a bump can shift its context
+# lines, so three copies of that pin across three workflow files would be a
+# drift bug waiting to happen.
+#
+# Zig is downloaded straight from ziglang.org and checksummed rather than
+# pulled via a third-party setup action: these workflows produce the binaries
+# people download, so the toolchain gets one less party to trust. The checksum
+# is the point — a tampered download fails the job instead of shipping.
+name: Set up Native SDK toolchain
+description: Install Zig, Node and @native-sdk/cli, then apply the local SDK patches.
+
+inputs:
+  zig-version:
+    description: Zig version to install
+    default: "0.16.0"
+  native-sdk-version:
+    description: "@native-sdk/cli version to install"
+    default: "0.5.3"
+  apply-patches:
+    description: Whether to run scripts/apply-sdk-patches.sh
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: "22"
+
+    - name: Install Zig ${{ inputs.zig-version }}
+      shell: bash
+      env:
+        ZIG_VERSION: ${{ inputs.zig-version }}
+      run: |
+        set -euo pipefail
+        case "$RUNNER_OS" in
+          Linux)   slug="x86_64-linux";   ext="tar.xz"; sha="70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00" ;;
+          macOS)   slug="aarch64-macos";  ext="tar.xz"; sha="b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489" ;;
+          Windows) slug="x86_64-windows"; ext="zip";    sha="68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e" ;;
+          *) echo "error: unsupported runner OS '$RUNNER_OS'" >&2; exit 1 ;;
+        esac
+
+        archive="zig.${ext}"
+        curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-${slug}-${ZIG_VERSION}.${ext}" -o "$archive"
+
+        # macOS ships `shasum`, not coreutils' `sha256sum`; git-bash on the
+        # Windows runner has `sha256sum`.
+        if command -v sha256sum >/dev/null 2>&1; then
+          echo "${sha}  ${archive}" | sha256sum -c -
+        else
+          echo "${sha}  ${archive}" | shasum -a 256 -c -
+        fi
+
+        mkdir -p "$HOME/zig"
+        if [ "$ext" = "zip" ]; then
+          # Expand-Archive is guaranteed present on any PowerShell 5+ runner,
+          # unlike unzip or 7z.
+          powershell -NoProfile -Command "Expand-Archive -Force -Path '$archive' -DestinationPath 'zig-extract'"
+          mv zig-extract/zig-*/* "$HOME/zig/"
+        else
+          tar -xJf "$archive" -C "$HOME/zig" --strip-components=1
+        fi
+        echo "$HOME/zig" >> "$GITHUB_PATH"
+
+    - name: Install Native SDK ${{ inputs.native-sdk-version }}
+      shell: bash
+      env:
+        NATIVE_SDK_VERSION: ${{ inputs.native-sdk-version }}
+      run: |
+        set -euo pipefail
+        npm i -g "@native-sdk/cli@${NATIVE_SDK_VERSION}"
+        zig version
+        native --version
+
+    - name: Apply local SDK patches
+      # A release must never ship without these. The script fails loudly on
+      # partial application, so a patch file that has drifted against a new SDK
+      # breaks the build instead of quietly degrading the artifact (which is
+      # exactly how the pixelated-text bug would come back on Linux).
+      if: inputs.apply-patches == 'true'
+      shell: bash
+      run: ./scripts/apply-sdk-patches.sh

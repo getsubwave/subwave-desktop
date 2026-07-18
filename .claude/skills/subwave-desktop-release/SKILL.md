@@ -104,17 +104,23 @@ marketing gloss) and approved examples live there.
   `native package --target windows --binary zig-out/bin/subwave-desktop.exe` —
   no Windows machine needed to build, but one IS needed to honestly claim it
   works.
-- **Linux is built by CI, not by this script.** It cannot be cross-compiled
-  from the Mac (the binary links the GTK4 system stack, 113 shared libraries,
-  nothing bundled), so `.github/workflows/release-linux.yml` builds it on
-  `ubuntu-24.04` and uploads the tarball onto the release. It triggers on
-  `release: published`, so `--publish` starts it automatically — the Linux
-  asset lands a few minutes AFTER the macOS and Windows ones. Don't announce
-  before it appears; re-run it with
-  `gh workflow run release-linux.yml -f tag=vX.Y.Z` if it failed.
-- The ubuntu-24.04 pin is load bearing: ubuntu-22.04 ships GTK 4.6 and the
-  fractional-HiDPI patch is gated on `GTK_CHECK_VERSION(4, 12, 0)`, so an
-  older runner would silently compile the fix out and ship pixelated text.
+- **All three artifacts are also built by CI**, one workflow per platform
+  (`release-macos.yml`, `release-windows.yml`, `release-linux.yml`), triggered
+  by `release: published`. So `--publish` starts them automatically and the CI
+  assets land a few minutes after the script's own upload, clobbering it with
+  an equivalent build. Don't announce until all three are listed; re-run a
+  failed leg with `gh workflow run release-<os>.yml -f tag=vX.Y.Z`.
+- Linux exists ONLY as CI — it cannot be cross-compiled from the Mac (the
+  binary links the GTK4 system stack, 113 shared libraries, nothing bundled).
+- Two runner pins are load bearing. `ubuntu-24.04`: ubuntu-22.04 ships GTK 4.6
+  and the fractional-HiDPI patch is gated on `GTK_CHECK_VERSION(4, 12, 0)`, so
+  an older runner silently compiles the fix out and ships pixelated text.
+  `windows-latest`: the point is launching the app on real Windows under
+  `-Dautomation=true`, which is what retires the "untested on real hardware"
+  caveat. If that smoke test proves unreachable in a runner's service session,
+  narrow it to launch-and-survive rather than deleting it.
+- CI signs macOS **ad-hoc**, same as the script's default. Don't describe a
+  CI-built DMG as notarized.
 - Linux artifact requires glibc 2.39+ and GTK4 — Ubuntu 24.04+, Fedora 40+,
   Arch. Ubuntu 22.04 and Debian 12 users build from source; say so rather
   than implying it runs everywhere.
