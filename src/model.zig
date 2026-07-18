@@ -3,12 +3,15 @@
 //! does the App wiring, views/*.native are the views.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const native_sdk = @import("native_sdk");
 const canvas = native_sdk.canvas;
 const api = @import("api.zig");
 const json = @import("json.zig");
 const color = @import("color.zig");
 const spectrum = @import("spectrum.zig");
+const stream_format = @import("stream_format.zig");
+pub const StreamFormat = stream_format.StreamFormat;
 
 // Default listening volume on tune-in. (Decode/position/spectrum report
 // regardless of output volume; set to 0.0 to boot muted for headless runs.)
@@ -65,7 +68,7 @@ pub const Phase = enum { onboarding, player };
 pub const Tab = enum { schedule, timeline, live, booth, request };
 
 /// Back-panel popover stack (none = closed).
-pub const Sheet = enum { none, panel, sleep, themes };
+pub const Sheet = enum { none, panel, sleep, themes, format };
 
 pub const BoothFilter = enum { all, dj, tracks };
 
@@ -214,6 +217,17 @@ pub const Model = struct {
     stream_failed: bool = false,
     elapsed_ms: i64 = 0,
     retry: u6 = 0,
+
+    // Listener-picked stream format (persisted; MP3 = the default floor) +
+    // the optional-mount flags the station last advertised on /now-playing.
+    // Pre-first-poll (flags unknown) the stored pick is trusted
+    // optimistically — the first poll self-corrects a dead mount to the
+    // floor (see effectiveFormat / got_np).
+    format_pref: StreamFormat = .mp3,
+    stream_flags_known: bool = false,
+    stream_opus: bool = false,
+    stream_flac: bool = false,
+    stream_aac: bool = false,
 
     // signal probe (timed GET /api/health while playing)
     latency_ms: i64 = -1, // -1 = no reading yet
@@ -571,6 +585,9 @@ pub const Model = struct {
     pub fn sheet_themes(self: *const Model) bool {
         return self.sheet == .themes;
     }
+    pub fn sheet_format(self: *const Model) bool {
+        return self.sheet == .format;
+    }
 
     // ------------------------------------------------------------ sleep timer
     pub fn sleep_armed(self: *const Model) bool {
@@ -881,6 +898,61 @@ pub const Model = struct {
         return self.theme_override;
     }
 
+    // --------------------------------------------------------- stream format
+    /// Does the station advertise the mount as live? MP3 is the always-on
+    /// floor; the rest need their explicit flag (unknown-yet counts as NOT
+    /// advertised — the picker only offers what's confirmed).
+    pub fn stationEnables(self: *const Model, format: StreamFormat) bool {
+        return switch (format) {
+            .mp3 => true,
+            .aac => self.stream_aac,
+            .opus => self.stream_opus,
+            .flac => self.stream_flac,
+        };
+    }
+    /// The format to actually tune with: the stored pick while the platform
+    /// can decode it and the station still (or plausibly, pre-first-poll)
+    /// serves it; everything else falls back to the universal MP3 floor.
+    pub fn effectiveFormat(self: *const Model) StreamFormat {
+        if (!stream_format.platformSupports(self.format_pref)) return .mp3;
+        if (self.stream_flags_known and !self.stationEnables(self.format_pref)) return .mp3;
+        return self.format_pref;
+    }
+    pub const FormatRow = struct {
+        id: []const u8 = "",
+        label: []const u8 = "",
+        detail: []const u8 = "",
+        on: bool = false,
+    };
+    /// The formats the listener can pick right now: platform-decodable AND
+    /// advertised by the station. Always contains at least MP3.
+    pub fn format_rows(self: *const Model, arena: std.mem.Allocator) []const FormatRow {
+        var out: std.ArrayList(FormatRow) = .empty;
+        const effective = self.effectiveFormat();
+        for (StreamFormat.all) |f| {
+            if (!stream_format.platformSupports(f) or !self.stationEnables(f)) continue;
+            out.append(arena, .{
+                .id = f.id(),
+                .label = f.label(),
+                .detail = f.detail(),
+                .on = f == effective,
+            }) catch break;
+        }
+        return out.items;
+    }
+    /// The back panel's SIGNAL row hides while the MP3 floor is the only
+    /// pick (mirrors the mobile app's format drawer).
+    pub fn has_format_choice(self: *const Model) bool {
+        for (StreamFormat.all) |f| {
+            if (f == .mp3) continue;
+            if (stream_format.platformSupports(f) and self.stationEnables(f)) return true;
+        }
+        return false;
+    }
+    pub fn format_value(self: *const Model) []const u8 {
+        return self.effectiveFormat().label();
+    }
+
     // The chart-bound spectrum series.
     pub fn bands(self: *const Model) []const f32 {
         return self.band_levels[0..];
@@ -920,6 +992,9 @@ pub const Model = struct {
         "probe_t0",           "probe_fails",         "probe_inflight",      "probe_slow",
         "sched_grid",         "dj",                  "ob_https",            "ob_checking",
         "ob_steps",           "ob_done",             "chrome_top",
+        // stream-format state (bound via format_rows/format_value)
+        "format_pref",        "stream_flags_known",  "stream_opus",
+        "stream_flac",        "stream_aac",          "stationEnables",      "effectiveFormat",
         // station / settings / theme-override state
         "base",               "base_buf",            "stream_url_buf",      "settings_path",
         "settings_path_buf",  "settings_json_buf",   "station_buffer",      "theme_override",
@@ -993,6 +1068,7 @@ pub const Msg = union(enum) {
     open_panel,
     open_sleep,
     open_themes,
+    open_format,
     close_sheet,
     toggle_mini,
     expand_mini,
@@ -1020,6 +1096,7 @@ pub const Msg = union(enum) {
     pick_discover: []const u8, // payload = url
     follow_station,
     pick_theme: []const u8, // payload = theme id
+    pick_format: []const u8, // payload = format id ("mp3" | "aac" | "opus" | "flac")
 
     // onboarding
     ob_toggle_scheme,
@@ -1096,7 +1173,7 @@ fn startStream(model: *Model, fx: *Effects) void {
     fx.cancelTimer(keys.reconnect);
     // Stream URL lives in a stable model buffer (the audio effect streams from
     // it continuously; a stack buffer could dangle).
-    const url = api.streamUrl(&model.stream_url_buf, model.base) catch return;
+    const url = api.streamMount(&model.stream_url_buf, model.base, model.effectiveFormat().mount()) catch return;
     fx.playAudio(.{
         .key = keys.audio,
         .path = "",
@@ -1192,6 +1269,10 @@ pub fn applySettingsJson(model: *Model, bytes: []const u8) void {
     const s = parsed.value;
     if (s.volume) |v| model.volume = std.math.clamp(v, 0.0, 1.0);
     if (s.themeOverride) |t| setStr(&model.theme_override_buf, &model.theme_override, t);
+    // Unknown ids (or none) keep the MP3 floor.
+    if (s.streamFormat) |f| {
+        if (stream_format.fromId(f)) |fmt| model.format_pref = fmt;
+    }
     if (s.station) |st| {
         if (st.len > 0) {
             if (api.normalizeBase(&model.base_buf, st)) |b| {
@@ -1229,9 +1310,10 @@ fn saveSettings(model: *Model, fx: *Effects) void {
     }
     var w = std.Io.Writer.fixed(&model.settings_json_buf);
     var esc: [256]u8 = undefined;
-    w.print("{{\"volume\":{d:.2},\"themeOverride\":\"{s}\",\"station\":\"{s}\",\"stationName\":\"{s}\",\"recents\":[", .{
+    w.print("{{\"volume\":{d:.2},\"themeOverride\":\"{s}\",\"streamFormat\":\"{s}\",\"station\":\"{s}\",\"stationName\":\"{s}\",\"recents\":[", .{
         model.volume,
         jsonEscape(esc[0..64], model.theme_override),
+        model.format_pref.id(),
         model.base,
         jsonEscape(esc[64..128], model.station_name),
     }) catch return;
@@ -1252,6 +1334,15 @@ fn scheduleSave(model: *Model, fx: *Effects) void {
 
 fn scheduleReconnect(model: *Model, fx: *Effects) void {
     model.stream_failed = true;
+    // Linux offers every mount optimistically (GStreamer decode support is
+    // whatever plugins are installed) — a non-MP3 mount that keeps failing
+    // drops to the floor instead of error-looping against a codec the host
+    // can't play. macOS gates are exact, so its failures stay network-shaped
+    // and never cost the listener their pick.
+    if (builtin.os.tag == .linux and model.retry >= 3 and model.effectiveFormat() != .mp3) {
+        model.format_pref = .mp3;
+        saveSettings(model, fx);
+    }
     // 500ms → 60s exponential backoff (ports web/hooks/usePlayer.ts).
     const shift: u5 = @intCast(@min(model.retry, 7));
     const delay: u32 = @min(@as(u32, 500) * (@as(u32, 1) << shift), 60_000);
@@ -1322,6 +1413,13 @@ fn retune(model: *Model, fx: *Effects) void {
     model.ctx_vibe = "";
     model.ctx_cond = "";
     model.ctx_temp = -999;
+    // The format pick is per station: the new station's mounts are unknown
+    // until its first poll, and the old pick doesn't carry over.
+    model.format_pref = .mp3;
+    model.stream_flags_known = false;
+    model.stream_opus = false;
+    model.stream_flac = false;
+    model.stream_aac = false;
     // Cancel everything still in flight for the OLD station so a late
     // response can't repopulate the fresh state.
     fx.cancel(keys.fetch_np);
@@ -1529,6 +1627,19 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 if (l.current) |c| model.listeners = c;
             }
             if (np.llmTokens) |tok| model.llm_tokens = tok;
+            // Optional-mount flags. When they move the effective format —
+            // the operator turned the picked mount off (or back on), or the
+            // optimistic pre-poll pick turned out wrong — the live stream
+            // follows right away instead of error-looping on a dead mount.
+            if (np.stream) |sf| {
+                const before = model.effectiveFormat();
+                model.stream_flags_known = true;
+                model.stream_opus = sf.opusEnabled orelse false;
+                model.stream_flac = sf.flacEnabled orelse false;
+                model.stream_aac = sf.aacEnabled orelse false;
+                if (model.transport == .playing and model.effectiveFormat() != before)
+                    startStream(model, fx);
+            }
             // Offline debounce: 4 consecutive offline reads before we believe it.
             if (np.streamOnline) |on| {
                 if (on) {
@@ -2028,6 +2139,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .open_panel => model.sheet = .panel,
         .open_sleep => model.sheet = .sleep,
         .open_themes => model.sheet = .themes,
+        .open_format => model.sheet = .format,
         .close_sheet => model.sheet = .none,
         .toggle_mini => model.mini_open = !model.mini_open,
         .expand_mini => model.mini_open = false,
@@ -2089,6 +2201,17 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             setStr(&model.theme_override_buf, &model.theme_override, id);
             fetchThemes(model, fx);
             saveSettings(model, fx);
+        },
+        .pick_format => |id| {
+            const fmt = stream_format.fromId(id) orelse return;
+            const before = model.effectiveFormat();
+            model.format_pref = fmt;
+            saveSettings(model, fx);
+            // Retune in place mid-listen; a stopped/paused player keeps the
+            // pick for its next start.
+            if (model.transport == .playing and model.effectiveFormat() != before)
+                startStream(model, fx);
+            model.sheet = .panel; // back to the panel with the new value showing
         },
 
         // -------------------------------------------------------- onboarding
@@ -2418,4 +2541,91 @@ test "request slip lifecycle: submit → pending → resolved card" {
     update(&m, .reset_request, &fx);
     try testing.expectEqual(ReqPhase.idle, m.req_phase);
     try testing.expectEqualStrings("", m.req_text());
+}
+
+test "effective format: platform + station gates fall back to the MP3 floor" {
+    var m: Model = .{};
+    // Pre-first-poll the stored pick is trusted optimistically.
+    m.format_pref = .aac;
+    try testing.expectEqual(StreamFormat.aac, m.effectiveFormat());
+    // Once flags land, an unadvertised mount snaps to the floor…
+    m.stream_flags_known = true;
+    try testing.expectEqual(StreamFormat.mp3, m.effectiveFormat());
+    // …and comes back when the operator turns it on.
+    m.stream_aac = true;
+    try testing.expectEqual(StreamFormat.aac, m.effectiveFormat());
+    // Ogg-encapsulated mounts additionally need a platform that demuxes Ogg.
+    m.format_pref = .opus;
+    m.stream_opus = true;
+    const expect_opus: StreamFormat = if (stream_format.platformSupports(.opus)) .opus else .mp3;
+    try testing.expectEqual(expect_opus, m.effectiveFormat());
+}
+
+test "format picker: hidden on the floor, a pick retunes in place and persists" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var m: Model = .{};
+    // Only the MP3 floor confirmed → no SIGNAL row, one option listed.
+    try testing.expect(!m.has_format_choice());
+    try testing.expectEqual(@as(usize, 1), m.format_rows(arena).len);
+    m.stream_flags_known = true;
+    m.stream_aac = true;
+    try testing.expect(m.has_format_choice());
+    try testing.expectEqual(@as(usize, 2), m.format_rows(arena).len);
+    // Picking AAC mid-listen rebuilds the stream URL on the new mount and
+    // lands back on the panel.
+    m.transport = .playing;
+    m.sheet = .format;
+    update(&m, .{ .pick_format = "aac" }, &fx);
+    try testing.expectEqual(StreamFormat.aac, m.format_pref);
+    try testing.expectEqualStrings("AAC", m.format_value());
+    try testing.expectEqual(Sheet.panel, m.sheet);
+    try testing.expect(std.mem.startsWith(u8, &m.stream_url_buf, "https://www.getsubwave.com/stream.aac"));
+    // Junk ids are ignored.
+    update(&m, .{ .pick_format = "wav" }, &fx);
+    try testing.expectEqual(StreamFormat.aac, m.format_pref);
+}
+
+test "got_np stream flags retune a playing stream off a dead mount" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.transport = .playing;
+    m.format_pref = .aac;
+    m.stream_flags_known = true;
+    m.stream_aac = true;
+    // Operator turns the AAC mount off — the next poll snaps to the floor.
+    update(&m, .{ .got_np = .{ .key = keys.fetch_np, .outcome = .ok, .status = 200, .body = "{\"stream\":{\"aacEnabled\":false}}" } }, &fx);
+    try testing.expect(!m.stream_aac);
+    try testing.expectEqual(StreamFormat.mp3, m.effectiveFormat());
+    try testing.expect(std.mem.startsWith(u8, &m.stream_url_buf, "https://www.getsubwave.com/stream.mp3"));
+}
+
+test "settings round-trip the stream format; junk ids keep the floor" {
+    var m: Model = .{};
+    applySettingsJson(&m, "{\"streamFormat\":\"flac\",\"volume\":0.5}");
+    try testing.expectEqual(StreamFormat.flac, m.format_pref);
+    var m2: Model = .{};
+    applySettingsJson(&m2, "{\"streamFormat\":\"wav\"}");
+    try testing.expectEqual(StreamFormat.mp3, m2.format_pref);
+}
+
+test "switching stations resets the format pick to the floor" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.format_pref = .aac;
+    m.stream_flags_known = true;
+    m.stream_aac = true;
+    m.station_buffer.set("radio.example");
+    update(&m, .tune_station, &fx);
+    try testing.expectEqual(StreamFormat.mp3, m.format_pref);
+    try testing.expect(!m.stream_flags_known);
+    try testing.expect(!m.stream_aac);
 }
