@@ -12,14 +12,24 @@ pub const Track = struct {
     subsonic_id: ?[]const u8 = null,
     genre: ?[]const u8 = null,
     duration: ?f64 = null, // seconds; may be int or float in JSON
+    year: ?i64 = null,
+    bpm: ?f64 = null, // library analysis may emit fractional BPM
+    musicalKey: ?[]const u8 = null,
+    moods: ?[][]const u8 = null,
+    energy: ?[]const u8 = null,
 };
 
 pub const Dj = struct {
     name: ?[]const u8 = null,
 };
 
+pub const Persona = struct {
+    name: ?[]const u8 = null,
+};
+
 pub const ActiveShow = struct {
     name: ?[]const u8 = null,
+    persona: ?Persona = null,
 };
 
 // listeners is an object {current, peak}, not a scalar.
@@ -28,20 +38,64 @@ pub const Listeners = struct {
     peak: ?i64 = null,
 };
 
+// Context envelope on /now-playing — drives the masthead vibe line.
+pub const TimeCtx = struct {
+    show: ?[]const u8 = null,
+    vibe: ?[]const u8 = null,
+};
+pub const WeatherCtx = struct {
+    condition: ?[]const u8 = null,
+    temp: ?f64 = null,
+};
+pub const Context = struct {
+    time: ?TimeCtx = null,
+    weather: ?WeatherCtx = null,
+    dominantMood: ?[]const u8 = null,
+};
+
 pub const NowPlaying = struct {
     nowPlaying: ?Track = null,
+    context: ?Context = null,
     dj: ?Dj = null,
     activeShow: ?ActiveShow = null,
     listeners: ?Listeners = null,
     streamOnline: ?bool = null,
+    llmTokens: ?i64 = null,
 };
 
 pub const Theme = struct {
     active: ?[]const u8 = null,
 };
 
+// /api/state — theme flip signal + the queue/history ledger (Timeline panel).
+pub const QueueEntry = struct {
+    title: ?[]const u8 = null,
+    artist: ?[]const u8 = null,
+    requestedBy: ?[]const u8 = null,
+    t: ?[]const u8 = null, // ISO timestamp on history entries
+};
+
 pub const StationState = struct {
     theme: ?Theme = null,
+    upcoming: ?[]QueueEntry = null,
+    history: ?[]QueueEntry = null,
+};
+
+// /api/dj — station identity for the masthead + onboarding booth step.
+pub const DjPublic = struct {
+    name: ?[]const u8 = null,
+    station: ?[]const u8 = null,
+    location: ?[]const u8 = null,
+    tagline: ?[]const u8 = null,
+};
+
+// {directory}/stations.json — curated community stations (Discover).
+pub const DirectoryStation = struct {
+    name: ?[]const u8 = null,
+    url: ?[]const u8 = null,
+    location: ?[]const u8 = null,
+    genre: ?[]const u8 = null,
+    featured: ?bool = null,
 };
 
 // /api/themes — the 7 CSS tokens carry "--" prefixes, so the struct fields use
@@ -58,6 +112,7 @@ pub const Tokens = struct {
 
 pub const ThemeEntry = struct {
     id: ?[]const u8 = null,
+    name: ?[]const u8 = null,
     mode: ?[]const u8 = null,
     tokens: ?Tokens = null,
 };
@@ -67,21 +122,34 @@ pub const ThemesPayload = struct {
     themes: ?[]ThemeEntry = null,
 };
 
-// POST /api/request → 202 { success, requestId, status }
+// The track a resolved request points at.
+pub const RequestTrack = struct {
+    title: ?[]const u8 = null,
+    artist: ?[]const u8 = null,
+};
+
+// POST /api/request → 202 { success, requestId, ack, status, ... }
 pub const RequestPost = struct {
     requestId: ?[]const u8 = null,
     status: ?[]const u8 = null,
+    ack: ?[]const u8 = null,
 };
 
-// GET /api/request/:id → { status, message, queuePosition, ... }
+// GET /api/request/:id → { status, message, ack, track, queuePosition, ... }
 pub const RequestStatus = struct {
     status: ?[]const u8 = null,
     message: ?[]const u8 = null,
+    ack: ?[]const u8 = null,
+    track: ?RequestTrack = null,
     queuePosition: ?i64 = null,
 };
 
-// GET /api/session → { messages: [{ role, kind, text }] }
+// GET /api/session → { messages: [{ t, role, kind, text }] }
 pub const SessionMsg = struct {
+    // ISO timestamp string OR epoch number depending on station version — a
+    // Value survives both (a typed ?[]const u8 would fail the whole parse on
+    // a numeric t).
+    t: ?std.json.Value = null,
     role: ?[]const u8 = null,
     kind: ?[]const u8 = null,
     text: ?[]const u8 = null,
@@ -101,17 +169,49 @@ pub const SchedShow = struct {
     topic: ?[]const u8 = null,
     personaId: ?[]const u8 = null,
 };
+// The 7x24 grid: JSON object keyed "0".."6" (Sun..Sat), each a 24-slot array
+// of showId|null. @"N" field names match the numeric-string keys verbatim.
+pub const SchedGrid = struct {
+    @"0": ?[]?[]const u8 = null,
+    @"1": ?[]?[]const u8 = null,
+    @"2": ?[]?[]const u8 = null,
+    @"3": ?[]?[]const u8 = null,
+    @"4": ?[]?[]const u8 = null,
+    @"5": ?[]?[]const u8 = null,
+    @"6": ?[]?[]const u8 = null,
+
+    pub fn day(self: *const SchedGrid, index: usize) ?[]?[]const u8 {
+        return switch (index) {
+            0 => self.@"0",
+            1 => self.@"1",
+            2 => self.@"2",
+            3 => self.@"3",
+            4 => self.@"4",
+            5 => self.@"5",
+            6 => self.@"6",
+            else => null,
+        };
+    }
+};
+
 pub const SchedulePayload = struct {
     personas: ?[]SchedPersona = null,
     shows: ?[]SchedShow = null,
+    schedule: ?SchedGrid = null,
 };
 
-// settings.json on disk
+// settings.json on disk (v2: recents ride along; the legacy "skin" key is
+// simply ignored on load — old files still parse).
+pub const SettingsRecent = struct {
+    name: ?[]const u8 = null,
+    url: ?[]const u8 = null,
+};
 pub const Settings = struct {
     volume: ?f32 = null,
-    skin: ?[]const u8 = null,
     themeOverride: ?[]const u8 = null,
     station: ?[]const u8 = null,
+    stationName: ?[]const u8 = null,
+    recents: ?[]SettingsRecent = null,
 };
 
 // Parse `body` into T, tolerating unknown/extra fields. Caller owns the result

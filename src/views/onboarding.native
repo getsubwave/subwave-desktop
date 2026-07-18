@@ -1,0 +1,145 @@
+<!-- Onboarding — first-run station setup with a live health check.
+     Entry: scheme toggle + host field, known stations, Discover.
+     Check: four steps (host · controller /health · stream · DJ booth),
+     then a tune-in card. -->
+
+<template name="section-label" args="title">
+  <row gap="10" cross="center">
+    <text size="sm" foreground="text_muted">{title}</text>
+    <panel height="1" grow="1" background="border"/>
+  </row>
+</template>
+
+<column grow="1">
+  <!-- Window chrome strip (drag region under the hidden titlebar) -->
+  <row cross="center" gap="10" height="52" padding="8" window-drag="true">
+    <spacer width="{chrome_leading}"/>
+    <text size="sm" foreground="text_muted">SUB/WAVE — SETUP</text>
+    <spacer grow="1"/>
+  </row>
+  <separator/>
+
+  <scroll grow="1">
+    <column cross="center" padding="32">
+      <column gap="12" width="520">
+
+        <!-- Brand -->
+        <row gap="10" cross="center">
+          <icon name="app:disc" width="22" height="22" foreground="accent"/>
+          <text size="heading">SUB/WAVE</text>
+        </row>
+        <text size="sm" foreground="text_muted">SELF-HOSTED INTERNET RADIO</text>
+        <text size="display">Tune in to a station</text>
+
+        <if test="{ob_entry}">
+          <text size="sm" foreground="text_muted" wrap="true">Point SUB/WAVE at a station's URL — your own box, or a friend's. It's one stream, one broadcast: you join whatever's on.</text>
+          <row gap="8" cross="center">
+            <button variant="outline" on-press="ob_toggle_scheme" label="Switch HTTPS / HTTP">{ob_scheme}</button>
+            <search-field text="{station_text}" placeholder="radio.yourhost.com" on-input="station_edit" on-submit="ob_run_check" grow="1"/>
+          </row>
+          <text size="sm" foreground="text_muted">Tap the prefix to switch HTTPS / HTTP.</text>
+          <button variant="primary" on-press="ob_run_check">Run health check</button>
+
+          <use template="section-label" title="OR PICK A KNOWN STATION"/>
+          <column gap="0">
+            <row on-press="ob_pick_known:{featured_url}" gap="10" cross="center" padding="10" label="{featured_name}">
+              <icon name="circle-dot" width="10" height="10" foreground="accent"/>
+              <column gap="1" grow="1">
+                <text><span weight="medium">{featured_name}</span></text>
+                <text size="sm" foreground="text_muted">{featured_display}</text>
+              </column>
+              <icon name="chevron-right" width="12" height="12" foreground="text_muted"/>
+            </row>
+            <separator/>
+            <for each="recents_list" key="url" as="st">
+              <row on-press="ob_pick_known:{st.url}" gap="10" cross="center" padding="10" label="{st.name}">
+                <column gap="1" grow="1">
+                  <text wrap="false" overflow="ellipsis">{st.name}</text>
+                  <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{st.url}</text>
+                </column>
+                <icon name="chevron-right" width="12" height="12" foreground="text_muted"/>
+              </row>
+              <separator/>
+            </for>
+          </column>
+
+          <if test="{has_discover}">
+            <use template="section-label" title="DISCOVER"/>
+            <column gap="0">
+              <for each="discover_list" key="url" as="st">
+                <row on-press="ob_pick_known:{st.url}" gap="10" cross="center" padding="10" label="{st.name}">
+                  <column gap="1" grow="1">
+                    <text wrap="false" overflow="ellipsis">{st.name}</text>
+                    <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{st.sub}</text>
+                  </column>
+                  <icon name="chevron-right" width="12" height="12" foreground="text_muted"/>
+                </row>
+                <separator/>
+              </for>
+            </column>
+          </if>
+        </if>
+
+        <else>
+          <!-- Check phase -->
+          <row gap="10" cross="end">
+            <text size="sm" foreground="text_muted">CHECKING</text>
+            <text grow="1"><span mono="true">{ob_target_url}</span></text>
+          </row>
+          <separator/>
+          <column gap="0">
+            <for each="ob_step_rows" as="step">
+              <row gap="12" cross="center" padding="10">
+                <if test="{step.done}">
+                  <icon name="check-circle" width="14" height="14" foreground="accent"/>
+                </if>
+                <else>
+                  <if test="{step.failed}">
+                    <icon name="x-circle" width="14" height="14" foreground="destructive"/>
+                  </if>
+                  <else>
+                    <icon name="circle-dot" width="14" height="14" foreground="text_muted"/>
+                  </else>
+                </else>
+                <text grow="1">{step.label}</text>
+                <if test="{step.done}">
+                  <text size="sm" foreground="accent">OK</text>
+                </if>
+                <if test="{step.running}">
+                  <spinner/>
+                </if>
+                <if test="{step.failed}">
+                  <text size="sm" foreground="destructive">FAILED</text>
+                </if>
+              </row>
+              <separator/>
+            </for>
+          </column>
+
+          <if test="{has_ob_diag}">
+            <text size="sm" foreground="accent" wrap="true">{ob_diag}</text>
+          </if>
+
+          <if test="{ob_done}">
+            <card padding="14" border-color="accent">
+              <column gap="4">
+                <row main="space_between" cross="center" gap="10">
+                  <text><span weight="medium">{ob_target_name}</span></text>
+                  <row gap="6" cross="center">
+                    <icon name="circle-dot" width="10" height="10" foreground="accent"/>
+                    <text size="sm" foreground="accent">ON AIR</text>
+                  </row>
+                </row>
+                <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{ob_target_url}</text>
+              </column>
+            </card>
+            <button variant="primary" on-press="ob_tune_in">Tune in to {ob_target_name}</button>
+          </if>
+
+          <button variant="ghost" size="sm" on-press="ob_back">Try another URL</button>
+        </else>
+
+      </column>
+    </column>
+  </scroll>
+</column>

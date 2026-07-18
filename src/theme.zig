@@ -8,8 +8,8 @@ const color = @import("color.zig");
 const model_mod = @import("model.zig");
 
 // The 7 station tokens projected onto DesignTokens color slots. Only color
-// slots are written — a skin's own material (controls, radius, typography)
-// survives, which is what lets one theme repaint any skin (Phase 4).
+// slots are written — the app's own material (controls, radius, typography)
+// survives, which is what lets one theme repaint every surface.
 pub fn stationOverrides(sc: color.StationColors) canvas.DesignTokenOverrides {
     return .{ .colors = .{
         .background = sc.bg,
@@ -32,11 +32,6 @@ pub fn tokensFn(model: *const model_mod.Model) canvas.DesignTokens {
         .light => .light,
         .dark => .dark,
     };
-    // The skin's "material": Deck is a compact hi-fi strip, Card is roomier.
-    const density: canvas.Density = switch (model.skin) {
-        .deck => .compact,
-        .card => .regular,
-    };
-    const base = canvas.DesignTokens.theme(.{ .color_scheme = scheme, .density = density });
+    const base = canvas.DesignTokens.theme(.{ .color_scheme = scheme, .density = .regular });
     return base.withOverrides(stationOverrides(model.station_colors));
 }

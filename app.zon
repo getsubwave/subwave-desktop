@@ -15,8 +15,11 @@
             .{
                 .label = "main",
                 .title = "SUBWAVE",
-                .width = 620,
-                .height = 460,
+                .width = 980,
+                .height = 660,
+                .min_width = 880,
+                .min_height = 560,
+                .titlebar = "hidden_inset_tall",
                 .restore_state = false,
                 .restore_policy = "center_on_primary",
                 .views = .{

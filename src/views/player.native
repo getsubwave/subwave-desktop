@@ -1,0 +1,525 @@
+<!-- Desktop Player — masthead · dial · stage · panel · transport deck.
+     Validate: native check (model contract) / native markup check (grammar). -->
+
+<template name="section-label" args="title">
+  <row gap="10" cross="center">
+    <text size="sm" foreground="text_muted">{title}</text>
+    <panel height="1" grow="1" background="border"/>
+  </row>
+</template>
+
+<template name="on-air-dot" args="caption">
+  <row gap="6" cross="center">
+    <icon name="circle-dot" width="10" height="10" foreground="accent"/>
+    <text size="sm" foreground="accent">{caption}</text>
+  </row>
+</template>
+
+<column grow="1">
+
+  <!-- Masthead — the working titlebar (window-drag under hidden_inset_tall) -->
+  <row cross="center" gap="10" height="52" padding="8" window-drag="true">
+    <spacer width="{chrome_leading}"/>
+    <row on-press="toggle_sidebar" gap="8" cross="center" label="Stations">
+      <icon name="app:disc" width="18" height="18" foreground="accent"/>
+      <text>{upper(station_name)}</text>
+      <icon name="chevron-down" width="12" height="12" foreground="text_muted"/>
+    </row>
+    <if test="{has_show}">
+      <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{show_upper}</text>
+    </if>
+    <if test="{has_host}">
+      <text size="sm" foreground="accent" wrap="false">WITH {host_upper}</text>
+    </if>
+    <spacer grow="1"/>
+    <if test="{has_ctx}">
+      <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{ctx_meta}</text>
+    </if>
+    <button variant="ghost" icon="settings" label="Back panel" on-press="open_panel"/>
+  </row>
+  <separator/>
+
+  <!-- FM dial band — the five stops -->
+  <row main="center" cross="center" padding="6">
+    <toggle-group gap="18" label="Dial">
+      <for each="dial_stops" as="s">
+        <toggle-button size="sm" selected="{s.tab == active_tab}" on-toggle="pick_tab:{s.tab}" label="{s.label}">{s.abbr}</toggle-button>
+      </for>
+    </toggle-group>
+  </row>
+  <separator/>
+
+  <!-- Main row: LIVE stage · section panel -->
+  <row grow="1">
+
+    <!-- LIVE stage -->
+    <column grow="1">
+      <scroll grow="1">
+        <column gap="10" padding="24" cross="center">
+          <card width="224" height="224">
+            <column grow="1" main="center" cross="center">
+              <avatar image="{cover_id}" width="200" height="200" label="Cover art">{initials}</avatar>
+            </column>
+          </card>
+          <if test="{live_now}">
+            <use template="on-air-dot" caption="ON AIR"/>
+          </if>
+          <if test="{has_state}">
+            <text size="sm" foreground="accent">{state_line}</text>
+          </if>
+          <row gap="8" cross="center">
+            <text size="sm" foreground="text_muted">{np_head}</text>
+            <if test="{has_tokens}">
+              <text size="sm" foreground="text_muted">· {thousands(llm_tokens)} TOKENS</text>
+            </if>
+          </row>
+          <text size="display" wrap="false" overflow="ellipsis">{title}</text>
+          <text><span weight="medium">{artist}</span><span foreground="text_muted">{album_line}</span></text>
+          <if test="{has_meta}">
+            <text size="sm" foreground="text_muted">{meta_line}</text>
+          </if>
+          <if test="{has_mood}">
+            <text size="sm" foreground="accent">{mood_line}</text>
+          </if>
+          <if test="{has_booth}">
+            <row gap="8" cross="start">
+              <icon name="music" width="14" height="14" foreground="text_muted"/>
+              <text size="sm" foreground="text_muted" wrap="true" width="420">{booth_line}</text>
+            </row>
+          </if>
+        </column>
+      </scroll>
+      <column padding="12">
+        <chart height="56" y-min="0" y-max="1" label="Spectrum">
+          <series values="{bands}" kind="bar" color="accent"/>
+        </chart>
+      </column>
+    </column>
+
+    <!-- Section panel (Shows / Timeline / Booth / Request) -->
+    <if test="{panel_open}">
+      <separator/>
+      <column width="380" gap="0">
+        <row cross="end" main="space_between" gap="12" padding="14">
+          <text size="heading">{panel_title}</text>
+          <row gap="8" cross="center">
+            <text size="sm" foreground="text_muted">{upper(panel_sub)}</text>
+            <button variant="ghost" size="sm" icon="x" label="Back to LIVE" on-press="close_panel"/>
+          </row>
+        </row>
+        <separator/>
+        <scroll grow="1">
+          <column gap="12" padding="14">
+
+            <!-- SHOWS -->
+            <if test="{tab_shows}">
+              <if test="{has_station_loc}">
+                <row main="space_between" cross="center">
+                  <text size="sm" foreground="text_muted">LOCATION</text>
+                  <text size="sm">{station_loc}</text>
+                </row>
+              </if>
+              <if test="{has_show}">
+                <card padding="12" border-color="accent">
+                  <column gap="3">
+                    <text size="sm" foreground="accent">ON NOW</text>
+                    <text><span weight="medium">{show}</span></text>
+                    <if test="{has_host}">
+                      <text size="sm" foreground="text_muted">with {host}</text>
+                    </if>
+                  </column>
+                </card>
+              </if>
+              <toggle-group gap="4" label="Day">
+                <for each="day_tabs" as="d">
+                  <toggle-button size="sm" selected="{d.idx == day_sel}" on-toggle="pick_day:{d.idx}">{d.label}</toggle-button>
+                </for>
+              </toggle-group>
+              <column gap="0">
+                <for each="day_slots" as="slot">
+                  <row gap="12" cross="center" padding="8">
+                    <text size="sm" foreground="text_muted" width="96" wrap="false" overflow="clip">{slot.range}</text>
+                    <column gap="1" grow="1">
+                      <if test="{slot.autopilot}">
+                        <text foreground="text_muted">Autopilot</text>
+                      </if>
+                      <else>
+                        <text wrap="false" overflow="ellipsis">{slot.show_name}</text>
+                      </else>
+                      <if test="{slot.has_host}">
+                        <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{slot.persona}</text>
+                      </if>
+                    </column>
+                    <if test="{slot.on_air}">
+                      <badge foreground="accent">NOW</badge>
+                    </if>
+                  </row>
+                  <separator/>
+                </for>
+                <else>
+                  <text foreground="text_muted">No schedule published yet.</text>
+                </else>
+              </column>
+            </if>
+
+            <!-- TIMELINE -->
+            <if test="{tab_timeline}">
+              <use template="section-label" title="UP NEXT"/>
+              <column gap="0">
+                <for each="upcoming_list" key="n" as="t">
+                  <row gap="14" cross="start" padding="8">
+                    <text size="heading" foreground="text_muted" width="40" wrap="false" overflow="clip">{t.n}</text>
+                    <column gap="2" grow="1">
+                      <text><span weight="medium">{t.title}</span></text>
+                      <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{t.artist}</text>
+                      <if test="{t.has_req}">
+                        <text size="sm" foreground="accent">REQUESTED BY {upper(t.req_by)}</text>
+                      </if>
+                    </column>
+                  </row>
+                  <separator/>
+                </for>
+                <else>
+                  <text foreground="text_muted">Nothing queued yet.</text>
+                </else>
+              </column>
+              <use template="section-label" title="PLAYED"/>
+              <column gap="0">
+                <for each="history_list" as="t">
+                  <row gap="12" cross="center" padding="7">
+                    <column gap="1" grow="1">
+                      <text wrap="false" overflow="ellipsis">{t.title}</text>
+                      <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{t.artist}</text>
+                    </column>
+                    <text size="sm" foreground="text_muted" wrap="false" overflow="clip">{t.hhmm}</text>
+                  </row>
+                  <separator/>
+                </for>
+                <else>
+                  <text foreground="text_muted">Nothing aired yet.</text>
+                </else>
+              </column>
+            </if>
+
+            <!-- BOOTH -->
+            <if test="{tab_booth}">
+              <toggle-group gap="4" label="Booth filter">
+                <for each="booth_filter_rows" as="f">
+                  <toggle-button size="sm" selected="{f.on}" on-toggle="set_booth_filter:{f.val}">{f.label}</toggle-button>
+                </for>
+              </toggle-group>
+              <column gap="0">
+                <for each="booth_list" as="t">
+                  <column gap="3" padding="8">
+                    <row gap="8" cross="center">
+                      <text size="sm" foreground="text_muted" width="44" wrap="false" overflow="clip">{t.hhmm}</text>
+                      <if test="{t.is_voice}">
+                        <badge foreground="accent">{t.kind}</badge>
+                      </if>
+                      <else>
+                        <badge foreground="text_muted">{t.kind}</badge>
+                      </else>
+                    </row>
+                    <if test="{t.is_track}">
+                      <row gap="6" cross="center">
+                        <icon name="music" width="14" height="14" foreground="text_muted"/>
+                        <text foreground="text_muted" wrap="false" overflow="ellipsis">{t.text}</text>
+                      </row>
+                    </if>
+                    <else>
+                      <if test="{t.is_voice}">
+                        <text><span italic="true">{t.text}</span></text>
+                      </if>
+                      <else>
+                        <text size="sm" foreground="text_muted" wrap="true">{t.text}</text>
+                      </else>
+                    </else>
+                  </column>
+                  <separator/>
+                </for>
+                <else>
+                  <text foreground="text_muted">The booth is quiet right now.</text>
+                </else>
+              </column>
+            </if>
+
+            <!-- REQUEST -->
+            <if test="{tab_request}">
+              <if test="{req_idle}">
+                <card>
+                  <column gap="0">
+                    <row main="space_between" cross="center" padding="10">
+                      <use template="on-air-dot" caption="LINE OPEN"/>
+                      <text size="sm" foreground="text_muted">REQUEST SLIP</text>
+                    </row>
+                    <separator/>
+                    <column gap="8" padding="12">
+                      <text size="sm" foreground="text_muted">DEAR DJ —</text>
+                      <textarea text="{req_text}" placeholder="play me something for late-night driving…" on-input="req_edit" on-submit="submit_req" height="88"/>
+                      <input text="{req_name_text}" placeholder="signed, your name (optional)" on-input="req_name_edit" label="Signed name"/>
+                    </column>
+                  </column>
+                </card>
+                <text size="sm" foreground="text_muted" wrap="true">Describe a mood, a memory, an artist. The DJ reads your note, digs the library, and answers you on-air.</text>
+                <use template="section-label" title="ON THE WIRE"/>
+                <grid columns="2" gap="6">
+                  <for each="chips" as="c">
+                    <button variant="outline" size="sm" on-press="chip_pick:{c.t}">{c.t}</button>
+                  </for>
+                </grid>
+                <button variant="primary" on-press="submit_req">Send to the booth</button>
+                <if test="{has_req_status}">
+                  <text size="sm" foreground="accent">{req_status}</text>
+                </if>
+              </if>
+              <else>
+                <column gap="12">
+                  <use template="on-air-dot" caption="{req_state_label}"/>
+                  <text><span italic="true">“{req_ack_line}”</span></text>
+                  <separator/>
+                  <text size="sm" foreground="text_muted">{req_card_label}</text>
+                  <if test="{req_pending}">
+                    <row gap="8" cross="center">
+                      <spinner/>
+                      <text><span italic="true">finding your track…</span></text>
+                    </row>
+                  </if>
+                  <if test="{req_done}">
+                    <column gap="2">
+                      <if test="{has_req_track}">
+                        <text size="heading">{req_track_title}</text>
+                        <text size="sm" foreground="text_muted">{req_track_artist}</text>
+                      </if>
+                      <if test="{has_req_pos}">
+                        <text size="sm" foreground="text_muted">POSITION {req_queue_pos} IN QUEUE</text>
+                      </if>
+                    </column>
+                  </if>
+                  <if test="{req_failed}">
+                    <text size="sm" foreground="accent">{req_status}</text>
+                  </if>
+                  <separator/>
+                  <if test="{req_footnote}">
+                    <text size="sm" foreground="text_muted">{req_footnote}</text>
+                  </if>
+                  <button variant="outline" size="sm" on-press="reset_request">New request</button>
+                </column>
+              </else>
+            </if>
+
+          </column>
+        </scroll>
+      </column>
+    </if>
+  </row>
+
+  <!-- Transport deck -->
+  <separator/>
+  <row gap="14" cross="center" padding="12" background="surface_subtle">
+    <button variant="outline" size="lg" icon="app:power" label="{tune_label}" on-press="tune_toggle"/>
+    <if test="{connecting}">
+      <spinner/>
+    </if>
+    <column grow="1" gap="4">
+      <row main="space_between" cross="center">
+        <row gap="6" cross="center">
+          <text size="sm" foreground="text_muted">SIGNAL ·</text>
+          <text size="sm"><span weight="bold">{upper(signal_label)}</span></text>
+        </row>
+        <text size="sm" foreground="text_muted">{signal_readout}</text>
+      </row>
+      <progress value="{signal_frac}" label="Signal"/>
+    </column>
+    <row gap="10" cross="center" width="300">
+      <icon name="volume" width="16" height="16" foreground="text_muted"/>
+      <slider value="{volume}" on-change="volume_changed" label="Volume" grow="1"/>
+      <text size="sm" foreground="text_muted" width="52" wrap="false" overflow="clip">{vol_display}</text>
+      <toggle-button size="sm" selected="{muted}" on-toggle="toggle_mute" icon="volume" label="{mute_label}"/>
+    </row>
+  </row>
+
+  <!-- Stations sidebar (drawer) -->
+  <if test="{sidebar_open}">
+    <drawer text="Stations" on-dismiss="toggle_sidebar">
+      <scroll grow="1">
+        <column gap="12" padding="14" width="300">
+          <spacer height="26"/>
+          <use template="section-label" title="TUNED IN"/>
+          <card padding="12" border-color="accent">
+            <column gap="4">
+              <row main="space_between" cross="center" gap="10">
+                <text><span weight="medium">{station_name}</span></text>
+                <if test="{live_now}">
+                  <use template="on-air-dot" caption="ON AIR"/>
+                </if>
+                <else>
+                  <text size="sm" foreground="text_muted">{upper(status_word)}</text>
+                </else>
+              </row>
+              <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{base_display}</text>
+            </column>
+          </card>
+          <if test="{has_recents}">
+            <use template="section-label" title="RECENT"/>
+            <column gap="0">
+              <for each="recents_list" key="url" as="st">
+                <row on-press="pick_recent:{st.url}" gap="10" cross="center" padding="9" label="{st.name}">
+                  <column gap="1" grow="1">
+                    <text wrap="false" overflow="ellipsis">{st.name}</text>
+                    <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{st.url}</text>
+                  </column>
+                  <icon name="chevron-right" width="12" height="12" foreground="text_muted"/>
+                </row>
+                <separator/>
+              </for>
+            </column>
+          </if>
+          <if test="{has_discover}">
+            <use template="section-label" title="DISCOVER"/>
+            <column gap="0">
+              <for each="discover_list" key="url" as="st">
+                <row on-press="pick_discover:{st.url}" gap="10" cross="center" padding="9" label="{st.name}">
+                  <column gap="1" grow="1">
+                    <text wrap="false" overflow="ellipsis">{st.name}</text>
+                    <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{st.sub}</text>
+                  </column>
+                  <icon name="chevron-right" width="12" height="12" foreground="text_muted"/>
+                </row>
+                <separator/>
+              </for>
+            </column>
+          </if>
+          <use template="section-label" title="ADD A STATION"/>
+          <row gap="8" cross="center">
+            <search-field text="{station_text}" placeholder="radio.yourhost.com" on-input="station_edit" on-submit="tune_station" grow="1"/>
+            <button variant="secondary" on-press="tune_station">Tune</button>
+          </row>
+          <if test="{station_status}">
+            <text size="sm" foreground="accent">{station_status}</text>
+          </if>
+        </column>
+      </scroll>
+    </drawer>
+  </if>
+
+  <!-- Back panel sheet -->
+  <if test="{sheet_panel}">
+    <sheet text="BACK PANEL" on-dismiss="close_sheet">
+      <column gap="12" padding="4">
+        <spacer height="30"/>
+        <use template="section-label" title="TIMER"/>
+        <row on-press="open_sleep" main="space_between" cross="center" padding="10" label="Sleep timer">
+          <row gap="10" cross="center">
+            <icon name="moon" width="16" height="16" foreground="text_muted"/>
+            <text>Sleep timer</text>
+          </row>
+          <row gap="6" cross="center">
+            <if test="{sleep_armed}">
+              <text size="sm" foreground="accent">{sleep_value}</text>
+            </if>
+            <else>
+              <text size="sm" foreground="text_muted">{sleep_value}</text>
+            </else>
+            <icon name="chevron-right" width="12" height="12" foreground="text_muted"/>
+          </row>
+        </row>
+        <use template="section-label" title="FASCIA"/>
+        <row on-press="open_themes" main="space_between" cross="center" padding="10" label="Theme">
+          <row gap="10" cross="center">
+            <icon name="sun" width="16" height="16" foreground="text_muted"/>
+            <text>Theme</text>
+          </row>
+          <row gap="6" cross="center">
+            <text size="sm" foreground="text_muted">{theme_value}</text>
+            <icon name="chevron-right" width="12" height="12" foreground="text_muted"/>
+          </row>
+        </row>
+        <use template="section-label" title="SHORTCUTS"/>
+        <card padding="12">
+          <grid columns="2" gap="9">
+            <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">TUNE</text><badge>Space</badge></row>
+            <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">DIAL</text><badge>1 - 5</badge></row>
+            <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">MUTE</text><badge>M</badge></row>
+            <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">VOLUME</text><badge>Up / Down</badge></row>
+            <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">STATIONS</text><badge>Cmd K</badge></row>
+            <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">BACK TO LIVE</text><badge>Esc</badge></row>
+          </grid>
+        </card>
+        <text size="sm" foreground="text_muted">MODEL SW-D1 · MADE FOR THE INTERNET</text>
+      </column>
+    </sheet>
+  </if>
+
+  <!-- Sleep timer sheet -->
+  <if test="{sheet_sleep}">
+    <sheet text="SLEEP TIMER" on-dismiss="close_sheet">
+      <column gap="10" padding="4">
+        <spacer height="30"/>
+        <if test="{sleep_armed}">
+          <card padding="12" border-color="accent">
+            <row main="space_between" cross="center" gap="10">
+              <row gap="10" cross="center">
+                <icon name="moon" width="16" height="16" foreground="accent"/>
+                <column gap="1">
+                  <text size="sm" foreground="accent">TUNING OUT IN</text>
+                  <text size="heading">{sleep_countdown}</text>
+                </column>
+              </row>
+              <button variant="outline" size="sm" on-press="cancel_sleep">Cancel</button>
+            </row>
+          </card>
+        </if>
+        <else>
+          <text size="sm" foreground="text_muted" wrap="true">The radio tunes itself out when the timer lapses — drift off without playing all night.</text>
+        </else>
+        <column gap="0">
+          <for each="sleep_options" as="o">
+            <row on-press="sleep_pick:{o.min}" main="space_between" cross="center" padding="11" label="{o.label}">
+              <text>{o.label}</text>
+              <if test="{o.min == sleep_minutes}">
+                <icon name="check" width="14" height="14" foreground="accent"/>
+              </if>
+            </row>
+            <separator/>
+          </for>
+        </column>
+        <button variant="ghost" size="sm" on-press="open_panel">Back panel</button>
+      </column>
+    </sheet>
+  </if>
+
+  <!-- Themes sheet -->
+  <if test="{sheet_themes}">
+    <sheet text="FASCIA / THEME" on-dismiss="close_sheet">
+      <column gap="10" padding="4">
+        <spacer height="30"/>
+        <row on-press="follow_station" main="space_between" cross="center" padding="10" label="Follow station">
+          <column gap="1">
+            <text>Follow station</text>
+            <text size="sm" foreground="text_muted">Use whatever palette the station broadcasts</text>
+          </column>
+          <if test="{follow_on}">
+            <icon name="check" width="14" height="14" foreground="accent"/>
+          </if>
+        </row>
+        <separator/>
+        <column gap="0">
+          <for each="theme_rows" key="id" as="th">
+            <row on-press="pick_theme:{th.id}" main="space_between" cross="center" padding="10" label="{th.name}">
+              <text>{th.name}</text>
+              <if test="{th.on}">
+                <icon name="check" width="14" height="14" foreground="accent"/>
+              </if>
+            </row>
+            <separator/>
+          </for>
+          <else>
+            <text foreground="text_muted">No themes broadcast yet.</text>
+          </else>
+        </column>
+        <button variant="ghost" size="sm" on-press="open_panel">Back panel</button>
+      </column>
+    </sheet>
+  </if>
+
+</column>

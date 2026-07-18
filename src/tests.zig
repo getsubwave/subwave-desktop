@@ -19,10 +19,11 @@ const Msg = main.Msg;
 
 const AppMarkup = canvas.MarkupView(Model, Msg);
 
-const card_markup = @embedFile("skins/card.native");
-const deck_markup = @embedFile("skins/deck.native");
+const player_markup = @embedFile("views/player.native");
+const onboarding_markup = @embedFile("views/onboarding.native");
+const mini_markup = @embedFile("views/mini.native");
 
-fn buildAndLayout(arena: std.mem.Allocator, source: []const u8, model: *const Model) !void {
+fn buildAndLayout(arena: std.mem.Allocator, source: []const u8, model: *const Model, w: f32, h: f32) !void {
     var view = try AppMarkup.init(arena, source);
     var ui = AppUi.init(arena);
     const node = view.build(&ui, model) catch |err| {
@@ -32,24 +33,70 @@ fn buildAndLayout(arena: std.mem.Allocator, source: []const u8, model: *const Mo
         return err;
     };
     const tree = try ui.finalize(node);
-    var nodes: [256]canvas.WidgetLayoutNode = undefined;
-    const layout = try canvas.layoutWidgetTree(tree.root, native_sdk.geometry.RectF.init(0, 0, 620, 400), &nodes);
+    var nodes: [1024]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(tree.root, native_sdk.geometry.RectF.init(0, 0, w, h), &nodes);
     try testing.expect(layout.nodes.len > 0);
 }
 
-// Both skins must bind cleanly to the Model and lay out — a field drift becomes
-// a build error here (and, via CompiledMarkupView in skins.zig, at app build).
-test "card skin builds and lays out" {
-    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena_state.deinit();
-    const model: Model = .{};
-    try buildAndLayout(arena_state.allocator(), card_markup, &model);
-}
-
-test "deck skin builds and lays out" {
+// Every view must bind cleanly to the Model and lay out — a field drift
+// becomes a build error here (and, via CompiledMarkupView in views.zig, at
+// app build).
+test "player view builds and lays out (LIVE + every panel + sheets)" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     var model: Model = .{};
-    model.skin = .deck;
-    try buildAndLayout(arena_state.allocator(), deck_markup, &model);
+    model.phase = .player;
+    try buildAndLayout(arena_state.allocator(), player_markup, &model, 980, 660);
+    // Panels + sidebar + sheets: every conditional branch must build too.
+    inline for (.{ .schedule, .timeline, .booth, .request }) |tab| {
+        var arena2 = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena2.deinit();
+        model.active_tab = tab;
+        try buildAndLayout(arena2.allocator(), player_markup, &model, 980, 660);
+    }
+    model.sidebar_open = true;
+    model.sheet = .panel;
+    {
+        var arena3 = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena3.deinit();
+        try buildAndLayout(arena3.allocator(), player_markup, &model, 980, 660);
+    }
+    model.sheet = .sleep;
+    model.sleep_deadline_ms = 1;
+    {
+        var arena4 = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena4.deinit();
+        try buildAndLayout(arena4.allocator(), player_markup, &model, 980, 660);
+    }
+    model.sheet = .themes;
+    {
+        var arena5 = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena5.deinit();
+        try buildAndLayout(arena5.allocator(), player_markup, &model, 980, 660);
+    }
+}
+
+test "onboarding view builds in entry and check phases" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    var model: Model = .{};
+    try buildAndLayout(arena_state.allocator(), onboarding_markup, &model, 980, 660);
+    var arena2 = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena2.deinit();
+    model.ob_checking = true;
+    model.ob_steps = .{ .ok, .ok, .run, .wait };
+    try buildAndLayout(arena2.allocator(), onboarding_markup, &model, 980, 660);
+    var arena3 = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena3.deinit();
+    model.ob_steps = .{ .ok, .ok, .ok, .ok };
+    model.ob_done = true;
+    try buildAndLayout(arena3.allocator(), onboarding_markup, &model, 980, 660);
+}
+
+test "mini view builds and lays out" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    var model: Model = .{};
+    model.mini_open = true;
+    try buildAndLayout(arena_state.allocator(), mini_markup, &model, 420, 168);
 }

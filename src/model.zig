@@ -1,6 +1,6 @@
 //! The player's heart: Model state, the Msg union, boot (init_fx), and the
 //! update reducer that wires every effect. Kept free of view code — main.zig
-//! does the App wiring, app.native is the view.
+//! does the App wiring, views/*.native are the views.
 
 const std = @import("std");
 const native_sdk = @import("native_sdk");
@@ -21,6 +21,9 @@ pub const keys = struct {
     pub const theme_timer: u64 = 2;
     pub const reconnect: u64 = 3;
     pub const request_poll: u64 = 4;
+    pub const signal_timer: u64 = 5;
+    pub const second_timer: u64 = 6;
+    pub const ob_step_timer: u64 = 7;
     pub const fetch_np: u64 = 20;
     pub const fetch_state: u64 = 21;
     pub const fetch_themes: u64 = 22;
@@ -29,14 +32,52 @@ pub const keys = struct {
     pub const post_request: u64 = 25;
     pub const fetch_reqstat: u64 = 26;
     pub const fetch_schedule: u64 = 27;
+    pub const fetch_health: u64 = 28;
+    pub const fetch_dj: u64 = 29;
+    pub const fetch_directory: u64 = 32;
+    pub const post_beacon: u64 = 33;
+    pub const fetch_ob_health: u64 = 34;
+    pub const fetch_ob_dj: u64 = 35;
     pub const save_settings: u64 = 30;
+    pub const save_debounce: u64 = 31;
 };
 
 pub const max_themes = 12;
 pub const max_shows = 16;
+pub const max_recents = 8;
+pub const max_discover = 8;
+pub const max_upcoming = 8;
+pub const max_history = 10;
+pub const max_booth = 16;
 
-// One row in the schedule/guide list (bound by the <for> in card.native). The
-// string slices point into the parallel *_store buffers on the model.
+// Signal-meter scale: one full ruler width in ms (mirrors web useSignal).
+pub const signal_scale_ms: i64 = 250;
+const probe_backoff_after: u8 = 3;
+
+// ------------------------------------------------------------------ enums
+pub const Transport = enum { stopped, playing, paused };
+
+/// Which surface the main window shows. Onboarding on first run (no saved
+/// station); the player once tuned.
+pub const Phase = enum { onboarding, player };
+
+/// The FM-dial stop (section panel). `.live` is the bare stage.
+pub const Tab = enum { schedule, timeline, live, booth, request };
+
+/// Back-panel popover stack (none = closed).
+pub const Sheet = enum { none, panel, sleep, themes };
+
+pub const BoothFilter = enum { all, dj, tracks };
+
+/// Request-slip lifecycle (mirrors the design's idle → pending → done card).
+pub const ReqPhase = enum { idle, pending, done, failed };
+
+/// One onboarding health-check step.
+pub const StepState = enum { wait, run, ok, fail };
+
+// ------------------------------------------------------------------ rows
+// One row in the schedule list. Slices point into the parallel *_store
+// buffers on the model.
 pub const ShowRow = struct {
     name: []const u8 = "",
     topic: []const u8 = "",
@@ -44,15 +85,67 @@ pub const ShowRow = struct {
     live: bool = false,
 };
 
-pub const Transport = enum { stopped, playing, paused };
+pub const QueueRow = struct {
+    title: []const u8 = "",
+    artist: []const u8 = "",
+    req_by: []const u8 = "", // UP NEXT only: requester name, "" = station pick
+    hhmm: []const u8 = "", // PLAYED only: aired-at clock
+};
 
-// App skin (chrome/layout). Both honor the live station theme; they differ in
-// layout markup and material density (see theme.tokensFn). Defined here (not in
-// skins.zig) so model has no import cycle with the skin registry.
-pub const Skin = enum { card, deck };
+pub const BoothTurn = struct {
+    hhmm: []const u8 = "",
+    text: []const u8 = "",
+    kind: []const u8 = "", // "VOICE" | "PICK" | "TRACK"
+    is_voice: bool = false, // spoken on-air
+    is_track: bool = false, // an aired track line
+};
+
+pub const StationRef = struct {
+    name: []const u8 = "",
+    url: []const u8 = "",
+};
+
+pub const DiscoverRow = struct {
+    name: []const u8 = "",
+    url: []const u8 = "",
+    sub: []const u8 = "", // "Tucson, AZ · desert rock"
+};
+
+// Static request chips (ON THE WIRE) — text payload fills the slip.
+pub const Chip = struct {
+    t: []const u8,
+    a: []const u8,
+};
+
+// Sleep-timer options.
+pub const SleepOpt = struct {
+    min: i64,
+    label: []const u8,
+};
+
+// Dial stops (derived rows carry the Tab payload for pick_tab).
+pub const DialStop = struct {
+    abbr: []const u8,
+    label: []const u8,
+    tab: Tab,
+};
+
+pub const DayTab = struct {
+    idx: i64,
+    label: []const u8,
+};
+
+/// Payload for chrome_changed (hidden-titlebar insets, macOS).
+pub const ChromeInsets = struct {
+    top: f32 = 0,
+    leading: f32 = 0,
+};
 
 // ------------------------------------------------------------------ model
 pub const Model = struct {
+    // which surface the main window shows
+    phase: Phase = .onboarding,
+
     // station base URL (runtime-switchable). settings_path is resolved in main()
     // before run; stream_url_buf holds the stable URL fed to the audio effect.
     base_buf: [256]u8 = undefined,
@@ -61,6 +154,12 @@ pub const Model = struct {
     settings_path_buf: [768]u8 = undefined,
     settings_path: []const u8 = "",
 
+    // station identity (/api/dj)
+    station_name_buf: [48]u8 = undefined,
+    station_name: []const u8 = "SUB/WAVE",
+    station_loc_buf: [48]u8 = undefined,
+    station_loc: []const u8 = "",
+
     // now playing (slices point into the *_buf fixed buffers)
     title_buf: [512]u8 = undefined,
     artist_buf: [256]u8 = undefined,
@@ -68,14 +167,35 @@ pub const Model = struct {
     genre_buf: [64]u8 = undefined,
     dj_buf: [128]u8 = undefined,
     show_buf: [128]u8 = undefined,
+    host_buf: [64]u8 = undefined,
     title: []const u8 = "Tuning in…",
     artist: []const u8 = "",
     album: []const u8 = "",
     genre: []const u8 = "",
     dj: []const u8 = "",
     show: []const u8 = "",
+    host: []const u8 = "", // active show's persona name
     listeners: i64 = 0,
     stream_online: bool = true,
+    track_year: i64 = 0,
+    track_duration_s: i64 = 0,
+    track_bpm: i64 = 0,
+    key_buf: [16]u8 = undefined,
+    musical_key: []const u8 = "",
+    moods_buf: [96]u8 = undefined,
+    moods: []const u8 = "", // pre-joined "NEON · DRIFTING"
+    energy_buf: [16]u8 = undefined,
+    energy: []const u8 = "",
+    llm_tokens: i64 = 0,
+
+    // masthead context line (/now-playing context envelope)
+    ctx_show_buf: [48]u8 = undefined,
+    ctx_show: []const u8 = "",
+    ctx_vibe_buf: [48]u8 = undefined,
+    ctx_vibe: []const u8 = "",
+    ctx_cond_buf: [32]u8 = undefined,
+    ctx_cond: []const u8 = "",
+    ctx_temp: i64 = -999, // -999 = unknown
 
     // cover art (registered image ids; 0 = disc/initials fallback)
     cover_id: u64 = 0,
@@ -84,16 +204,23 @@ pub const Model = struct {
     cover_sid: []const u8 = "",
     cover_url_buf: [256]u8 = undefined,
 
-    // skin (read by skins.rootView + theme.tokensFn)
-    skin: Skin = .card,
-
     // transport / audio
     transport: Transport = .playing,
     volume: f32 = boot_volume,
+    // Mute is session-only and orthogonal to volume: the intended `volume`
+    // is preserved so unmute restores it; while muted the audio output is 0.
+    muted: bool = false,
     buffering: bool = false,
     stream_failed: bool = false,
     elapsed_ms: i64 = 0,
     retry: u6 = 0,
+
+    // signal probe (timed GET /api/health while playing)
+    latency_ms: i64 = -1, // -1 = no reading yet
+    probe_t0: u64 = 0, // monotonic ms at probe fire
+    probe_fails: u8 = 0,
+    probe_inflight: bool = false,
+    probe_slow: bool = false, // true once backed off to the gentle cadence
 
     // spectrum visualiser: displayed band levels (0..1); bands() is the
     // chart-bound view.
@@ -102,56 +229,125 @@ pub const Model = struct {
     // feed bookkeeping
     offline_streak: u8 = 0,
 
+    // ------------------------------------------------------------- UI state
+    active_tab: Tab = .live,
+    sidebar_open: bool = false,
+    sheet: Sheet = .none,
+    mini_open: bool = false,
+
+    // hidden-titlebar chrome insets (macOS traffic lights)
+    chrome_top: f32 = 0,
+    chrome_leading: f32 = 0,
+
+    // sleep timer (wall-clock deadline; 0 = off)
+    sleep_deadline_ms: i64 = 0,
+    sleep_minutes: i64 = 0,
+    now_wall_ms: i64 = 0, // refreshed by the 1s tick while armed
+
     // theme (read live by theme.tokensFn)
     station_colors: color.StationColors = color.defaults(.light),
     theme_scheme: color.Scheme = .light,
     theme_id_buf: [64]u8 = undefined,
     theme_id: []const u8 = "classic-light",
     // per-listener theme override ("" = follow the station's active theme) +
-    // the catalogue of theme ids captured from /api/themes (for the cycle).
+    // the catalogue captured from /api/themes (ids + display names).
     theme_override_buf: [64]u8 = undefined,
     theme_override: []const u8 = "",
     theme_ids_store: [max_themes][64]u8 = undefined,
     theme_ids: [max_themes][]const u8 = [_][]const u8{""} ** max_themes,
+    theme_names_store: [max_themes][48]u8 = undefined,
+    theme_names: [max_themes][]const u8 = [_][]const u8{""} ** max_themes,
     theme_count: usize = 0,
 
-    // station switcher (TEA text field for the address) + settings scratch.
-    // save_inflight/save_dirty serialize fx.writeFile calls: a second save
-    // while one is in flight would be rejected (duplicate active key), so it
-    // is deferred until the .saved result arrives.
+    // station switcher (TEA text field for the address; shared by the
+    // onboarding host field and the sidebar's add-a-station field — the two
+    // are never on screen together) + settings scratch.
     station_buffer: canvas.TextBuffer(200) = .{},
-    settings_json_buf: [640]u8 = undefined,
+    station_status: []const u8 = "",
+    settings_json_buf: [2048]u8 = undefined,
     save_inflight: bool = false,
     save_dirty: bool = false,
 
+    // recents (persisted) + discover (community directory)
+    recents_name_store: [max_recents][48]u8 = undefined,
+    recents_url_store: [max_recents][128]u8 = undefined,
+    recents: [max_recents]StationRef = [_]StationRef{.{}} ** max_recents,
+    recents_count: usize = 0,
+    discover_name_store: [max_discover][48]u8 = undefined,
+    discover_url_store: [max_discover][128]u8 = undefined,
+    discover_sub_store: [max_discover][64]u8 = undefined,
+    discover_rows: [max_discover]DiscoverRow = [_]DiscoverRow{.{}} ** max_discover,
+    discover_count: usize = 0,
+
     // schedule / station guide
-    show_schedule: bool = false,
     show_names_store: [max_shows][48]u8 = undefined,
     show_topics_store: [max_shows][140]u8 = undefined,
     show_personas_store: [max_shows][40]u8 = undefined,
     show_rows: [max_shows]ShowRow = [_]ShowRow{.{}} ** max_shows,
     show_count: usize = 0,
+    // 7x24 grid of show indexes (+1; 0 = autopilot/none) + selected day tab
+    sched_grid: [7][24]u8 = [_][24]u8{[_]u8{0} ** 24} ** 7,
+    day_sel: i64 = 0,
 
-    // song request (TEA text-field mirror + POST/poll status)
-    req_buffer: canvas.TextBuffer(120) = .{},
-    req_status: []const u8 = "",
-    req_id_buf: [64]u8 = undefined,
-    req_id: []const u8 = "",
+    // timeline (/api/state upcoming + history)
+    up_title_store: [max_upcoming][96]u8 = undefined,
+    up_artist_store: [max_upcoming][64]u8 = undefined,
+    up_req_store: [max_upcoming][32]u8 = undefined,
+    upcoming_rows: [max_upcoming]QueueRow = [_]QueueRow{.{}} ** max_upcoming,
+    upcoming_count: usize = 0,
+    hist_title_store: [max_history][96]u8 = undefined,
+    hist_artist_store: [max_history][64]u8 = undefined,
+    hist_time_store: [max_history][8]u8 = undefined,
+    history_rows: [max_history]QueueRow = [_]QueueRow{.{}} ** max_history,
+    history_count: usize = 0,
 
-    // booth ticker: the DJ's latest utterance
+    // booth feed (/api/session turns, newest first) + the ticker line
+    booth_time_store: [max_booth][8]u8 = undefined,
+    booth_text_store: [max_booth][240]u8 = undefined,
+    booth_turns: [max_booth]BoothTurn = [_]BoothTurn{.{}} ** max_booth,
+    booth_count: usize = 0,
+    booth_filter: BoothFilter = .all,
     booth_buf: [280]u8 = undefined,
     booth_line: []const u8 = "",
 
+    // song request (TEA text-field mirrors + POST/poll lifecycle)
+    req_buffer: canvas.TextBuffer(200) = .{},
+    req_name_buffer: canvas.TextBuffer(48) = .{},
+    req_phase: ReqPhase = .idle,
+    req_status: []const u8 = "",
+    req_ack_buf: [200]u8 = undefined,
+    req_ack: []const u8 = "",
+    req_track_title_buf: [96]u8 = undefined,
+    req_track_title: []const u8 = "",
+    req_track_artist_buf: [64]u8 = undefined,
+    req_track_artist: []const u8 = "",
+    req_queue_pos: i64 = 0,
+    req_id_buf: [64]u8 = undefined,
+    req_id: []const u8 = "",
+
+    // onboarding
+    ob_https: bool = true,
+    ob_checking: bool = false, // false = entry form, true = check phase
+    ob_steps: [4]StepState = [_]StepState{.wait} ** 4,
+    ob_done: bool = false,
+    ob_target_url_buf: [160]u8 = undefined,
+    ob_target_url: []const u8 = "",
+    ob_target_name_buf: [48]u8 = undefined,
+    ob_target_name: []const u8 = "",
+    ob_diag_buf: [160]u8 = undefined,
+    ob_diag: []const u8 = "",
+
     // ------------------------------------------------- derived view bindings
     // Everything the markup shows that is computable from the state above is a
-    // method, never a cached field ("derive, don't store") — so no label can
-    // ever be stale, including before the first update runs.
+    // method, never a cached field ("derive, don't store").
 
-    // The text the request field binds (derived from the edit buffer).
+    // The text the request slip / signed-name / station fields bind.
     pub fn req_text(self: *const Model) []const u8 {
         return self.req_buffer.text();
     }
-    // The text the station-address field binds.
+    pub fn req_name_text(self: *const Model) []const u8 {
+        return self.req_name_buffer.text();
+    }
     pub fn station_text(self: *const Model) []const u8 {
         return self.station_buffer.text();
     }
@@ -159,37 +355,117 @@ pub const Model = struct {
     pub fn play_label(self: *const Model) []const u8 {
         return if (self.transport == .playing) "Pause" else "Play";
     }
-
     pub fn play_icon(self: *const Model) []const u8 {
         return if (self.transport == .playing) "pause" else "play";
     }
 
-    pub fn has_genre(self: *const Model) bool {
-        return self.genre.len > 0;
+    pub fn live_now(self: *const Model) bool {
+        return self.transport == .playing and !self.stream_failed and !self.buffering and self.stream_online;
+    }
+    /// Between tune-in and audio: the power button's spinner state.
+    pub fn connecting(self: *const Model) bool {
+        return self.transport == .playing and (self.buffering or self.stream_failed);
+    }
+    pub fn tune_label(self: *const Model) []const u8 {
+        return if (self.transport == .stopped) "Tune in" else "Tune out";
     }
 
-    // The muted meta line under the artist: on-air time, then the DJ when known.
-    pub fn np_meta(self: *const Model, arena: std.mem.Allocator) []const u8 {
+    pub fn has_show(self: *const Model) bool {
+        return self.show.len > 0;
+    }
+    pub fn has_host(self: *const Model) bool {
+        return self.host.len > 0;
+    }
+    pub fn show_upper(self: *const Model, arena: std.mem.Allocator) []const u8 {
+        return asciiUpper(arena, self.show);
+    }
+    pub fn host_upper(self: *const Model, arena: std.mem.Allocator) []const u8 {
+        return asciiUpper(arena, self.host);
+    }
+
+    /// Masthead context line: "graveyard shift · slow burn · 12° clear".
+    pub fn ctx_meta(self: *const Model, arena: std.mem.Allocator) []const u8 {
+        var out: std.ArrayList(u8) = .empty;
+        appendPart(&out, arena, self.ctx_show);
+        appendPart(&out, arena, self.ctx_vibe);
+        if (self.ctx_temp != -999 and self.ctx_cond.len > 0) {
+            const s = std.fmt.allocPrint(arena, "{d}° {s}", .{ self.ctx_temp, self.ctx_cond }) catch "";
+            appendPart(&out, arena, s);
+        } else {
+            appendPart(&out, arena, self.ctx_cond);
+        }
+        return out.items;
+    }
+    pub fn has_ctx(self: *const Model) bool {
+        return self.ctx_show.len > 0 or self.ctx_vibe.len > 0 or self.ctx_cond.len > 0;
+    }
+
+    /// "NOW PLAYING — 2:34 / 5:24" head (duration omitted when unknown).
+    pub fn np_head(self: *const Model, arena: std.mem.Allocator) []const u8 {
         const elapsed = self.elapsed_str(arena);
-        if (self.dj.len == 0)
-            return std.fmt.allocPrint(arena, "on air {s}", .{elapsed}) catch "";
-        return std.fmt.allocPrint(arena, "on air {s} · DJ {s}", .{ elapsed, self.dj }) catch "";
+        if (self.track_duration_s > 0) {
+            const dur = fmtSecs(arena, self.track_duration_s);
+            return std.fmt.allocPrint(arena, "NOW PLAYING — {s} / {s}", .{ elapsed, dur }) catch "NOW PLAYING";
+        }
+        return std.fmt.allocPrint(arena, "NOW PLAYING — {s}", .{elapsed}) catch "NOW PLAYING";
+    }
+    pub fn has_tokens(self: *const Model) bool {
+        return self.llm_tokens > 0;
+    }
+
+    /// " · Album · 1998" tail after the artist (parts that exist).
+    pub fn album_line(self: *const Model, arena: std.mem.Allocator) []const u8 {
+        if (self.album.len == 0 and self.track_year == 0) return "";
+        if (self.album.len > 0 and self.track_year > 0)
+            return std.fmt.allocPrint(arena, " · {s} · {d}", .{ self.album, self.track_year }) catch "";
+        if (self.album.len > 0)
+            return std.fmt.allocPrint(arena, " · {s}", .{self.album}) catch "";
+        return std.fmt.allocPrint(arena, " · {d}", .{self.track_year}) catch "";
+    }
+
+    /// "AMBIENT DUB · 92 BPM · A MIN" — genre/bpm/key, whichever exist.
+    pub fn meta_line(self: *const Model, arena: std.mem.Allocator) []const u8 {
+        var out: std.ArrayList(u8) = .empty;
+        appendPart(&out, arena, asciiUpper(arena, self.genre));
+        if (self.track_bpm > 0) {
+            const s = std.fmt.allocPrint(arena, "{d} BPM", .{self.track_bpm}) catch "";
+            appendPart(&out, arena, s);
+        }
+        appendPart(&out, arena, asciiUpper(arena, self.musical_key));
+        return out.items;
+    }
+    pub fn has_meta(self: *const Model) bool {
+        return self.genre.len > 0 or self.track_bpm > 0 or self.musical_key.len > 0;
+    }
+
+    /// "NEON · DRIFTING · MID ENERGY" — moods + energy.
+    pub fn mood_line(self: *const Model, arena: std.mem.Allocator) []const u8 {
+        var out: std.ArrayList(u8) = .empty;
+        appendPart(&out, arena, asciiUpper(arena, self.moods));
+        if (self.energy.len > 0) {
+            const s = std.fmt.allocPrint(arena, "{s} ENERGY", .{asciiUpper(arena, self.energy)}) catch "";
+            appendPart(&out, arena, s);
+        }
+        return out.items;
+    }
+    pub fn has_mood(self: *const Model) bool {
+        return self.moods.len > 0 or self.energy.len > 0;
     }
 
     pub fn vol_pct(self: *const Model) i64 {
         return @intFromFloat(@round(self.volume * 100));
     }
+    pub fn vol_display(self: *const Model, arena: std.mem.Allocator) []const u8 {
+        if (self.muted) return "Muted";
+        return std.fmt.allocPrint(arena, "{d}%", .{self.vol_pct()}) catch "—";
+    }
+    pub fn mute_label(self: *const Model) []const u8 {
+        return if (self.muted) "Unmute" else "Mute";
+    }
 
-    // Player-elapsed as m:ss, rolling to h:mm:ss past the hour (radio sessions
-    // easily exceed 60 minutes).
+    // Player-elapsed as m:ss, rolling to h:mm:ss past the hour.
     pub fn elapsed_str(self: *const Model, arena: std.mem.Allocator) []const u8 {
-        const total_secs: u64 = @intCast(@max(0, @divTrunc(self.elapsed_ms, 1000)));
-        const hours = total_secs / 3600;
-        const mins = (total_secs / 60) % 60;
-        const secs = total_secs % 60;
-        if (hours > 0)
-            return std.fmt.allocPrint(arena, "{d}:{d:0>2}:{d:0>2}", .{ hours, mins, secs }) catch "0:00";
-        return std.fmt.allocPrint(arena, "{d}:{d:0>2}", .{ mins, secs }) catch "0:00";
+        return fmtSecs(arena, @max(0, @divTrunc(self.elapsed_ms, 1000)));
     }
 
     // Transient state banner (priority: failure > buffering > offline > idle).
@@ -203,14 +479,15 @@ pub const Model = struct {
             .playing => "",
         };
     }
-
     pub fn has_state(self: *const Model) bool {
         return self.state_line().len > 0;
     }
 
-    // Disc initials fallback: up to two leading letters of the artist.
+    // Disc initials fallback: up to two leading letters of the artist
+    // ("SW" house mark before the first track lands — the bundled face has
+    // no ◎ glyph, so a symbol fallback would render tofu).
     pub fn initials(self: *const Model, arena: std.mem.Allocator) []const u8 {
-        const out = arena.alloc(u8, 2) catch return "◎";
+        const out = arena.alloc(u8, 2) catch return "SW";
         var n: usize = 0;
         for (self.artist) |ch| {
             if (std.ascii.isAlphabetic(ch)) {
@@ -219,38 +496,175 @@ pub const Model = struct {
                 if (n >= 2) break;
             }
         }
-        if (n == 0) return "◎";
+        if (n == 0) return "SW";
         return out[0..n];
-    }
-
-    // Label for the skin-switch button (names the OTHER skin).
-    pub fn skin_label(self: *const Model) []const u8 {
-        return if (self.skin == .card) "Deck view" else "Card view";
     }
 
     pub fn has_booth(self: *const Model) bool {
         return self.booth_line.len > 0;
     }
 
-    pub fn theme_label(self: *const Model, arena: std.mem.Allocator) []const u8 {
-        if (self.theme_override.len == 0) return "Theme: station";
-        return std.fmt.allocPrint(arena, "Theme: {s}", .{self.theme_override}) catch "Theme";
+    // ------------------------------------------------------- signal meter
+    pub fn signal_label(self: *const Model) []const u8 {
+        if (!self.stream_online) return "Off air";
+        if (self.transport == .stopped) return "Standby";
+        if (self.connecting()) return "Acquiring";
+        if (self.probe_fails >= probe_backoff_after) return "Poor";
+        if (self.latency_ms < 0) return "Acquiring";
+        if (self.latency_ms <= signal_scale_ms) return "Good";
+        return "Fair";
+    }
+    pub fn signal_readout(self: *const Model, arena: std.mem.Allocator) []const u8 {
+        if (self.transport == .stopped) return "—";
+        if (self.latency_ms < 0)
+            return std.fmt.allocPrint(arena, "{d} listening", .{self.listeners}) catch "—";
+        return std.fmt.allocPrint(arena, "{d} listening · {d} ms", .{ self.listeners, self.latency_ms }) catch "—";
+    }
+    /// 0..1 fraction for the signal progress rail.
+    pub fn signal_frac(self: *const Model) f32 {
+        if (self.transport == .stopped or self.latency_ms < 0) return 0.02;
+        const clamped = @min(self.latency_ms, signal_scale_ms);
+        return @as(f32, @floatFromInt(clamped)) / @as(f32, @floatFromInt(signal_scale_ms));
     }
 
-    pub fn showing_now(self: *const Model) bool {
-        return !self.show_schedule;
+    // ------------------------------------------------------------ UI derived
+    pub fn panel_open(self: *const Model) bool {
+        return self.active_tab != .live;
+    }
+    pub fn tab_shows(self: *const Model) bool {
+        return self.active_tab == .schedule;
+    }
+    pub fn tab_timeline(self: *const Model) bool {
+        return self.active_tab == .timeline;
+    }
+    pub fn tab_booth(self: *const Model) bool {
+        return self.active_tab == .booth;
+    }
+    pub fn tab_request(self: *const Model) bool {
+        return self.active_tab == .request;
+    }
+    pub fn panel_title(self: *const Model) []const u8 {
+        return switch (self.active_tab) {
+            .schedule => "Shows",
+            .timeline => "Timeline",
+            .booth => "The booth",
+            .request => "Make a request",
+            .live => "",
+        };
+    }
+    pub fn panel_sub(self: *const Model) []const u8 {
+        return switch (self.active_tab) {
+            .schedule => "weekly schedule",
+            .timeline => "the dial, in order",
+            .booth => "DJ on the mic",
+            .request => "to the booth",
+            .live => "",
+        };
     }
 
-    pub fn schedule_label(self: *const Model) []const u8 {
-        return if (self.show_schedule) "Now playing" else "Schedule";
+    pub fn sheet_panel(self: *const Model) bool {
+        return self.sheet == .panel;
+    }
+    pub fn sheet_sleep(self: *const Model) bool {
+        return self.sheet == .sleep;
+    }
+    pub fn sheet_themes(self: *const Model) bool {
+        return self.sheet == .themes;
     }
 
-    // The chart-bound spectrum series.
-    pub fn bands(self: *const Model) []const f32 {
-        return self.band_levels[0..];
+    // ------------------------------------------------------------ sleep timer
+    pub fn sleep_armed(self: *const Model) bool {
+        return self.sleep_deadline_ms > 0;
+    }
+    fn sleepRemainingS(self: *const Model) i64 {
+        if (self.sleep_deadline_ms == 0) return 0;
+        return @max(0, @divTrunc(self.sleep_deadline_ms - self.now_wall_ms, 1000));
+    }
+    pub fn sleep_countdown(self: *const Model, arena: std.mem.Allocator) []const u8 {
+        return fmtSecs(arena, self.sleepRemainingS());
+    }
+    pub fn sleep_value(self: *const Model, arena: std.mem.Allocator) []const u8 {
+        if (!self.sleep_armed()) return "Off";
+        return std.fmt.allocPrint(arena, "{s} left", .{fmtSecs(arena, self.sleepRemainingS())}) catch "armed";
     }
 
-    // Schedule rows with the on-air show flagged live.
+    // ------------------------------------------------------------- catalogues
+    pub const chips = [_]Chip{
+        .{ .t = "more like this", .a = "SAME SHELF" },
+        .{ .t = "late-night driving", .a = "RIGHT NOW" },
+        .{ .t = "something upbeat", .a = "LIFT THE FLOOR" },
+        .{ .t = "surprise me", .a = "RANDOM" },
+    };
+
+    pub const sleep_options = [_]SleepOpt{
+        .{ .min = 15, .label = "15 minutes" },
+        .{ .min = 30, .label = "30 minutes" },
+        .{ .min = 45, .label = "45 minutes" },
+        .{ .min = 60, .label = "60 minutes" },
+        .{ .min = 90, .label = "90 minutes" },
+    };
+
+    pub const dial_stops = [_]DialStop{
+        .{ .abbr = "SHWS", .label = "Shows", .tab = .schedule },
+        .{ .abbr = "TML", .label = "Timeline", .tab = .timeline },
+        .{ .abbr = "LIVE", .label = "Live", .tab = .live },
+        .{ .abbr = "BTH", .label = "Booth", .tab = .booth },
+        .{ .abbr = "REQ", .label = "Request", .tab = .request },
+    };
+
+    pub const day_tabs = [_]DayTab{
+        .{ .idx = 0, .label = "SUN" }, .{ .idx = 1, .label = "MON" },
+        .{ .idx = 2, .label = "TUE" }, .{ .idx = 3, .label = "WED" },
+        .{ .idx = 4, .label = "THU" }, .{ .idx = 5, .label = "FRI" },
+        .{ .idx = 6, .label = "SAT" },
+    };
+
+    // ------------------------------------------------------------- schedule
+    pub const SlotRow = struct {
+        range: []const u8 = "",
+        show_name: []const u8 = "",
+        persona: []const u8 = "",
+        has_host: bool = false,
+        on_air: bool = false, // the active show, on today's column
+        autopilot: bool = false,
+    };
+
+    /// The selected day's grid compressed to contiguous ranges.
+    pub fn day_slots(self: *const Model, arena: std.mem.Allocator) []const SlotRow {
+        const d: usize = @intCast(std.math.clamp(self.day_sel, 0, 6));
+        const grid = self.sched_grid[d];
+        var out: std.ArrayList(SlotRow) = .empty;
+        var h: usize = 0;
+        while (h < 24) {
+            const v = grid[h];
+            var end = h + 1;
+            while (end < 24 and grid[end] == v) end += 1;
+            const range = std.fmt.allocPrint(arena, "{d:0>2}:00 – {d:0>2}:00", .{ h, end % 24 }) catch "";
+            if (v == 0) {
+                out.append(arena, .{ .range = range, .show_name = "Autopilot", .autopilot = true }) catch return out.items;
+            } else {
+                const idx: usize = v - 1;
+                if (idx < self.show_count) {
+                    const row = self.show_rows[idx];
+                    out.append(arena, .{
+                        .range = range,
+                        .show_name = row.name,
+                        .persona = row.persona,
+                        .has_host = row.persona.len > 0,
+                        .on_air = row.live,
+                    }) catch return out.items;
+                }
+            }
+            h = end;
+        }
+        return out.items;
+    }
+
+    pub fn has_station_loc(self: *const Model) bool {
+        return self.station_loc.len > 0;
+    }
+
+    // Schedule rows with the on-air show flagged live (kept for tests/status).
     pub fn shows_list(self: *const Model, arena: std.mem.Allocator) []const ShowRow {
         const out = arena.alloc(ShowRow, self.show_count) catch return &.{};
         for (out, self.show_rows[0..self.show_count]) |*row, src| {
@@ -260,7 +674,219 @@ pub const Model = struct {
         return out;
     }
 
-    // One-word transport status for the status bar.
+    // ------------------------------------------------------------- timeline
+    pub const UpRow = struct {
+        n: []const u8 = "",
+        title: []const u8 = "",
+        artist: []const u8 = "",
+        req_by: []const u8 = "",
+        has_req: bool = false,
+    };
+    pub fn upcoming_list(self: *const Model, arena: std.mem.Allocator) []const UpRow {
+        const out = arena.alloc(UpRow, self.upcoming_count) catch return &.{};
+        for (out, self.upcoming_rows[0..self.upcoming_count], 0..) |*row, src, i| {
+            row.* = .{
+                .n = std.fmt.allocPrint(arena, "{d:0>2}", .{i + 1}) catch "",
+                .title = src.title,
+                .artist = src.artist,
+                .req_by = src.req_by,
+                .has_req = src.req_by.len > 0,
+            };
+        }
+        return out;
+    }
+    pub fn history_list(self: *const Model) []const QueueRow {
+        return self.history_rows[0..self.history_count];
+    }
+
+    // ---------------------------------------------------------------- booth
+    pub const FilterRow = struct {
+        label: []const u8 = "",
+        val: BoothFilter = .all,
+        on: bool = false,
+    };
+    pub fn booth_filter_rows(self: *const Model, arena: std.mem.Allocator) []const FilterRow {
+        const out = arena.alloc(FilterRow, 3) catch return &.{};
+        out[0] = .{ .label = "ALL", .val = .all, .on = self.booth_filter == .all };
+        out[1] = .{ .label = "DJ", .val = .dj, .on = self.booth_filter == .dj };
+        out[2] = .{ .label = "TRACKS", .val = .tracks, .on = self.booth_filter == .tracks };
+        return out;
+    }
+    pub fn booth_list(self: *const Model, arena: std.mem.Allocator) []const BoothTurn {
+        var out: std.ArrayList(BoothTurn) = .empty;
+        for (self.booth_turns[0..self.booth_count]) |t| {
+            const keep = switch (self.booth_filter) {
+                .all => true,
+                .dj => !t.is_track,
+                .tracks => t.is_track,
+            };
+            if (keep) out.append(arena, t) catch break;
+        }
+        return out.items;
+    }
+
+    // -------------------------------------------------------------- request
+    pub fn req_idle(self: *const Model) bool {
+        return self.req_phase == .idle;
+    }
+    pub fn req_pending(self: *const Model) bool {
+        return self.req_phase == .pending;
+    }
+    pub fn req_done(self: *const Model) bool {
+        return self.req_phase == .done;
+    }
+    pub fn req_failed(self: *const Model) bool {
+        return self.req_phase == .failed;
+    }
+    pub fn req_state_label(self: *const Model) []const u8 {
+        return switch (self.req_phase) {
+            .pending => "ON THE WIRE",
+            .done => "QUEUED",
+            .failed => "NO DICE",
+            .idle => "",
+        };
+    }
+    pub fn req_card_label(self: *const Model) []const u8 {
+        return switch (self.req_phase) {
+            .pending => "THE DJ IS DIGGING",
+            .done => "NOW IN THE BOOTH",
+            .failed => "FROM THE BOOTH",
+            .idle => "",
+        };
+    }
+    pub fn req_footnote(self: *const Model) []const u8 {
+        return switch (self.req_phase) {
+            .pending => "YOU CAN CLOSE THIS — YOUR REQUEST IS LOCKED IN",
+            .done => "LOCKED IN — LISTEN FOR YOUR SHOUT-OUT",
+            else => "",
+        };
+    }
+    pub fn req_ack_line(self: *const Model, arena: std.mem.Allocator) []const u8 {
+        if (self.req_ack.len > 0) return self.req_ack;
+        const name = std.mem.trim(u8, self.req_name_buffer.text(), " ");
+        if (name.len > 0)
+            return std.fmt.allocPrint(arena, "Got it, {s} — taking it to the booth.", .{name}) catch "Got it — taking it to the booth.";
+        return "Got it — taking it to the booth.";
+    }
+    pub fn has_req_track(self: *const Model) bool {
+        return self.req_track_title.len > 0;
+    }
+    pub fn has_req_pos(self: *const Model) bool {
+        return self.req_queue_pos > 0;
+    }
+    pub fn has_req_status(self: *const Model) bool {
+        return self.req_status.len > 0;
+    }
+
+    // ------------------------------------------------------------- stations
+    pub fn recents_list(self: *const Model) []const StationRef {
+        return self.recents[0..self.recents_count];
+    }
+    pub fn has_recents(self: *const Model) bool {
+        return self.recents_count > 0;
+    }
+    pub fn discover_list(self: *const Model) []const DiscoverRow {
+        return self.discover_rows[0..self.discover_count];
+    }
+    pub fn has_discover(self: *const Model) bool {
+        return self.discover_count > 0;
+    }
+    pub fn base_display(self: *const Model) []const u8 {
+        var s = self.base;
+        if (std.mem.startsWith(u8, s, "https://")) s = s["https://".len..];
+        if (std.mem.startsWith(u8, s, "http://")) s = s["http://".len..];
+        return s;
+    }
+
+    // The featured station (onboarding's known-station row).
+    pub fn featured_url(self: *const Model) []const u8 {
+        _ = self;
+        return api.default_base;
+    }
+    pub fn featured_name(self: *const Model) []const u8 {
+        _ = self;
+        return "SUB/WAVE";
+    }
+    pub fn featured_display(self: *const Model) []const u8 {
+        _ = self;
+        var s: []const u8 = api.default_base;
+        if (std.mem.startsWith(u8, s, "https://")) s = s["https://".len..];
+        return s;
+    }
+
+    // ------------------------------------------------------------ onboarding
+    pub fn ob_entry(self: *const Model) bool {
+        return !self.ob_checking;
+    }
+    pub fn ob_scheme(self: *const Model) []const u8 {
+        return if (self.ob_https) "https://" else "http://";
+    }
+    pub fn has_ob_diag(self: *const Model) bool {
+        return self.ob_diag.len > 0;
+    }
+    pub const ObStepRow = struct {
+        label: []const u8,
+        stat: []const u8,
+        done: bool,
+        running: bool,
+        failed: bool,
+    };
+    pub fn ob_step_rows(self: *const Model, arena: std.mem.Allocator) []const ObStepRow {
+        const labels = [4][]const u8{ "Resolving host", "Controller · /health", "Icecast · /stream", "DJ booth · LLM link" };
+        const out = arena.alloc(ObStepRow, 4) catch return &.{};
+        for (out, labels, self.ob_steps) |*row, label, s| {
+            row.* = .{
+                .label = label,
+                .stat = switch (s) {
+                    .ok => "ok",
+                    .run => "…",
+                    .fail => "failed",
+                    .wait => "",
+                },
+                .done = s == .ok,
+                .running = s == .run,
+                .failed = s == .fail,
+            };
+        }
+        return out;
+    }
+
+    // --------------------------------------------------------------- themes
+    pub const ThemeRow = struct {
+        id: []const u8 = "",
+        name: []const u8 = "",
+        on: bool = false,
+    };
+    pub fn theme_rows(self: *const Model, arena: std.mem.Allocator) []const ThemeRow {
+        const out = arena.alloc(ThemeRow, self.theme_count) catch return &.{};
+        for (out, 0..) |*row, i| {
+            const name = if (self.theme_names[i].len > 0) self.theme_names[i] else self.theme_ids[i];
+            row.* = .{
+                .id = self.theme_ids[i],
+                .name = name,
+                .on = self.theme_override.len > 0 and std.mem.eql(u8, self.theme_ids[i], self.theme_override),
+            };
+        }
+        return out;
+    }
+    pub fn follow_on(self: *const Model) bool {
+        return self.theme_override.len == 0;
+    }
+    pub fn theme_value(self: *const Model) []const u8 {
+        if (self.theme_override.len == 0) return "Station default";
+        for (0..self.theme_count) |i| {
+            if (std.mem.eql(u8, self.theme_ids[i], self.theme_override))
+                return if (self.theme_names[i].len > 0) self.theme_names[i] else self.theme_ids[i];
+        }
+        return self.theme_override;
+    }
+
+    // The chart-bound spectrum series.
+    pub fn bands(self: *const Model) []const f32 {
+        return self.band_levels[0..];
+    }
+
+    // One-word transport status (tray + status assertions).
     pub fn status_word(self: *const Model) []const u8 {
         if (self.stream_failed) return "reconnecting";
         if (self.buffering) return "buffering";
@@ -273,29 +899,49 @@ pub const Model = struct {
     }
 
     // Names read/dispatched only by update/fx (never bound in markup) — opt out
-    // of the dead-state lint. Effect-result Msgs, backing buffers, and internal
-    // or derived-source state.
+    // of the dead-state lint.
     pub const view_unbound = .{
         // fixed backing buffers behind the bound slice fields
-        "title_buf",       "artist_buf",     "album_buf",     "genre_buf",
-        "dj_buf",          "show_buf",       "cover_sid_buf", "cover_url_buf",
-        "theme_id_buf",    "req_id_buf",     "booth_buf",
+        "title_buf",          "artist_buf",          "album_buf",           "genre_buf",
+        "dj_buf",             "show_buf",            "host_buf",            "cover_sid_buf",
+        "cover_url_buf",      "theme_id_buf",        "req_id_buf",          "booth_buf",
+        "station_name_buf",   "station_loc_buf",     "key_buf",             "moods_buf",
+        "energy_buf",         "ctx_show_buf",        "ctx_vibe_buf",        "ctx_cond_buf",
+        "req_ack_buf",        "req_track_title_buf", "req_track_artist_buf",
+        "ob_target_url_buf",  "ob_target_name_buf",  "ob_diag_buf",
         // internal / derived-source state
-        "skin",            "transport",      "volume",        "buffering",
-        "elapsed_ms",      "band_levels",    "req_buffer",    "retry",
-        "offline_streak",  "stream_failed",  "stream_online", "cover_sid",
-        "next_cover_id",   "req_id",         "theme_scheme",  "station_colors",
+        "phase",              "transport",           "volume",              "muted",
+        "buffering",          "elapsed_ms",          "band_levels",         "req_buffer",
+        "req_name_buffer",    "retry",               "offline_streak",      "stream_failed",
+        "stream_online",      "cover_sid",           "next_cover_id",       "req_id",
+        "theme_scheme",       "station_colors",      "active_tab",          "sheet",
+        "booth_filter",       "day_sel",             "req_phase",           "mini_open",
+        "sleep_deadline_ms",  "sleep_minutes",       "now_wall_ms",         "latency_ms",
+        "probe_t0",           "probe_fails",         "probe_inflight",      "probe_slow",
+        "sched_grid",         "dj",                  "ob_https",            "ob_checking",
+        "ob_steps",           "ob_done",             "chrome_top",
         // station / settings / theme-override state
-        "base",            "base_buf",       "stream_url_buf", "settings_path",
-        "settings_path_buf", "settings_json_buf", "station_buffer",
-        "theme_override",  "theme_override_buf",
-        "theme_ids",       "theme_ids_store", "theme_count",
-        "save_inflight",   "save_dirty",
-        // consumed by derived methods (np_meta), not bound directly in markup
-        "elapsed_str",     "dj",
-        // schedule / guide backing storage
-        "show_names_store", "show_topics_store", "show_personas_store",
-        "show_rows",        "show_count",
+        "base",               "base_buf",            "stream_url_buf",      "settings_path",
+        "settings_path_buf",  "settings_json_buf",   "station_buffer",      "theme_override",
+        "theme_override_buf", "theme_ids",           "theme_ids_store",     "theme_names",
+        "theme_names_store",  "theme_count",         "save_inflight",       "save_dirty",
+        "recents_name_store", "recents_url_store",   "recents",             "recents_count",
+        "discover_name_store", "discover_url_store", "discover_sub_store",  "discover_rows",
+        "discover_count",
+        // consumed by derived methods, not bound directly
+        "elapsed_str",        "vol_pct",             "listeners",           "genre",
+        "album",              "theme_id",            "req_ack",
+        "moods",              "energy",              "musical_key",         "track_bpm",
+        "track_year",         "track_duration_s",    "ctx_show",            "ctx_vibe",
+        "ctx_cond",           "ctx_temp",            "show",                "host",
+        "llm_tokens",         "status_word",         "shows_list",          "play_label",
+        "play_icon",          "tune_label",          "mute_label",          "vol_display",
+        // schedule / guide / feed backing storage
+        "show_names_store",   "show_topics_store",   "show_personas_store", "show_rows",
+        "show_count",         "up_title_store",      "up_artist_store",     "up_req_store",
+        "upcoming_rows",      "upcoming_count",      "hist_title_store",    "hist_artist_store",
+        "hist_time_store",    "history_rows",        "history_count",       "booth_time_store",
+        "booth_text_store",   "booth_turns",         "booth_count",
     };
 };
 
@@ -303,38 +949,95 @@ pub const App = native_sdk.UiApp(Model, Msg);
 pub const Effects = App.Effects;
 
 pub const Msg = union(enum) {
+    // effect results
     tick_feed: native_sdk.EffectTimer,
     tick_reconnect: native_sdk.EffectTimer,
     tick_theme: native_sdk.EffectTimer,
+    tick_signal: native_sdk.EffectTimer,
+    tick_second: native_sdk.EffectTimer,
+    tick_ob_step: native_sdk.EffectTimer,
     got_np: native_sdk.EffectResponse,
     got_state: native_sdk.EffectResponse,
     got_themes: native_sdk.EffectResponse,
     got_cover: native_sdk.EffectResponse,
     got_session: native_sdk.EffectResponse,
     got_schedule: native_sdk.EffectResponse,
+    got_health: native_sdk.EffectResponse,
+    got_dj: native_sdk.EffectResponse,
+    got_directory: native_sdk.EffectResponse,
+    got_beacon: native_sdk.EffectResponse,
     got_reqpost: native_sdk.EffectResponse,
     got_reqstat: native_sdk.EffectResponse,
+    got_ob_health: native_sdk.EffectResponse,
+    got_ob_dj: native_sdk.EffectResponse,
     tick_reqpoll: native_sdk.EffectTimer,
+    tick_save: native_sdk.EffectTimer,
     saved: native_sdk.EffectFileResult,
     audio_event: native_sdk.EffectAudio,
+    chrome_changed: ChromeInsets,
+
+    // transport + audio
     toggle_play,
+    tune_toggle, // power button: stopped <-> playing
     tune_out,
     vol_up,
     vol_down,
-    switch_skin,
+    volume_changed, // slider moved; value mirrored by Options.sync
+    toggle_mute,
+
+    // navigation
+    pick_tab: Tab,
+    close_panel,
+    toggle_sidebar,
+    escape,
+    open_panel,
+    open_sleep,
+    open_themes,
+    close_sheet,
+    toggle_mini,
+    expand_mini,
+    mini_closed,
+
+    // sleep timer
+    sleep_pick: i64,
+    cancel_sleep,
+
+    // booth / schedule
+    set_booth_filter: BoothFilter,
+    pick_day: i64,
+
+    // request slip
     req_edit: canvas.TextInputEvent,
+    req_name_edit: canvas.TextInputEvent,
+    chip_pick: []const u8,
     submit_req,
+    reset_request,
+
+    // stations
     station_edit: canvas.TextInputEvent,
-    tune_station,
-    cycle_theme,
-    toggle_schedule,
+    tune_station, // from the sidebar address field
+    pick_recent: []const u8, // payload = url
+    pick_discover: []const u8, // payload = url
+    follow_station,
+    pick_theme: []const u8, // payload = theme id
+
+    // onboarding
+    ob_toggle_scheme,
+    ob_run_check,
+    ob_pick_known: []const u8, // payload = url (known/discover rows)
+    ob_back,
+    ob_tune_in,
 
     // Effect-result Msgs dispatched by the runtime/fx, not markup.
     pub const view_unbound = .{
-        "tick_feed",   "tick_reconnect", "tick_theme",  "tick_reqpoll",
-        "got_np",      "got_state",      "got_themes",  "got_cover",
-        "got_session", "got_reqpost",    "got_reqstat", "audio_event",
-        "saved",       "got_schedule",
+        "tick_feed",     "tick_reconnect", "tick_theme",  "tick_reqpoll",
+        "tick_signal",   "tick_second",    "tick_ob_step", "got_np",
+        "got_state",     "got_themes",     "got_cover",   "got_session",
+        "got_reqpost",   "got_reqstat",    "got_health",  "got_dj",
+        "got_directory", "got_beacon",     "got_ob_health", "got_ob_dj",
+        "audio_event",   "saved",          "got_schedule", "tick_save",
+        "chrome_changed", "toggle_play",   "vol_up",      "vol_down",
+        "escape",        "mini_closed",    "tune_out",    "toggle_mini",
     };
 };
 
@@ -348,6 +1051,42 @@ fn setStr(buf: []u8, out: *[]const u8, v: []const u8) void {
     }
     @memcpy(buf[0..n], v[0..n]);
     out.* = buf[0..n];
+}
+
+fn asciiUpper(arena: std.mem.Allocator, s: []const u8) []const u8 {
+    if (s.len == 0) return "";
+    const out = arena.alloc(u8, s.len) catch return s;
+    for (out, s) |*o, ch| o.* = std.ascii.toUpper(ch);
+    return out;
+}
+
+// Append " · "-joined non-empty parts (masthead/meta line composition).
+fn appendPart(out: *std.ArrayList(u8), arena: std.mem.Allocator, part: []const u8) void {
+    if (part.len == 0) return;
+    if (out.items.len > 0) out.appendSlice(arena, " · ") catch return;
+    out.appendSlice(arena, part) catch return;
+}
+
+fn fmtSecs(arena: std.mem.Allocator, total_secs: i64) []const u8 {
+    const secs: u64 = @intCast(@max(0, total_secs));
+    const hours = secs / 3600;
+    const mins = (secs / 60) % 60;
+    const s = secs % 60;
+    if (hours > 0)
+        return std.fmt.allocPrint(arena, "{d}:{d:0>2}:{d:0>2}", .{ hours, mins, s }) catch "0:00";
+    return std.fmt.allocPrint(arena, "{d}:{d:0>2}", .{ mins, s }) catch "0:00";
+}
+
+// "2026-07-17T02:47:33Z" → "02:47" (best-effort; "" when not ISO-shaped).
+fn isoToHhmm(iso: []const u8) []const u8 {
+    if (iso.len >= 16 and iso[10] == 'T') return iso[11..16];
+    return "";
+}
+
+// UTC weekday for an epoch-ms timestamp (0 = Sunday; 1970-01-01 was Thursday).
+fn utcWeekday(wall_ms: i64) i64 {
+    const days = @divFloor(wall_ms, 86_400_000);
+    return @mod(days + 4, 7);
 }
 
 fn startStream(model: *Model, fx: *Effects) void {
@@ -366,7 +1105,7 @@ fn startStream(model: *Model, fx: *Effects) void {
         .expected_bytes = 0,
         .on_event = Effects.audioMsg(.audio_event),
     });
-    fx.setAudioVolume(model.volume);
+    fx.setAudioVolume(if (model.muted) 0.0 else model.volume);
     model.transport = .playing;
 }
 
@@ -379,7 +1118,8 @@ fn fetchFeed(model: *Model, fx: *Effects) void {
     if (api.session(&b3, model.base)) |u| fx.fetch(.{ .key = keys.fetch_session, .url = u, .on_response = Effects.responseMsg(.got_session) }) else |_| {}
 }
 
-// Minimal JSON string escape for the request text (quotes/backslashes/newlines).
+// Minimal JSON string escape (quotes/backslashes/newlines; drops other
+// control bytes).
 fn jsonEscape(buf: []u8, s: []const u8) []const u8 {
     var w: usize = 0;
     for (s) |ch| {
@@ -400,7 +1140,6 @@ fn jsonEscape(buf: []u8, s: []const u8) []const u8 {
                 buf[w + 1] = 'n';
                 w += 2;
             },
-            // Any other control byte would make the JSON body invalid — drop it.
             0x00...0x09, 0x0b...0x1f => {},
             else => {
                 buf[w] = ch;
@@ -421,36 +1160,94 @@ fn fetchSchedule(model: *Model, fx: *Effects) void {
     if (api.schedule(&b, model.base)) |u| fx.fetch(.{ .key = keys.fetch_schedule, .url = u, .on_response = Effects.responseMsg(.got_schedule) }) else |_| {}
 }
 
+fn fetchDj(model: *Model, fx: *Effects) void {
+    var b: [256]u8 = undefined;
+    if (api.dj(&b, model.base)) |u| fx.fetch(.{ .key = keys.fetch_dj, .url = u, .on_response = Effects.responseMsg(.got_dj) }) else |_| {}
+}
+
+fn fetchDirectory(fx: *Effects) void {
+    var b: [256]u8 = undefined;
+    if (api.directory(&b)) |u| fx.fetch(.{ .key = keys.fetch_directory, .url = u, .on_response = Effects.responseMsg(.got_directory) }) else |_| {}
+}
+
+// Fire-and-forget audience beacon (mirrors the mobile app's utmSource report).
+fn postBeacon(model: *Model, fx: *Effects) void {
+    var b: [256]u8 = undefined;
+    if (api.beacon(&b, model.base)) |u| {
+        fx.fetch(.{
+            .key = keys.post_beacon,
+            .method = .POST,
+            .url = u,
+            .headers = &.{.{ .name = "content-type", .value = "application/json" }},
+            .body = "{\"utmSource\":\"desktop\"}",
+            .on_response = Effects.responseMsg(.got_beacon),
+        });
+    } else |_| {}
+}
+
 // Apply a settings.json blob (called at startup from settings.loadFromDisk).
 pub fn applySettingsJson(model: *Model, bytes: []const u8) void {
     const parsed = json.parse(json.Settings, std.heap.page_allocator, bytes) catch return;
     defer parsed.deinit();
     const s = parsed.value;
     if (s.volume) |v| model.volume = std.math.clamp(v, 0.0, 1.0);
-    if (s.skin) |sk| model.skin = if (std.mem.eql(u8, sk, "deck")) .deck else .card;
     if (s.themeOverride) |t| setStr(&model.theme_override_buf, &model.theme_override, t);
     if (s.station) |st| {
         if (st.len > 0) {
-            if (api.normalizeBase(&model.base_buf, st)) |b| model.base = b else |_| {}
+            if (api.normalizeBase(&model.base_buf, st)) |b| {
+                model.base = b;
+                // A saved station means onboarding already happened.
+                model.phase = .player;
+            } else |_| {}
+        }
+    }
+    if (s.stationName) |n| {
+        if (n.len > 0) setStr(&model.station_name_buf, &model.station_name, n);
+    }
+    if (s.recents) |list| {
+        model.recents_count = 0;
+        for (list) |r| {
+            if (model.recents_count >= max_recents) break;
+            const url = r.url orelse continue;
+            if (url.len == 0) continue;
+            const i = model.recents_count;
+            setStr(&model.recents_url_store[i], &model.recents[i].url, url);
+            setStr(&model.recents_name_store[i], &model.recents[i].name, r.name orelse url);
+            model.recents_count += 1;
         }
     }
 }
 
 // Persist the current settings (async via fx.writeFile). While a write is in
 // flight further saves set save_dirty; the .saved result re-saves once, so the
-// last state always lands on disk (a concurrent writeFile on the same key
-// would be rejected).
+// last state always lands on disk.
 fn saveSettings(model: *Model, fx: *Effects) void {
     if (model.settings_path.len == 0) return;
     if (model.save_inflight) {
         model.save_dirty = true;
         return;
     }
-    const skin = if (model.skin == .deck) "deck" else "card";
-    if (std.fmt.bufPrint(&model.settings_json_buf, "{{\"volume\":{d:.2},\"skin\":\"{s}\",\"themeOverride\":\"{s}\",\"station\":\"{s}\"}}", .{ model.volume, skin, model.theme_override, model.base })) |body| {
-        fx.writeFile(.{ .key = keys.save_settings, .path = model.settings_path, .bytes = body, .on_result = Effects.fileMsg(.saved) });
-        model.save_inflight = true;
-    } else |_| {}
+    var w = std.Io.Writer.fixed(&model.settings_json_buf);
+    var esc: [256]u8 = undefined;
+    w.print("{{\"volume\":{d:.2},\"themeOverride\":\"{s}\",\"station\":\"{s}\",\"stationName\":\"{s}\",\"recents\":[", .{
+        model.volume,
+        jsonEscape(esc[0..64], model.theme_override),
+        model.base,
+        jsonEscape(esc[64..128], model.station_name),
+    }) catch return;
+    for (model.recents[0..model.recents_count], 0..) |r, i| {
+        if (i > 0) w.print(",", .{}) catch return;
+        w.print("{{\"name\":\"{s}\",\"url\":\"{s}\"}}", .{ jsonEscape(esc[0..128], r.name), r.url }) catch return;
+    }
+    w.print("]}}", .{}) catch return;
+    fx.writeFile(.{ .key = keys.save_settings, .path = model.settings_path, .bytes = w.buffered(), .on_result = Effects.fileMsg(.saved) });
+    model.save_inflight = true;
+}
+
+// Coalesce chatty saves (dragging the volume slider emits many changes).
+fn scheduleSave(model: *Model, fx: *Effects) void {
+    if (model.settings_path.len == 0) return;
+    fx.startTimer(.{ .key = keys.save_debounce, .interval_ms = 800, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick_save) });
 }
 
 fn scheduleReconnect(model: *Model, fx: *Effects) void {
@@ -462,14 +1259,153 @@ fn scheduleReconnect(model: *Model, fx: *Effects) void {
     fx.startTimer(.{ .key = keys.reconnect, .interval_ms = delay, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick_reconnect) });
 }
 
-// ------------------------------------------------------------------ boot
-pub fn boot(model: *Model, fx: *Effects) void {
+// Push a station onto the MRU recents list (dedupe by url, cap 8). Each row
+// owns its own store buffers, so shifting backward row-by-row never overlaps.
+fn pushRecent(model: *Model, name: []const u8, url: []const u8) void {
+    var existing: ?usize = null;
+    for (model.recents[0..model.recents_count], 0..) |r, i| {
+        if (std.mem.eql(u8, r.url, url)) {
+            existing = i;
+            break;
+        }
+    }
+    // Rows [0..shift_end) move down one slot; the duplicate (or the overflow
+    // tail) is overwritten.
+    const shift_end = existing orelse @min(model.recents_count, max_recents - 1);
+    var i: usize = shift_end;
+    while (i > 0) : (i -= 1) {
+        setStr(&model.recents_name_store[i], &model.recents[i].name, model.recents[i - 1].name);
+        setStr(&model.recents_url_store[i], &model.recents[i].url, model.recents[i - 1].url);
+    }
+    setStr(&model.recents_name_store[0], &model.recents[0].name, if (name.len > 0) name else url);
+    setStr(&model.recents_url_store[0], &model.recents[0].url, url);
+    if (existing == null) model.recents_count = @min(model.recents_count + 1, max_recents);
+}
+
+// Re-point everything at a (possibly new) station base: fresh stream + feeds,
+// nothing left over from the old one. `url` must already be normalized into
+// model.base by the caller.
+fn retune(model: *Model, fx: *Effects) void {
+    if (model.cover_id != 0) _ = fx.unregisterImage(model.cover_id);
+    model.cover_id = 0;
+    model.cover_sid = "";
+    model.title = "Tuning in…";
+    model.artist = "";
+    model.album = "";
+    model.genre = "";
+    model.dj = "";
+    model.show = "";
+    model.host = "";
+    model.listeners = 0;
+    model.booth_line = "";
+    model.booth_count = 0;
+    model.show_count = 0;
+    model.upcoming_count = 0;
+    model.history_count = 0;
+    model.sched_grid = [_][24]u8{[_]u8{0} ** 24} ** 7;
+    model.req_id = "";
+    model.req_status = "";
+    model.req_phase = .idle;
+    model.stream_failed = false;
+    model.retry = 0;
+    model.latency_ms = -1;
+    model.probe_fails = 0;
+    model.probe_inflight = false;
+    model.track_year = 0;
+    model.track_duration_s = 0;
+    model.track_bpm = 0;
+    model.musical_key = "";
+    model.moods = "";
+    model.energy = "";
+    model.llm_tokens = 0;
+    model.ctx_show = "";
+    model.ctx_vibe = "";
+    model.ctx_cond = "";
+    model.ctx_temp = -999;
+    // Cancel everything still in flight for the OLD station so a late
+    // response can't repopulate the fresh state.
+    fx.cancel(keys.fetch_np);
+    fx.cancel(keys.fetch_state);
+    fx.cancel(keys.fetch_session);
+    fx.cancel(keys.fetch_themes);
+    fx.cancel(keys.fetch_cover);
+    fx.cancel(keys.fetch_schedule);
+    fx.cancel(keys.fetch_health);
+    fx.cancel(keys.fetch_dj);
+    fx.cancel(keys.post_request);
+    fx.cancel(keys.fetch_reqstat);
+    fx.cancelTimer(keys.request_poll);
+    fx.cancelTimer(keys.reconnect);
+    fx.stopAudio();
     startStream(model, fx);
     fetchFeed(model, fx);
     fetchThemes(model, fx);
     fetchSchedule(model, fx);
+    fetchDj(model, fx);
+    postBeacon(model, fx);
+    saveSettings(model, fx);
+}
+
+fn startPlayerTimers(fx: *Effects) void {
     fx.startTimer(.{ .key = keys.feed_timer, .interval_ms = 5000, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_feed) });
     fx.startTimer(.{ .key = keys.theme_timer, .interval_ms = 30_000, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_theme) });
+    fx.startTimer(.{ .key = keys.signal_timer, .interval_ms = 5000, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_signal) });
+}
+
+fn armSleep(model: *Model, fx: *Effects, minutes: i64) void {
+    model.sleep_minutes = minutes;
+    model.now_wall_ms = native_sdk.nowMs();
+    model.sleep_deadline_ms = model.now_wall_ms + minutes * 60_000;
+    fx.startTimer(.{ .key = keys.second_timer, .interval_ms = 1000, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_second) });
+}
+
+fn disarmSleep(model: *Model, fx: *Effects) void {
+    model.sleep_deadline_ms = 0;
+    model.sleep_minutes = 0;
+    fx.cancelTimer(keys.second_timer);
+}
+
+fn tuneOut(model: *Model, fx: *Effects) void {
+    fx.stopAudio();
+    // Tuning out ends any reconnect story: without this a prior failure would
+    // keep the "STREAM LOST" banner up over a deliberately stopped player.
+    fx.cancelTimer(keys.reconnect);
+    model.transport = .stopped;
+    model.stream_failed = false;
+    model.buffering = false;
+    model.retry = 0;
+    model.latency_ms = -1;
+    model.probe_fails = 0;
+}
+
+// Start the onboarding health-check against a candidate url/name.
+fn obStart(model: *Model, fx: *Effects, url: []const u8, name: []const u8) void {
+    setStr(&model.ob_target_url_buf, &model.ob_target_url, url);
+    setStr(&model.ob_target_name_buf, &model.ob_target_name, if (name.len > 0) name else url);
+    model.ob_checking = true;
+    model.ob_done = false;
+    model.ob_diag = "";
+    model.ob_steps = .{ .run, .wait, .wait, .wait };
+    // Step 1 is cosmetic (the fetch below resolves the host as a side effect);
+    // give it a beat so the stepper reads as progress, then gate on /health.
+    fx.startTimer(.{ .key = keys.ob_step_timer, .interval_ms = 420, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick_ob_step) });
+}
+
+// ------------------------------------------------------------------ boot
+pub fn boot(model: *Model, fx: *Effects) void {
+    fetchDirectory(fx); // Discover rows for onboarding + sidebar
+    if (model.phase == .player) {
+        startStream(model, fx);
+        fetchFeed(model, fx);
+        fetchThemes(model, fx);
+        fetchSchedule(model, fx);
+        fetchDj(model, fx);
+        postBeacon(model, fx);
+        startPlayerTimers(fx);
+        model.day_sel = utcWeekday(native_sdk.nowMs());
+    } else {
+        model.transport = .stopped;
+    }
 }
 
 // ---------------------------------------------------------------- update
@@ -484,6 +1420,44 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .tick_theme => |t| {
             if (t.outcome == .fired) fetchThemes(model, fx);
         },
+        .tick_signal => |t| {
+            if (t.outcome != .fired) return;
+            if (model.transport != .playing or model.probe_inflight) return;
+            var b: [256]u8 = undefined;
+            if (api.health(&b, model.base)) |u| {
+                model.probe_t0 = native_sdk.monotonicMs();
+                model.probe_inflight = true;
+                fx.fetch(.{ .key = keys.fetch_health, .url = u, .timeout_ms = 4000, .on_response = Effects.responseMsg(.got_health) });
+            } else |_| {}
+        },
+        .got_health => |r| {
+            model.probe_inflight = false;
+            if (r.outcome == .ok and r.status < 400) {
+                model.latency_ms = @intCast(native_sdk.monotonicMs() - model.probe_t0);
+                model.probe_fails = 0;
+                if (model.probe_slow) {
+                    // Back to the brisk cadence after recovery.
+                    model.probe_slow = false;
+                    fx.startTimer(.{ .key = keys.signal_timer, .interval_ms = 5000, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_signal) });
+                }
+            } else {
+                model.probe_fails +|= 1;
+                model.latency_ms = -1;
+                if (model.probe_fails >= probe_backoff_after and !model.probe_slow) {
+                    // The link is just down — probe gently instead of hammering.
+                    model.probe_slow = true;
+                    fx.startTimer(.{ .key = keys.signal_timer, .interval_ms = 15_000, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_signal) });
+                }
+            }
+        },
+        .tick_second => |t| {
+            if (t.outcome != .fired) return;
+            model.now_wall_ms = native_sdk.nowMs();
+            if (model.sleep_deadline_ms > 0 and model.now_wall_ms >= model.sleep_deadline_ms) {
+                disarmSleep(model, fx);
+                tuneOut(model, fx);
+            }
+        },
         .got_np => |r| {
             if (r.outcome != .ok or r.status != 200) return;
             const parsed = json.parse(json.NowPlaying, std.heap.page_allocator, r.body) catch return;
@@ -494,13 +1468,31 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 if (t.artist) |v| setStr(&model.artist_buf, &model.artist, v);
                 if (t.album) |v| setStr(&model.album_buf, &model.album, v);
                 if (t.genre) |v| setStr(&model.genre_buf, &model.genre, v);
+                model.track_year = t.year orelse 0;
+                model.track_duration_s = if (t.duration) |d| @intFromFloat(@max(0, d)) else 0;
+                model.track_bpm = if (t.bpm) |b| @intFromFloat(@round(b)) else 0;
+                if (t.musicalKey) |v| setStr(&model.key_buf, &model.musical_key, v) else model.musical_key = "";
+                if (t.energy) |v| setStr(&model.energy_buf, &model.energy, v) else model.energy = "";
+                if (t.moods) |list| {
+                    var joined: [96]u8 = undefined;
+                    var w: usize = 0;
+                    for (list, 0..) |m, i| {
+                        if (i >= 3) break;
+                        const sep: []const u8 = if (i > 0) " · " else "";
+                        if (w + sep.len + m.len > joined.len) break;
+                        @memcpy(joined[w..][0..sep.len], sep);
+                        w += sep.len;
+                        @memcpy(joined[w..][0..m.len], m);
+                        w += m.len;
+                    }
+                    setStr(&model.moods_buf, &model.moods, joined[0..w]);
+                } else model.moods = "";
                 // Fetch cover art when the track's subsonic id changes.
                 if (t.subsonic_id) |sid| {
                     if (sid.len > 0 and !std.mem.eql(u8, sid, model.cover_sid)) {
                         setStr(&model.cover_sid_buf, &model.cover_sid, sid);
                         // Drop the previous track's art right away — the
-                        // initials disc is honest while the new cover loads,
-                        // and stays honest if the fetch fails or truncates.
+                        // initials disc is honest while the new cover loads.
                         if (model.cover_id != 0) {
                             _ = fx.unregisterImage(model.cover_id);
                             model.cover_id = 0;
@@ -511,17 +1503,32 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     }
                 }
             }
+            if (np.context) |ctx| {
+                if (ctx.time) |tc| {
+                    if (tc.show) |v| setStr(&model.ctx_show_buf, &model.ctx_show, v);
+                    if (tc.vibe) |v| setStr(&model.ctx_vibe_buf, &model.ctx_vibe, v);
+                }
+                if (ctx.weather) |wc| {
+                    if (wc.condition) |v| setStr(&model.ctx_cond_buf, &model.ctx_cond, v);
+                    if (wc.temp) |v| model.ctx_temp = @intFromFloat(@round(v));
+                }
+            }
             if (np.dj) |d| {
                 if (d.name) |v| setStr(&model.dj_buf, &model.dj, v);
             }
             if (np.activeShow) |s| {
                 if (s.name) |v| setStr(&model.show_buf, &model.show, v);
+                if (s.persona) |p| {
+                    if (p.name) |v| setStr(&model.host_buf, &model.host, v);
+                } else model.host = "";
             } else {
                 model.show = "";
+                model.host = "";
             }
             if (np.listeners) |l| {
                 if (l.current) |c| model.listeners = c;
             }
+            if (np.llmTokens) |tok| model.llm_tokens = tok;
             // Offline debounce: 4 consecutive offline reads before we believe it.
             if (np.streamOnline) |on| {
                 if (on) {
@@ -537,15 +1544,36 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (r.outcome != .ok or r.status != 200) return;
             const parsed = json.parse(json.StationState, std.heap.page_allocator, r.body) catch return;
             defer parsed.deinit();
-            // The active theme id rides /api/state on the 5 s feed cadence; the
-            // token maps come from /api/themes (30 s poll). When the station
-            // flips its theme, refresh the tokens right away instead of waiting
-            // out the slow poll (unless a listener override pins the theme).
+            // The active theme id rides /api/state on the 5 s feed cadence;
+            // when the station flips its theme, refresh tokens right away.
             if (parsed.value.theme) |t| {
                 if (t.active) |active| {
                     if (model.theme_override.len == 0 and !std.mem.eql(u8, active, model.theme_id)) {
                         fetchThemes(model, fx);
                     }
+                }
+            }
+            // Timeline ledger: UP NEXT + PLAYED.
+            if (parsed.value.upcoming) |list| {
+                model.upcoming_count = 0;
+                for (list) |e| {
+                    if (model.upcoming_count >= max_upcoming) break;
+                    const i = model.upcoming_count;
+                    setStr(&model.up_title_store[i], &model.upcoming_rows[i].title, e.title orelse continue);
+                    setStr(&model.up_artist_store[i], &model.upcoming_rows[i].artist, e.artist orelse "");
+                    setStr(&model.up_req_store[i], &model.upcoming_rows[i].req_by, e.requestedBy orelse "");
+                    model.upcoming_count += 1;
+                }
+            }
+            if (parsed.value.history) |list| {
+                model.history_count = 0;
+                for (list) |e| {
+                    if (model.history_count >= max_history) break;
+                    const i = model.history_count;
+                    setStr(&model.hist_title_store[i], &model.history_rows[i].title, e.title orelse continue);
+                    setStr(&model.hist_artist_store[i], &model.history_rows[i].artist, e.artist orelse "");
+                    setStr(&model.hist_time_store[i], &model.history_rows[i].hhmm, isoToHhmm(e.t orelse ""));
+                    model.history_count += 1;
                 }
             }
         },
@@ -556,12 +1584,13 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             const p = parsed.value;
             const active = p.active orelse return;
             const list = p.themes orelse return;
-            // Capture the theme-id catalogue for the cycle button.
+            // Capture the theme catalogue (ids + names) for the fascia sheet.
             model.theme_count = 0;
             for (list) |t| {
                 const id = t.id orelse continue;
                 if (model.theme_count >= max_themes) break;
                 setStr(&model.theme_ids_store[model.theme_count], &model.theme_ids[model.theme_count], id);
+                setStr(&model.theme_names_store[model.theme_count], &model.theme_names[model.theme_count], t.name orelse "");
                 model.theme_count += 1;
             }
             // Target = a valid override, else the station's active theme.
@@ -614,25 +1643,61 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (r.outcome != .ok or r.status != 200) return;
             const parsed = json.parse(json.Session, std.heap.page_allocator, r.body) catch return;
             defer parsed.deinit();
-            // Booth ticker: the most recent DJ-spoken line (skip internal
-            // event/user/segment turns — only role "dj" is on-air speech).
-            if (parsed.value.messages) |msgs| {
-                var i: usize = msgs.len;
-                while (i > 0) {
-                    i -= 1;
-                    const role = msgs[i].role orelse continue;
-                    if (!std.mem.eql(u8, role, "dj")) continue;
-                    // Skip the DJ's internal pick reasoning — only on-air speech.
-                    if (msgs[i].kind) |k| {
-                        if (std.mem.eql(u8, k, "pick")) continue;
-                    }
-                    if (msgs[i].text) |txt| {
-                        if (txt.len > 0) {
-                            setStr(&model.booth_buf, &model.booth_line, txt);
-                            break;
-                        }
+            const msgs = parsed.value.messages orelse return;
+            // Booth ticker: the most recent DJ-spoken line (role "dj"/"segment",
+            // skipping internal pick reasoning) for the stage.
+            var i: usize = msgs.len;
+            while (i > 0) {
+                i -= 1;
+                const role = msgs[i].role orelse continue;
+                const spoken = std.mem.eql(u8, role, "dj") or std.mem.eql(u8, role, "segment");
+                if (!spoken) continue;
+                if (msgs[i].kind) |k| {
+                    if (std.mem.eql(u8, k, "pick")) continue;
+                }
+                if (msgs[i].text) |txt| {
+                    if (txt.len > 0) {
+                        setStr(&model.booth_buf, &model.booth_line, txt);
+                        break;
                     }
                 }
+            }
+            // Booth feed: newest-first voice/dj/track turns for the panel.
+            model.booth_count = 0;
+            var j: usize = msgs.len;
+            while (j > 0 and model.booth_count < max_booth) {
+                j -= 1;
+                const m = msgs[j];
+                const role = m.role orelse continue;
+                const text = m.text orelse continue;
+                if (text.len == 0) continue;
+                var turn = BoothTurn{};
+                if (std.mem.eql(u8, role, "segment")) {
+                    turn.is_voice = true;
+                    turn.kind = "VOICE";
+                } else if (std.mem.eql(u8, role, "dj")) {
+                    // dj pick reasoning shows as the "thinking" register
+                    turn.kind = "PICK";
+                } else if (std.mem.eql(u8, role, "track")) {
+                    turn.is_track = true;
+                    turn.kind = "TRACK";
+                } else continue; // system/event turns stay internal
+                const k = model.booth_count;
+                var hhmm: []const u8 = "";
+                if (m.t) |tv| {
+                    if (tv == .string) hhmm = isoToHhmm(tv.string);
+                }
+                setStr(&model.booth_time_store[k], &model.booth_turns[k].hhmm, hhmm);
+                // Track turns render as "♪ Title — Artist"; strip any "▶ ".
+                var body = text;
+                if (turn.is_track and std.mem.startsWith(u8, body, "▶")) {
+                    body = std.mem.trimStart(u8, body["▶".len..], " ");
+                }
+                setStr(&model.booth_text_store[k], &model.booth_turns[k].text, body);
+                model.booth_turns[k].is_voice = turn.is_voice;
+                model.booth_turns[k].is_track = turn.is_track;
+                model.booth_turns[k].kind = turn.kind;
+                model.booth_count += 1;
             }
         },
         .got_schedule => |r| {
@@ -648,7 +1713,6 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 const name = s.name orelse continue;
                 setStr(&model.show_names_store[i], &model.show_rows[i].name, name);
                 setStr(&model.show_topics_store[i], &model.show_rows[i].topic, s.topic orelse "");
-                // Resolve persona name from personaId.
                 var persona_name: []const u8 = "";
                 if (s.personaId) |pid| {
                     for (personas) |p| {
@@ -663,23 +1727,111 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 setStr(&model.show_personas_store[i], &model.show_rows[i].persona, persona_name);
                 model.show_count += 1;
             }
+            // Grid: showId per day/hour → show index (+1) in sched_grid.
+            model.sched_grid = [_][24]u8{[_]u8{0} ** 24} ** 7;
+            if (parsed.value.schedule) |grid| {
+                for (0..7) |d| {
+                    const col = grid.day(d) orelse continue;
+                    for (col, 0..) |slot, h| {
+                        if (h >= 24) break;
+                        const sid = slot orelse continue;
+                        // Resolve the show id against the catalogue we kept.
+                        var idx: usize = 0;
+                        var found = false;
+                        for (shows, 0..) |s, si| {
+                            if (si >= max_shows) break;
+                            if (s.id) |id| {
+                                if (std.mem.eql(u8, id, sid)) {
+                                    idx = si;
+                                    found = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (found) model.sched_grid[d][h] = @intCast(idx + 1);
+                    }
+                }
+            }
         },
-        .toggle_schedule => model.show_schedule = !model.show_schedule,
+        .got_dj => |r| {
+            if (r.outcome != .ok or r.status != 200) return;
+            const parsed = json.parse(json.DjPublic, std.heap.page_allocator, r.body) catch return;
+            defer parsed.deinit();
+            const p = parsed.value;
+            if (p.station) |s| {
+                if (s.len > 0) setStr(&model.station_name_buf, &model.station_name, s);
+            } else if (p.name) |n| {
+                if (n.len > 0) setStr(&model.station_name_buf, &model.station_name, n);
+            }
+            if (p.location) |l| setStr(&model.station_loc_buf, &model.station_loc, l);
+            saveSettings(model, fx); // persist the resolved station name
+        },
+        .got_directory => |r| {
+            if (r.outcome != .ok or r.status != 200) return;
+            const parsed = json.parse([]json.DirectoryStation, std.heap.page_allocator, r.body) catch return;
+            defer parsed.deinit();
+            model.discover_count = 0;
+            for (parsed.value) |st| {
+                if (model.discover_count >= max_discover) break;
+                const url = st.url orelse continue;
+                if (url.len == 0) continue;
+                // The tuned station needn't discover itself.
+                if (std.mem.eql(u8, url, model.base)) continue;
+                const i = model.discover_count;
+                setStr(&model.discover_name_store[i], &model.discover_rows[i].name, st.name orelse url);
+                setStr(&model.discover_url_store[i], &model.discover_rows[i].url, url);
+                var sub: [64]u8 = undefined;
+                var w: usize = 0;
+                if (st.location) |loc| {
+                    const n = @min(loc.len, 40);
+                    @memcpy(sub[0..n], loc[0..n]);
+                    w = n;
+                }
+                if (st.genre) |g| {
+                    const sep = " · ";
+                    if (g.len > 0 and w + sep.len + g.len <= sub.len) {
+                        if (w > 0) {
+                            @memcpy(sub[w..][0..sep.len], sep);
+                            w += sep.len;
+                        }
+                        @memcpy(sub[w..][0..g.len], g);
+                        w += g.len;
+                    }
+                }
+                setStr(&model.discover_sub_store[i], &model.discover_rows[i].sub, sub[0..w]);
+                model.discover_count += 1;
+            }
+        },
+        .got_beacon => {}, // fire-and-forget
+        .chrome_changed => |c| {
+            model.chrome_top = c.top;
+            model.chrome_leading = c.leading;
+        },
+
+        // ------------------------------------------------------ request slip
         .req_edit => |edit| model.req_buffer.apply(edit),
+        .req_name_edit => |edit| model.req_name_buffer.apply(edit),
+        .chip_pick => |text| {
+            model.req_buffer.set(text);
+            model.req_status = "";
+        },
         .submit_req => {
             const text = model.req_buffer.text();
             if (text.len == 0) {
-                model.req_status = "type a song first";
+                model.req_status = "write the DJ a line first";
             } else {
-                var esc_buf: [200]u8 = undefined;
-                var body_buf: [280]u8 = undefined;
+                var esc_buf: [256]u8 = undefined;
+                var name_esc_buf: [64]u8 = undefined;
+                var body_buf: [420]u8 = undefined;
                 const esc = jsonEscape(&esc_buf, text);
+                const raw_name = std.mem.trim(u8, model.req_name_buffer.text(), " ");
+                const name_esc = if (raw_name.len > 0) jsonEscape(&name_esc_buf, raw_name) else "Desktop";
                 var req_url_buf: [256]u8 = undefined;
                 const req_url = api.request(&req_url_buf, model.base) catch {
                     model.req_status = "bad station url";
                     return;
                 };
-                if (std.fmt.bufPrint(&body_buf, "{{\"text\":\"{s}\",\"name\":\"Desktop\"}}", .{esc})) |body| {
+                if (std.fmt.bufPrint(&body_buf, "{{\"text\":\"{s}\",\"name\":\"{s}\"}}", .{ esc, name_esc })) |body| {
                     fx.fetch(.{
                         .key = keys.post_request,
                         .method = .POST,
@@ -688,8 +1840,12 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                         .body = body,
                         .on_response = Effects.responseMsg(.got_reqpost),
                     });
-                    model.req_status = "sending…";
-                    model.req_buffer.clear();
+                    model.req_phase = .pending;
+                    model.req_status = "";
+                    model.req_ack = "";
+                    model.req_track_title = "";
+                    model.req_track_artist = "";
+                    model.req_queue_pos = 0;
                 } else |_| {
                     model.req_status = "request too long";
                 }
@@ -697,28 +1853,31 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .got_reqpost => |r| {
             if (r.outcome != .ok) {
-                model.req_status = "request failed";
+                model.req_phase = .failed;
+                model.req_status = "request failed — try again";
                 return;
             }
             if (r.status == 429) {
+                model.req_phase = .failed;
                 model.req_status = "slow down — try again shortly";
                 return;
             }
             if (r.status != 202 and r.status != 200) {
+                model.req_phase = .failed;
                 model.req_status = "request not accepted";
                 return;
             }
             const parsed = json.parse(json.RequestPost, std.heap.page_allocator, r.body) catch {
-                model.req_status = "queued";
+                model.req_phase = .done;
                 return;
             };
             defer parsed.deinit();
+            if (parsed.value.ack) |a| setStr(&model.req_ack_buf, &model.req_ack, a);
             if (parsed.value.requestId) |id| {
                 setStr(&model.req_id_buf, &model.req_id, id);
-                model.req_status = "queued — finding it…";
                 fx.startTimer(.{ .key = keys.request_poll, .interval_ms = 2000, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick_reqpoll) });
             } else {
-                model.req_status = "queued";
+                model.req_phase = .done;
             }
         },
         .tick_reqpoll => |t| {
@@ -731,22 +1890,41 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .got_reqstat => |r| {
             // A late status for a request the model already dropped (station
-            // switch) must not resurrect the ticker.
+            // switch) must not resurrect the card.
             if (model.req_id.len == 0) return;
             if (r.outcome != .ok or r.status != 200) return;
             const parsed = json.parse(json.RequestStatus, std.heap.page_allocator, r.body) catch return;
             defer parsed.deinit();
             const st = parsed.value.status orelse "pending";
+            if (parsed.value.ack) |a| setStr(&model.req_ack_buf, &model.req_ack, a);
             if (std.mem.eql(u8, st, "resolved")) {
-                model.req_status = "playing soon ✓";
+                model.req_phase = .done;
+                if (parsed.value.track) |tr| {
+                    if (tr.title) |v| setStr(&model.req_track_title_buf, &model.req_track_title, v);
+                    if (tr.artist) |v| setStr(&model.req_track_artist_buf, &model.req_track_artist, v);
+                }
+                if (parsed.value.queuePosition) |pos| model.req_queue_pos = pos;
             } else if (std.mem.eql(u8, st, "failed")) {
+                model.req_phase = .failed;
                 model.req_status = "couldn't find that one";
+                if (parsed.value.message) |m| setStr(&model.req_ack_buf, &model.req_ack, m);
             } else {
-                model.req_status = "queued — finding it…";
                 // Keep polling until terminal.
                 fx.startTimer(.{ .key = keys.request_poll, .interval_ms = 2000, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick_reqpoll) });
             }
         },
+        .reset_request => {
+            model.req_phase = .idle;
+            model.req_status = "";
+            model.req_ack = "";
+            model.req_track_title = "";
+            model.req_track_artist = "";
+            model.req_queue_pos = 0;
+            model.req_id = "";
+            model.req_buffer.clear();
+        },
+
+        // --------------------------------------------------------- transport
         .audio_event => |e| {
             switch (e.kind) {
                 .loaded => {
@@ -789,30 +1967,36 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 },
             }
         },
-        .tune_out => {
-            fx.stopAudio();
-            // Tuning out ends any reconnect story: without this a prior
-            // failure would keep the "STREAM LOST — reconnecting…" banner up
-            // over a deliberately stopped player.
-            fx.cancelTimer(keys.reconnect);
-            model.transport = .stopped;
-            model.stream_failed = false;
-            model.buffering = false;
-            model.retry = 0;
+        .tune_toggle => {
+            if (model.transport == .stopped) startStream(model, fx) else tuneOut(model, fx);
         },
+        .tune_out => tuneOut(model, fx),
         .vol_up => {
             model.volume = @min(model.volume + 0.1, 1.0);
+            // Nudging the volume implicitly unmutes.
+            model.muted = false;
             fx.setAudioVolume(model.volume);
-            saveSettings(model, fx);
+            scheduleSave(model, fx);
         },
         .vol_down => {
             model.volume = @max(model.volume - 0.1, 0.0);
+            model.muted = false;
             fx.setAudioVolume(model.volume);
-            saveSettings(model, fx);
+            scheduleSave(model, fx);
         },
-        .switch_skin => {
-            model.skin = if (model.skin == .card) .deck else .card;
-            saveSettings(model, fx);
+        .volume_changed => {
+            // The slider's applied value was mirrored into model.volume by
+            // Options.sync before this dispatch; apply it to the output.
+            model.muted = false;
+            fx.setAudioVolume(model.volume);
+            scheduleSave(model, fx);
+        },
+        .toggle_mute => {
+            model.muted = !model.muted;
+            fx.setAudioVolume(if (model.muted) 0.0 else model.volume);
+        },
+        .tick_save => |t| {
+            if (t.outcome == .fired) saveSettings(model, fx);
         },
         .saved => {
             model.save_inflight = false;
@@ -821,73 +2005,199 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 saveSettings(model, fx);
             }
         },
-        .station_edit => |edit| model.station_buffer.apply(edit),
+
+        // -------------------------------------------------------- navigation
+        .pick_tab => |tab| {
+            model.active_tab = tab;
+            if (tab == .schedule) model.day_sel = utcWeekday(native_sdk.nowMs());
+        },
+        .close_panel => model.active_tab = .live,
+        .toggle_sidebar => {
+            model.sidebar_open = !model.sidebar_open;
+            if (model.sidebar_open) fetchDirectory(fx); // refresh Discover
+        },
+        .escape => {
+            if (model.sheet != .none) {
+                model.sheet = .none;
+            } else if (model.sidebar_open) {
+                model.sidebar_open = false;
+            } else {
+                model.active_tab = .live;
+            }
+        },
+        .open_panel => model.sheet = .panel,
+        .open_sleep => model.sheet = .sleep,
+        .open_themes => model.sheet = .themes,
+        .close_sheet => model.sheet = .none,
+        .toggle_mini => model.mini_open = !model.mini_open,
+        .expand_mini => model.mini_open = false,
+        .mini_closed => model.mini_open = false,
+
+        // ------------------------------------------------------- sleep timer
+        .sleep_pick => |min| {
+            armSleep(model, fx, min);
+            model.sheet = .panel; // back to the panel with the countdown showing
+        },
+        .cancel_sleep => disarmSleep(model, fx),
+
+        // --------------------------------------------------- booth / schedule
+        .set_booth_filter => |f| model.booth_filter = f,
+        .pick_day => |d| model.day_sel = std.math.clamp(d, 0, 6),
+
+        // ---------------------------------------------------------- stations
+        .station_edit => |edit| {
+            model.station_buffer.apply(edit);
+            model.station_status = "";
+        },
         .tune_station => {
             const raw = model.station_buffer.text();
             if (api.normalizeBase(&model.base_buf, raw)) |b| {
                 model.base = b;
-                // Re-point everything at the new station: fresh stream + feeds,
-                // nothing left over from the old one.
-                if (model.cover_id != 0) _ = fx.unregisterImage(model.cover_id);
-                model.cover_id = 0;
-                model.cover_sid = "";
-                model.title = "Tuning in…";
-                model.artist = "";
-                model.album = "";
-                model.genre = "";
-                model.dj = "";
-                model.show = "";
-                model.listeners = 0;
-                model.booth_line = "";
-                model.show_count = 0;
-                model.req_id = "";
-                model.req_status = "";
-                model.stream_failed = false;
-                model.retry = 0;
-                // Cancel everything still in flight for the OLD station so a
-                // late response can't repopulate the fresh state (a cancelled
-                // fetch delivers a non-ok outcome, which every handler
-                // already ignores).
-                fx.cancel(keys.fetch_np);
-                fx.cancel(keys.fetch_state);
-                fx.cancel(keys.fetch_session);
-                fx.cancel(keys.fetch_themes);
-                fx.cancel(keys.fetch_cover);
-                fx.cancel(keys.fetch_schedule);
-                fx.cancel(keys.post_request);
-                fx.cancel(keys.fetch_reqstat);
-                fx.cancelTimer(keys.request_poll);
-                fx.cancelTimer(keys.reconnect);
-                fx.stopAudio();
-                startStream(model, fx);
-                fetchFeed(model, fx);
-                fetchThemes(model, fx);
-                fetchSchedule(model, fx);
-                saveSettings(model, fx);
+                model.station_buffer.clear();
+                model.station_status = "";
+                setStr(&model.station_name_buf, &model.station_name, model.base_display());
+                pushRecent(model, model.station_name, model.base);
+                model.sidebar_open = false;
+                retune(model, fx);
+            } else |_| {
+                model.station_status = "not a valid address";
+            }
+        },
+        .pick_recent, .pick_discover => |url| {
+            if (api.normalizeBase(&model.base_buf, url)) |b| {
+                model.base = b;
+                // Resolve the display name from whichever list carried it.
+                var name: []const u8 = model.base_display();
+                for (model.recents[0..model.recents_count]) |rec| {
+                    if (std.mem.eql(u8, rec.url, b)) name = rec.name;
+                }
+                for (model.discover_rows[0..model.discover_count]) |d| {
+                    if (std.mem.eql(u8, d.url, url)) name = d.name;
+                }
+                setStr(&model.station_name_buf, &model.station_name, name);
+                pushRecent(model, model.station_name, model.base);
+                model.sidebar_open = false;
+                retune(model, fx);
             } else |_| {}
         },
-        .cycle_theme => {
-            // "" (follow station) → id[0] → id[1] → … → "" .
-            if (model.theme_count == 0) {
-                // no catalogue yet
-            } else if (model.theme_override.len == 0) {
-                setStr(&model.theme_override_buf, &model.theme_override, model.theme_ids[0]);
-            } else {
-                var idx: usize = model.theme_count; // = "not found" sentinel
-                for (0..model.theme_count) |i| {
-                    if (std.mem.eql(u8, model.theme_ids[i], model.theme_override)) {
-                        idx = i;
-                        break;
-                    }
+        .follow_station => {
+            model.theme_override = "";
+            fetchThemes(model, fx);
+            saveSettings(model, fx);
+        },
+        .pick_theme => |id| {
+            setStr(&model.theme_override_buf, &model.theme_override, id);
+            fetchThemes(model, fx);
+            saveSettings(model, fx);
+        },
+
+        // -------------------------------------------------------- onboarding
+        .ob_toggle_scheme => model.ob_https = !model.ob_https,
+        .ob_run_check => {
+            const raw = std.mem.trim(u8, model.station_buffer.text(), " \t\r\n");
+            if (raw.len == 0) return;
+            var buf: [200]u8 = undefined;
+            const has_scheme = std.mem.startsWith(u8, raw, "http://") or std.mem.startsWith(u8, raw, "https://");
+            const url = if (has_scheme)
+                raw
+            else
+                std.fmt.bufPrint(&buf, "{s}{s}", .{ model.ob_scheme(), raw }) catch return;
+            obStart(model, fx, std.mem.trimEnd(u8, url, "/"), "");
+        },
+        .ob_pick_known => |url| {
+            // Resolve name from known/discover rows.
+            var name: []const u8 = "";
+            if (std.mem.eql(u8, url, api.default_base)) name = "SUB/WAVE";
+            for (model.recents[0..model.recents_count]) |rec| {
+                if (std.mem.eql(u8, rec.url, url)) name = rec.name;
+            }
+            for (model.discover_rows[0..model.discover_count]) |d| {
+                if (std.mem.eql(u8, d.url, url)) name = d.name;
+            }
+            obStart(model, fx, url, name);
+        },
+        .tick_ob_step => |t| {
+            if (t.outcome != .fired or !model.ob_checking) return;
+            if (model.ob_steps[0] == .run) {
+                // Step 1 done; step 2 is the real gate — probe /health.
+                model.ob_steps[0] = .ok;
+                model.ob_steps[1] = .run;
+                var b: [256]u8 = undefined;
+                if (api.health(&b, model.ob_target_url)) |u| {
+                    fx.fetch(.{ .key = keys.fetch_ob_health, .url = u, .timeout_ms = 8000, .on_response = Effects.responseMsg(.got_ob_health) });
+                } else |_| {
+                    model.ob_steps[1] = .fail;
+                    setStr(&model.ob_diag_buf, &model.ob_diag, "That address doesn't look right.");
                 }
-                if (idx + 1 < model.theme_count) {
-                    setStr(&model.theme_override_buf, &model.theme_override, model.theme_ids[idx + 1]);
-                } else {
-                    model.theme_override = ""; // wrap back to follow-station
+            } else if (model.ob_steps[2] == .run) {
+                // Step 3 is cosmetic (controller answered → mount assumed up);
+                // step 4 resolves the station identity, best-effort.
+                model.ob_steps[2] = .ok;
+                model.ob_steps[3] = .run;
+                var b: [256]u8 = undefined;
+                if (api.dj(&b, model.ob_target_url)) |u| {
+                    fx.fetch(.{ .key = keys.fetch_ob_dj, .url = u, .timeout_ms = 6000, .on_response = Effects.responseMsg(.got_ob_dj) });
+                } else |_| {
+                    model.ob_steps[3] = .ok;
+                    model.ob_done = true;
                 }
             }
-            fetchThemes(model, fx); // re-apply with the new override
-            saveSettings(model, fx);
+        },
+        .got_ob_health => |r| {
+            if (!model.ob_checking) return;
+            if (r.outcome == .ok and r.status < 400) {
+                model.ob_steps[1] = .ok;
+                model.ob_steps[2] = .run;
+                fx.startTimer(.{ .key = keys.ob_step_timer, .interval_ms = 400, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick_ob_step) });
+            } else {
+                model.ob_steps[1] = .fail;
+                const diag: []const u8 = switch (r.outcome) {
+                    .ok => "The address answered, but not like a SUB/WAVE station — is /api routed to the controller?",
+                    .timed_out => "No answer — the station didn't respond in time.",
+                    .connect_failed => "Couldn't open a connection — check the address is right and the station is reachable from this network.",
+                    .tls_failed => "Secure connection failed — try the http:// prefix if the station has no certificate.",
+                    else => "Couldn't reach the station.",
+                };
+                setStr(&model.ob_diag_buf, &model.ob_diag, diag);
+            }
+        },
+        .got_ob_dj => |r| {
+            if (!model.ob_checking) return;
+            // Best-effort: any response completes the check.
+            model.ob_steps[3] = .ok;
+            model.ob_done = true;
+            if (r.outcome == .ok and r.status == 200) {
+                const parsed = json.parse(json.DjPublic, std.heap.page_allocator, r.body) catch return;
+                defer parsed.deinit();
+                if (parsed.value.station) |s| {
+                    if (s.len > 0) setStr(&model.ob_target_name_buf, &model.ob_target_name, s);
+                } else if (parsed.value.name) |n| {
+                    if (n.len > 0) setStr(&model.ob_target_name_buf, &model.ob_target_name, n);
+                }
+            }
+        },
+        .ob_back => {
+            model.ob_checking = false;
+            model.ob_done = false;
+            model.ob_diag = "";
+            model.ob_steps = [_]StepState{.wait} ** 4;
+            fx.cancel(keys.fetch_ob_health);
+            fx.cancel(keys.fetch_ob_dj);
+            fx.cancelTimer(keys.ob_step_timer);
+        },
+        .ob_tune_in => {
+            if (!model.ob_done) return;
+            if (api.normalizeBase(&model.base_buf, model.ob_target_url)) |b| {
+                model.base = b;
+                setStr(&model.station_name_buf, &model.station_name, model.ob_target_name);
+                pushRecent(model, model.station_name, model.base);
+                model.station_buffer.clear();
+                model.phase = .player;
+                model.ob_checking = false;
+                model.day_sel = utcWeekday(native_sdk.nowMs());
+                startPlayerTimers(fx);
+                retune(model, fx);
+            } else |_| {}
         },
     }
 }
@@ -920,7 +2230,7 @@ test "initials take the artist's first two letters, with a fallback" {
     m.artist = "the Midnight";
     try testing.expectEqualStrings("TH", m.initials(arena));
     m.artist = "";
-    try testing.expectEqualStrings("◎", m.initials(arena));
+    try testing.expectEqualStrings("SW", m.initials(arena));
 }
 
 test "state banner priority: failure > buffering > offline > paused" {
@@ -946,6 +2256,7 @@ test "setStr never splits a UTF-8 codepoint on truncation" {
 
 test "tune_out clears the failure banner, not just the transport" {
     var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
     fx.executor = .fake;
     var m: Model = .{};
     m.transport = .playing;
@@ -959,8 +2270,152 @@ test "tune_out clears the failure banner, not just the transport" {
     try testing.expectEqualStrings("tuned out", m.status_word());
 }
 
+test "mute preserves the intended volume; a volume nudge unmutes" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var m: Model = .{};
+    m.volume = 0.6;
+    update(&m, .toggle_mute, &fx);
+    try testing.expect(m.muted);
+    try testing.expectEqual(@as(f32, 0.6), m.volume); // intended volume preserved
+    try testing.expectEqualStrings("Muted", m.vol_display(arena));
+    try testing.expectEqualStrings("Unmute", m.mute_label());
+    update(&m, .vol_up, &fx); // nudging the volume unmutes
+    try testing.expect(!m.muted);
+    try testing.expect(m.volume > 0.65);
+    try testing.expectEqualStrings("70%", m.vol_display(arena));
+}
+
+test "tune_station reports an invalid address instead of failing silently" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    // Empty buffer → normalizeBase errors → visible feedback, base unchanged.
+    update(&m, .tune_station, &fx);
+    try testing.expectEqualStrings("not a valid address", m.station_status);
+    try testing.expectEqualStrings(api.default_base, m.base);
+    // Editing the field clears the error as the listener fixes it.
+    update(&m, .{ .station_edit = .{ .insert_text = "x" } }, &fx);
+    try testing.expectEqualStrings("", m.station_status);
+}
+
 test "jsonEscape escapes quotes and drops raw control bytes" {
     var buf: [32]u8 = undefined;
     try testing.expectEqualStrings("say \\\"hi\\\"\\n", jsonEscape(&buf, "say \"hi\"\n"));
     try testing.expectEqualStrings("ab", jsonEscape(&buf, "a\x01b\r"));
+}
+
+test "escape closes sheet, then sidebar, then returns to LIVE" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.sheet = .sleep;
+    m.sidebar_open = true;
+    m.active_tab = .booth;
+    update(&m, .escape, &fx);
+    try testing.expectEqual(Sheet.none, m.sheet);
+    try testing.expect(m.sidebar_open);
+    update(&m, .escape, &fx);
+    try testing.expect(!m.sidebar_open);
+    try testing.expectEqual(Tab.booth, m.active_tab);
+    update(&m, .escape, &fx);
+    try testing.expectEqual(Tab.live, m.active_tab);
+}
+
+test "sleep timer arms a deadline and tune-outs on expiry" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.transport = .playing;
+    update(&m, .{ .sleep_pick = 15 }, &fx);
+    try testing.expect(m.sleep_armed());
+    try testing.expectEqual(@as(i64, 15), m.sleep_minutes);
+    try testing.expectEqual(Sheet.panel, m.sheet);
+    // Force the deadline into the past; the next second-tick tunes out.
+    m.sleep_deadline_ms = 1;
+    update(&m, .{ .tick_second = .{ .key = keys.second_timer, .outcome = .fired, .timestamp_ns = 0 } }, &fx);
+    try testing.expect(!m.sleep_armed());
+    try testing.expectEqual(Transport.stopped, m.transport);
+}
+
+test "pushRecent dedupes by url and keeps MRU order" {
+    var m: Model = .{};
+    pushRecent(&m, "One", "https://one.example");
+    pushRecent(&m, "Two", "https://two.example");
+    pushRecent(&m, "One again", "https://one.example");
+    try testing.expectEqual(@as(usize, 2), m.recents_count);
+    try testing.expectEqualStrings("One again", m.recents[0].name);
+    try testing.expectEqualStrings("https://two.example", m.recents[1].url);
+}
+
+test "day_slots compresses the grid into contiguous ranges" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var m: Model = .{};
+    m.show_count = 1;
+    m.show_rows[0] = .{ .name = "Night Static", .persona = "NOVA" };
+    m.day_sel = 2;
+    // Hours 0-4 show 1; rest autopilot.
+    for (0..5) |h| m.sched_grid[2][h] = 1;
+    const slots = m.day_slots(arena);
+    try testing.expectEqual(@as(usize, 2), slots.len);
+    try testing.expectEqualStrings("00:00 – 05:00", slots[0].range);
+    try testing.expectEqualStrings("Night Static", slots[0].show_name);
+    try testing.expect(!slots[0].autopilot);
+    try testing.expect(slots[1].autopilot);
+}
+
+test "onboarding walks entry → check → done and tunes in" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.phase = .onboarding;
+    m.transport = .stopped;
+    m.station_buffer.set("radio.example.com");
+    update(&m, .ob_run_check, &fx);
+    try testing.expect(m.ob_checking);
+    try testing.expectEqualStrings("https://radio.example.com", m.ob_target_url);
+    try testing.expectEqual(StepState.run, m.ob_steps[0]);
+    // Step timer: host resolved → health probe fires.
+    update(&m, .{ .tick_ob_step = .{ .key = keys.ob_step_timer, .outcome = .fired, .timestamp_ns = 0 } }, &fx);
+    try testing.expectEqual(StepState.ok, m.ob_steps[0]);
+    try testing.expectEqual(StepState.run, m.ob_steps[1]);
+    // Health ok → step 3 runs on the next step-timer fire.
+    update(&m, .{ .got_ob_health = .{ .key = keys.fetch_ob_health, .outcome = .ok, .status = 200 } }, &fx);
+    try testing.expectEqual(StepState.ok, m.ob_steps[1]);
+    update(&m, .{ .tick_ob_step = .{ .key = keys.ob_step_timer, .outcome = .fired, .timestamp_ns = 0 } }, &fx);
+    try testing.expectEqual(StepState.run, m.ob_steps[3]);
+    // DJ answer (best-effort) completes the check.
+    update(&m, .{ .got_ob_dj = .{ .key = keys.fetch_ob_dj, .outcome = .timed_out } }, &fx);
+    try testing.expect(m.ob_done);
+    update(&m, .ob_tune_in, &fx);
+    try testing.expectEqual(Phase.player, m.phase);
+    try testing.expectEqualStrings("https://radio.example.com", m.base);
+    try testing.expectEqual(Transport.playing, m.transport);
+    try testing.expectEqual(@as(usize, 1), m.recents_count);
+}
+
+test "request slip lifecycle: submit → pending → resolved card" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.req_buffer.set("play me something for late-night driving");
+    m.req_name_buffer.set("Dana");
+    update(&m, .submit_req, &fx);
+    try testing.expectEqual(ReqPhase.pending, m.req_phase);
+    update(&m, .{ .got_reqpost = .{ .key = keys.post_request, .outcome = .ok, .status = 202 } }, &fx);
+    // Body was empty JSON-wise → parse fails → done without id. Reset works:
+    update(&m, .reset_request, &fx);
+    try testing.expectEqual(ReqPhase.idle, m.req_phase);
+    try testing.expectEqualStrings("", m.req_text());
 }

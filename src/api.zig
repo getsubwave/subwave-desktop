@@ -32,6 +32,21 @@ pub fn schedule(buf: []u8, base: []const u8) ![]const u8 {
 pub fn request(buf: []u8, base: []const u8) ![]const u8 {
     return build(buf, base, "/api/request");
 }
+pub fn health(buf: []u8, base: []const u8) ![]const u8 {
+    return build(buf, base, "/api/health");
+}
+pub fn dj(buf: []u8, base: []const u8) ![]const u8 {
+    return build(buf, base, "/api/dj");
+}
+pub fn beacon(buf: []u8, base: []const u8) ![]const u8 {
+    return build(buf, base, "/api/beacon");
+}
+
+// Community stations directory — published by the featured station's web
+// origin (mirrors app/src/lib/directory.ts), independent of the tuned base.
+pub fn directory(buf: []u8) ![]const u8 {
+    return build(buf, default_base, "/stations.json");
+}
 
 pub fn coverUrl(buf: []u8, base: []const u8, id: []const u8) ![]const u8 {
     const b = std.mem.trimEnd(u8, base, "/");

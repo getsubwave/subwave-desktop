@@ -1,0 +1,34 @@
+<!-- Mini Player — compact secondary window (420x168, hidden_inset).
+     Top strip is the drag region; expand closes the mini (the main window
+     stays open behind it). -->
+<column grow="1">
+  <row cross="center" gap="8" height="30" padding="6" window-drag="true">
+    <spacer width="70"/>
+    <icon name="app:disc" width="13" height="13" foreground="accent"/>
+    <text size="sm">{upper(station_name)}</text>
+    <if test="{live_now}">
+      <row gap="5" cross="center">
+        <icon name="circle-dot" width="8" height="8" foreground="accent"/>
+        <text size="sm" foreground="accent">ON AIR</text>
+      </row>
+    </if>
+    <spacer grow="1"/>
+    <button variant="ghost" size="sm" icon="external-link" label="Expand to full player" on-press="expand_mini"/>
+  </row>
+  <separator/>
+  <row gap="12" cross="center" padding="10">
+    <avatar image="{cover_id}" width="56" height="56" label="Cover art">{initials}</avatar>
+    <column gap="2" grow="1">
+      <text><span weight="medium">{title}</span></text>
+      <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{artist}</text>
+      <text size="sm" foreground="text_muted">{np_head}</text>
+    </column>
+    <toggle-button size="sm" selected="{muted}" on-toggle="toggle_mute" icon="volume" label="{mute_label}"/>
+    <button variant="outline" icon="app:power" label="{tune_label}" on-press="tune_toggle"/>
+  </row>
+  <column padding="8">
+    <chart height="20" y-min="0" y-max="1" label="Spectrum">
+      <series values="{bands}" kind="bar" color="accent"/>
+    </chart>
+  </column>
+</column>
