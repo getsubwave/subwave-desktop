@@ -113,17 +113,22 @@ The station always serves the `/stream.mp3` floor; operators can enable
 `/api/now-playing`. The picker offers a mount only when the station advertises
 it **and** the host engine can decode it (`stream_format.zig`):
 
-| Codec over Icecast | macOS (AVPlayer) | Linux (GStreamer `playbin`) |
-|---|---|---|
-| MP3 | ✅ | ✅ |
-| AAC (ADTS) | ✅ | ✅ where `gst-plugins-bad`/`libav` present |
-| Ogg Opus | ❌ AVFoundation has no Ogg demuxer | ✅ offered optimistically |
-| FLAC | ❌ no endless-stream FLAC | ✅ offered optimistically |
+| Codec over Icecast | macOS (AVPlayer) | Windows (Media Foundation) | Linux (GStreamer `playbin`) |
+|---|---|---|---|
+| MP3 | ✅ | ✅ | ✅ |
+| AAC (ADTS) | ✅ | ✅ | ✅ where `gst-plugins-bad`/`libav` present |
+| Ogg Opus | ❌ AVFoundation has no Ogg demuxer | ❌ no Ogg demuxer | ✅ offered optimistically |
+| FLAC | ❌ no endless-stream FLAC | ❌ no endless-stream FLAC | ✅ offered optimistically |
 
 Linux offers the Ogg mounts optimistically (decode support = installed
 plugins); a non-MP3 pick that keeps failing drops back to the MP3 floor after
-three reconnect attempts. macOS gates are exact, so failures there stay
-network-shaped and never cost the listener their stored pick.
+three reconnect attempts. macOS and Windows gates are exact, so failures there
+stay network-shaped and never cost the listener their stored pick.
+
+Windows was absent from this table until 0.2.0 and fell through to an MP3-only
+default, so its builds shipped with no AAC and a hidden format picker. Nothing
+caught it because cross-compiling the Windows binary never ran the test suite
+for the target; building on a Windows runner did, immediately.
 
 **OS media integration.** The SDK (0.5.3) has no system now-playing or
 media-key surface — no `MPNowPlayingInfoCenter`/`MPRemoteCommandCenter` on

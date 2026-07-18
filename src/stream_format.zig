@@ -63,14 +63,15 @@ pub fn fromId(v: []const u8) ?StreamFormat {
 /// Can THIS host's player engine decode the format? GStreamer (Linux)
 /// demuxes Ogg — offered optimistically, since decode support is whatever
 /// plugins are installed (the reconnect loop drops to the floor when a mount
-/// won't actually play). AVPlayer (macOS) has no Ogg demuxer, which rules
-/// out the Ogg-encapsulated Opus and FLAC mounts. Anything else (defensive)
+/// won't actually play). AVPlayer (macOS) and Media Foundation (Windows) both
+/// decode ADTS AAC but have no Ogg demuxer, which rules out the
+/// Ogg-encapsulated Opus and FLAC mounts on either. Anything else (defensive)
 /// gets the MP3 floor only.
 pub fn platformSupports(format: StreamFormat) bool {
     if (format == .mp3) return true;
     return switch (builtin.os.tag) {
         .linux => true,
-        .macos => format == .aac,
+        .macos, .windows => format == .aac,
         else => false,
     };
 }
@@ -88,10 +89,26 @@ test "mounts follow the /stream.<fmt> route table and ids round-trip" {
 
 test "the MP3 floor plays everywhere" {
     try testing.expect(platformSupports(.mp3));
-    // Ogg-encapsulated mounts never outrank the platform gate.
-    if (builtin.os.tag == .macos) {
-        try testing.expect(platformSupports(.aac));
-        try testing.expect(!platformSupports(.opus));
-        try testing.expect(!platformSupports(.flac));
+    // Ogg-encapsulated mounts never outrank the platform gate. Every host
+    // states its FULL matrix rather than just macOS: Windows fell through to
+    // the defensive `else` for two releases (shipping with no AAC and a
+    // hidden format picker) and nothing caught it, because cross-compiling
+    // the Windows binary never ran this suite for the target.
+    switch (builtin.os.tag) {
+        .linux => {
+            try testing.expect(platformSupports(.aac));
+            try testing.expect(platformSupports(.opus));
+            try testing.expect(platformSupports(.flac));
+        },
+        .macos, .windows => {
+            try testing.expect(platformSupports(.aac));
+            try testing.expect(!platformSupports(.opus));
+            try testing.expect(!platformSupports(.flac));
+        },
+        else => {
+            try testing.expect(!platformSupports(.aac));
+            try testing.expect(!platformSupports(.opus));
+            try testing.expect(!platformSupports(.flac));
+        },
     }
 }
