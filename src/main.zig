@@ -34,6 +34,7 @@ const heart_fill_icon = canvas.svg_icon.parseComptime(@embedFile("icons/heart-fi
 const logo_icon = canvas.svg_icon.parseComptime(@embedFile("icons/logo.svg"));
 const power_icon = canvas.svg_icon.parseComptime(@embedFile("icons/power.svg"));
 const radio_icon = canvas.svg_icon.parseComptime(@embedFile("icons/radio.svg"));
+const spark_icon = canvas.svg_icon.parseComptime(@embedFile("icons/spark.svg"));
 pub const app_icons = [_]canvas.icons.Entry{
     .{ .name = "disc", .icon = &disc_icon },
     .{ .name = "heart", .icon = &heart_icon },
@@ -41,6 +42,7 @@ pub const app_icons = [_]canvas.icons.Entry{
     .{ .name = "logo", .icon = &logo_icon },
     .{ .name = "power", .icon = &power_icon },
     .{ .name = "radio", .icon = &radio_icon },
+    .{ .name = "spark", .icon = &spark_icon },
 };
 
 // ------------------------------------------------------- OS integration seams
