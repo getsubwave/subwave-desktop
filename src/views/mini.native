@@ -21,6 +21,14 @@
       <text size="sm" foreground="text_muted"><span foreground="text">{artist}</span><span foreground="text_muted">{album_line}</span></text>
       <text size="sm" foreground="text_muted">{np_head}</text>
     </column>
+    <if test="{like_available}">
+      <if test="{like_liked}">
+        <button variant="ghost" size="sm" icon="app:heart-fill" label="Liked" on-press="press_like"/>
+      </if>
+      <else>
+        <button variant="ghost" size="sm" icon="app:heart" label="Like this track" on-press="press_like"/>
+      </else>
+    </if>
     <toggle-button size="sm" selected="{muted}" on-toggle="toggle_mute" icon="volume" label="{mute_label}"/>
     <button variant="outline" icon="app:power" label="{tune_label}" on-press="tune_toggle"/>
   </row>

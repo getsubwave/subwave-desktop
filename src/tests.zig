@@ -90,6 +90,10 @@ test "composed player view (Zig stage + fragments) builds and lays out" {
     model.phase = .player;
     model.sidebar_open = true;
     model.active_tab = .booth;
+    // Armed + liked like state so the stage's heart row is in the layout.
+    model.like_available = true;
+    model.like_liked = true;
+    model.like_count = 3;
     var ui = AppUi.init(arena);
     const tree = try ui.finalize(views.rootView(&ui, &model));
     var nodes: [1024]canvas.WidgetLayoutNode = undefined;
@@ -120,4 +124,13 @@ test "mini view builds and lays out" {
     var model: Model = .{};
     model.mini_open = true;
     try buildAndLayout(arena_state.allocator(), mini_markup, &model, 420, 168);
+    // Both heart branches of the transport row.
+    model.like_available = true;
+    var arena2 = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena2.deinit();
+    try buildAndLayout(arena2.allocator(), mini_markup, &model, 420, 168);
+    model.like_liked = true;
+    var arena3 = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena3.deinit();
+    try buildAndLayout(arena3.allocator(), mini_markup, &model, 420, 168);
 }

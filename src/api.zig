@@ -46,6 +46,10 @@ pub fn dj(buf: []u8, base: []const u8) ![]const u8 {
 pub fn beacon(buf: []u8, base: []const u8) ![]const u8 {
     return build(buf, base, "/api/beacon");
 }
+// GET = liked-state + count for the current airing; POST = like it.
+pub fn like(buf: []u8, base: []const u8) ![]const u8 {
+    return build(buf, base, "/api/like");
+}
 
 // Community stations directory — published by the featured station's web
 // origin (mirrors app/src/lib/directory.ts), independent of the tuned base.
@@ -87,4 +91,5 @@ test "url builders join base and path" {
     try testing.expectEqualStrings("https://x.test/stream.mp3", try streamUrl(&buf, "https://x.test/"));
     try testing.expectEqualStrings("https://x.test/stream.opus", try streamMount(&buf, "https://x.test/", "/stream.opus"));
     try testing.expectEqualStrings("https://x.test/api/cover/ab12", try coverUrl(&buf, "https://x.test", "ab12"));
+    try testing.expectEqualStrings("https://x.test/api/like", try like(&buf, "https://x.test/"));
 }

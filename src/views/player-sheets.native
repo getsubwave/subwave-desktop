@@ -59,6 +59,7 @@
             <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">TUNE</text><badge>Space</badge></row>
             <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">DIAL</text><badge>1–5</badge></row>
             <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">MUTE</text><badge>M</badge></row>
+            <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">LIKE</text><badge>L</badge></row>
             <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">VOLUME</text><badge>Up · Down</badge></row>
             <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">STATIONS</text><badge>Cmd K</badge></row>
             <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">BACK TO LIVE</text><badge>Esc</badge></row>

@@ -41,9 +41,9 @@ repo from the main `subwave` monorepo; it tracks the same station HTTP API.
   live now-playing rows, tune in/out, mute, sleep cycle, open player, mini
   player, quit. The red close button **hides** the main window — playback and
   the tray stay alive (one of the local SDK patches, see below).
-- **Keyboard transport** — space play/pause, ↑/↓ volume, M mute, Esc back to
-  LIVE, Cmd/Ctrl+K stations, 1–5 dial stops (app-level fallback; never steals
-  typing from the text fields).
+- **Keyboard transport** — space play/pause, ↑/↓ volume, M mute, L like the
+  current track, Esc back to LIVE, Cmd/Ctrl+K stations, 1–5 dial stops
+  (app-level fallback; never steals typing from the text fields).
 - **Settings persistence** — volume / theme override / stream format / station
   (+ name) / recents survive restarts (`settings.json` in the OS per-app
   config dir), saved debounced + serialized via `fx.writeFile`.

@@ -95,32 +95,51 @@ fn fmtThousands(arena: std.mem.Allocator, value: i64) []const u8 {
 // record-in-sleeve, square per the latest direction).
 fn stageView(ui: *Ui, model: *const Model) Ui.Node {
     const arena = ui.arena;
-    const info = arena.alloc(Ui.Node, 8) catch {
+    const info = arena.alloc(Ui.Node, 9) catch {
         ui.failed = true;
         return ui.column(.{}, .{});
     };
     var n: usize = 0;
 
-    if (model.live_now()) {
-        info[n] = ui.row(.{ .gap = 6, .cross = .center }, .{
-            ui.appIcon(.{ .width = 14, .height = 14, .style_tokens = .{ .foreground = .accent } }, "radio"),
-            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .accent } }, "ON AIR"),
-        });
-        n += 1;
-    }
     if (model.has_state()) {
         info[n] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .accent } }, model.state_line());
         n += 1;
     }
 
-    // "NOW PLAYING — 1:15 / 2:53 · 2,142,144 TOKENS"
+    // "NOW PLAYING — 1:15 / 2:53" with the like heart and the token meter
+    // riding the same strip: ♥ ahead of the spark glyph, no words.
     {
-        const head = model.np_head(arena);
-        const line = if (model.has_tokens())
-            std.fmt.allocPrint(arena, "{s} · {s} TOKENS", .{ head, fmtThousands(arena, model.llm_tokens) }) catch head
-        else
-            head;
-        info[n] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, line);
+        const items = arena.alloc(Ui.Node, 3) catch {
+            ui.failed = true;
+            return ui.column(.{}, .{});
+        };
+        var i: usize = 0;
+        items[i] = ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, model.np_head(arena));
+        i += 1;
+        if (model.like_available) {
+            items[i] = ui.row(.{
+                .gap = 4,
+                .cross = .center,
+                .on_press = .press_like,
+                .semantics = .{ .label = model.like_hint() },
+            }, .{
+                ui.appIcon(.{
+                    .width = 13,
+                    .height = 13,
+                    .style_tokens = .{ .foreground = if (model.like_liked) .accent else .text_muted },
+                }, if (model.like_liked) "heart-fill" else "heart"),
+                ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, model.like_count_str(arena)),
+            });
+            i += 1;
+        }
+        if (model.has_tokens()) {
+            items[i] = ui.row(.{ .gap = 4, .cross = .center, .semantics = .{ .label = "LLM tokens" } }, .{
+                ui.appIcon(.{ .width = 12, .height = 12, .style_tokens = .{ .foreground = .text_muted } }, "spark"),
+                ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, fmtThousands(arena, model.llm_tokens)),
+            });
+            i += 1;
+        }
+        info[n] = ui.row(.{ .gap = 10, .cross = .center }, .{items[0..i]});
         n += 1;
     }
 
