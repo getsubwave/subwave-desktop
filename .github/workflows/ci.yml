@@ -1,0 +1,68 @@
+# Build and test on every push to main and every pull request, on all three
+# platforms.
+#
+# This exists because the release workflows were the ONLY CI for a while, and
+# the first time Windows ran the suite it failed 3/37 on a decode-gate bug that
+# had shipped since 0.1.0 — discovered mid-release, with a half-populated
+# GitHub release already published. Platform-specific code (the
+# `platformSupports` gate, the GTK host, the AppKit host) can only be tested
+# where it runs, so all three run here and a red one blocks the merge instead
+# of the release.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A new push supersedes the one before it on the same ref; these jobs take a
+  # few minutes each across three runners, so don't let them pile up.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: ${{ matrix.name }}
+    strategy:
+      # One platform failing should not hide the state of the other two —
+      # that is the whole point of running all three.
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: ubuntu-24.04
+          - name: macos
+            os: macos-15
+          - name: windows
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GTK4
+        # Linux links the GTK4 system stack; the other two use OS frameworks
+        # that are already present on their runners.
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-4-dev pkg-config
+
+      - uses: ./.github/actions/setup-native
+
+      - name: Check markup and manifest
+        run: native check
+
+      - name: Test
+        run: native test
+
+      - name: Build
+        # Catches anything that compiles under the test build but not the
+        # release one.
+        run: native build

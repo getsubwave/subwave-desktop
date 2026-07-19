@@ -10,14 +10,23 @@ around it — preflight, versioning, publishing, verification, and the
 announcement. The heavy lifting is one script (run from the repo root):
 
 ```bash
-./scripts/make-release.sh              # artifacts only → dist/
-./scripts/make-release.sh --publish    # + create/update GitHub release vX.Y.Z
+./scripts/make-release.sh              # preflight only, changes nothing
+./scripts/make-release.sh --publish    # + create the release, follow the runs
 ```
 
-It reads the version from `app.zon`, re-applies the local SDK patches, gates on
-`native test`, builds + packages macOS (DMG, verified) and Windows x64 (zip,
-cross-compiled), and with `--publish` creates the release or clobber-uploads
-assets onto an existing tag.
+**The script builds nothing.** All three artifacts come from CI, triggered by
+`release: published`. The script reads the version from `app.zon`, refuses to
+run unless main is clean and in sync, refuses to reuse an existing tag, and
+**refuses to publish unless `ci.yml` is already green on this exact commit
+across all three platforms** — v0.2.0 shipped half-populated because nothing
+checked that. Then it creates the release and follows the three runs until
+every asset is attached, failing if fewer than three arrive.
+
+Useful flags: `--notes-file <path>` (instead of `--generate-notes`) and
+`--skip-ci-check` for emergencies.
+
+Because nothing is built locally, a release can be cut from any machine — it
+no longer needs a Mac.
 
 ## Workflow
 
@@ -50,10 +59,14 @@ the previous tag's assets, which is only right for re-cutting a botched build.
 ./scripts/make-release.sh --publish
 ```
 
-- Takes ~4 minutes. Signing defaults to ad-hoc; when the user has a
-  Developer ID certificate, `SIGN_IDENTITY="Developer ID Application: …"`
-  switches to it (check `security find-identity -v -p codesigning` — "Apple
-  Development" certs are NOT distribution certs and won't help Gatekeeper).
+- Takes ~10-15 minutes, nearly all of it waiting on the three runners
+  (Windows is by far the slowest). The script prints each leg's status as it
+  goes and exits non-zero if fewer than three assets land.
+- **CI signs macOS ad-hoc.** There is no `SIGN_IDENTITY` path any more,
+  because signing happens on a runner that holds no certificate. Giving CI a
+  real Developer ID means putting a `.p12` plus an App Store Connect key into
+  repository secrets and adding keychain setup to `release-macos.yml` first.
+  Until that exists, never describe a DMG as notarized.
 - `--publish` uses `--generate-notes`. For a release users will actually
   read, replace them: `gh release edit vX.Y.Z --notes-file …` with the shape
   used by v0.1.0 — what's new (concrete, feature-level), a download table

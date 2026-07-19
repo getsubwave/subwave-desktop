@@ -181,9 +181,17 @@ pixelated text. `windows-latest` because building there means the app is
 actually launched on Windows under `-Dautomation=true` rather than
 cross-compiled and hoped for.
 
-`./scripts/make-release.sh --publish` still cuts a release by hand from a Mac
-and remains the way to do it locally; CI then rebuilds and re-uploads the same
-assets.
+`./scripts/make-release.sh` is the way to cut one. It builds nothing itself:
+it checks that main is clean, in sync, on an unused tag and **already green in
+CI on that exact commit**, then creates the release and follows the three runs
+until every asset is attached. Since nothing is built locally, a release can be
+cut from any machine.
+
+Every push to main and every pull request also runs `native check`, `native
+test` and `native build` on all three platforms (`.github/workflows/ci.yml`).
+Platform-specific code can only be tested where it runs — a decode-gate bug
+shipped from 0.1.0 to 0.2.0 because Windows was only ever cross-compiled, and
+cross-compiling never runs the target's suite.
 
 Linux reach: Ubuntu 24.04+, Fedora 40+, Arch. **Not** Ubuntu 22.04 or
 Debian 12 (glibc 2.35/2.36) — those build from source.

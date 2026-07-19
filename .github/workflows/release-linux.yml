@@ -101,6 +101,21 @@ jobs:
           fi
           echo "glibc floor: $(objdump -T "$bin" | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1)"
 
+      - name: Strip debug info
+        # 38 MB of DWARF in a 5.8 MB program. --strip-debug rather than -s:
+        # it drops the debug sections but keeps .symtab, so panic backtraces
+        # still name functions, and the extra ~0.5 MB that -s would save is
+        # not worth losing them. This brings Linux in line with macOS, which
+        # already ships without embedded debug info (Mach-O keeps it in a
+        # separate .dSYM), rather than degrading it.
+        run: |
+          bin=zig-out/package/subwave-desktop-linux/bin/subwave-desktop
+          before=$(stat -c %s "$bin")
+          strip --strip-debug "$bin"
+          after=$(stat -c %s "$bin")
+          echo "stripped $before -> $after bytes ($(( (before - after) * 100 / before ))% smaller)"
+          readelf -S "$bin" | grep -q '\.symtab' || { echo "error: symbol table gone, backtraces would be useless" >&2; exit 1; }
+
       - name: Create tarball
         run: |
           mkdir -p dist
