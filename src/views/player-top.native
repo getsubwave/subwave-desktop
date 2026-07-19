@@ -4,7 +4,7 @@
   <row cross="center" gap="12" height="52" padding="8" window-drag="true">
     <spacer width="{chrome_leading}"/>
     <row on-press="toggle_sidebar" gap="7" cross="center" label="Stations">
-      <icon name="app:disc" width="16" height="16" foreground="accent"/>
+      <icon name="app:logo" width="16" height="16" foreground="accent"/>
       <text size="sm">{upper(station_name)}</text>
       <icon name="chevron-down" width="13" height="13" foreground="text_muted"/>
     </row>
