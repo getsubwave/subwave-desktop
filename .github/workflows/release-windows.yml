@@ -68,8 +68,12 @@ jobs:
         run: native test
 
       - name: Build and package
+        # -Dcpu=baseline is load bearing: a plain `native build` bakes the CI
+        # runner's CPU features (Ice Lake AVX-512) into the exe, which then
+        # dies on an illegal instruction at startup on most listeners'
+        # machines. That is exactly how the v0.2.1 Windows zip shipped broken.
         run: |
-          native build
+          native build -Dcpu=baseline
           native package --target windows --binary zig-out/bin/subwave-desktop.exe
           # Locate the exe rather than asserting a hard-coded path: it lives in
           # bin/ inside the package root, and a bare `test -f` on the wrong
@@ -82,6 +86,12 @@ jobs:
             exit 1
           fi
           echo "packaged exe: $exe"
+
+      - name: Audit CPU baseline
+        # Proves the -Dcpu=baseline pin held on the exe that actually ships.
+        # The smoke test below cannot catch a CPU-feature leak — it runs on
+        # the same runner that built the binary.
+        run: ./scripts/audit-cpu-baseline.sh "$(find zig-out/package/subwave-desktop-windows -name subwave-desktop.exe -type f | head -1)"
 
       - name: Create zip
         run: |
@@ -104,7 +114,7 @@ jobs:
         # than deleting it.
         timeout-minutes: 6
         run: |
-          native build -Dautomation=true
+          native build -Dautomation=true -Dcpu=baseline
           app="zig-out/bin/subwave-desktop.exe"
           if [ ! -f "$app" ]; then
             echo "error: automation build produced no exe at $app" >&2

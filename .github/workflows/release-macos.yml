@@ -78,9 +78,20 @@ jobs:
         run: native test
 
       - name: Build and package
+        # -Dcpu=baseline is load bearing on both legs: a plain `native build`
+        # bakes the runner's CPU features into the binary. The Intel runners
+        # are AVX-512 Xeons while most Intel Macs are not, and an M2+ arm64
+        # runner can emit instructions an M1 lacks. v0.2.1's Windows exe
+        # shipped exactly this bug and died at startup.
         run: |
-          native build
+          native build -Dcpu=baseline
           native package --target macos --signing adhoc
+
+      - name: Audit CPU baseline
+        # x86-64 only — the audit greps for AVX register references, which
+        # have no aarch64 equivalent; the arm64 leg is protected by the pin.
+        if: matrix.runner == 'macos-15-intel'
+        run: ./scripts/audit-cpu-baseline.sh zig-out/package/subwave-desktop.app/Contents/MacOS/subwave-desktop
 
       - name: Build DMG
         env:
