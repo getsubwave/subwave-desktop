@@ -1,5 +1,5 @@
-# Build and test on every push to main and every pull request, on all three
-# platforms.
+# Build and test on every push to main and every pull request, on every
+# platform we release for — including both macOS CPU flavors.
 #
 # This exists because the release workflows were the ONLY CI for a while, and
 # the first time Windows ran the suite it failed 3/37 on a decode-gate bug that
@@ -37,6 +37,11 @@ jobs:
             os: ubuntu-24.04
           - name: macos
             os: macos-15
+          - name: macos-intel
+            # The Intel release leg builds here too; testing it on every push
+            # keeps make-release's "CI must be green" gate meaningful for the
+            # x86_64 DMG. Label supported until August 2027.
+            os: macos-15-intel
           - name: windows
             os: windows-latest
     runs-on: ${{ matrix.os }}

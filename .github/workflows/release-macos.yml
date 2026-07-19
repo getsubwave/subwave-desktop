@@ -24,8 +24,22 @@ permissions:
 
 jobs:
   macos:
-    # Apple Silicon, matching the "macOS, Apple Silicon" label on the asset.
-    runs-on: macos-15
+    # One leg per CPU flavor, each building AND testing natively on its own
+    # architecture (the Windows decode-gate bug shipped for two releases
+    # because cross-compiling never ran the suite on the target). The Apple
+    # Silicon asset keeps its original filename; Intel gets a -intel suffix.
+    # GitHub's macos-15-intel label is supported until August 2027.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch_label: Apple Silicon
+            dmg_suffix: ""
+          - runner: macos-15-intel
+            arch_label: Intel
+            dmg_suffix: "-intel"
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Resolve and validate tag
         id: tag
@@ -69,6 +83,8 @@ jobs:
           native package --target macos --signing adhoc
 
       - name: Build DMG
+        env:
+          DMG_SUFFIX: ${{ matrix.dmg_suffix }}
         run: |
           app_name="SUBWAVE Player"
           rm -rf zig-out/dmg-stage
@@ -76,7 +92,7 @@ jobs:
           cp -R zig-out/package/subwave-desktop.app "zig-out/dmg-stage/$app_name.app"
           ln -s /Applications zig-out/dmg-stage/Applications
           codesign --verify --deep "zig-out/dmg-stage/$app_name.app"
-          dmg="dist/SUBWAVE-Player-${version}.dmg"
+          dmg="dist/SUBWAVE-Player-${version}${DMG_SUFFIX}.dmg"
           hdiutil create -volname "$app_name" -srcfolder zig-out/dmg-stage -ov -format UDZO "$dmg" >/dev/null
           hdiutil verify "$dmg" >/dev/null
           ls -lh "$dmg"
@@ -98,7 +114,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.tag.outputs.tag }}
+          ARCH_LABEL: ${{ matrix.arch_label }}
         run: |
           gh release upload "$TAG" --clobber \
-            "${dmg}#SUBWAVE Player ${version} (macOS, Apple Silicon)"
+            "${dmg}#SUBWAVE Player ${version} (macOS, ${ARCH_LABEL})"
           gh release view "$TAG" --json assets --jq '.assets[].name'
