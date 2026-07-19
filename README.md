@@ -175,6 +175,12 @@ each refuses to run if the tag disagrees with `.version` in `app.zon`. Shared
 toolchain setup and the Zig/SDK version pins live in
 `.github/actions/setup-native`.
 
+Every release build passes `-Dcpu=baseline`, and that flag is load bearing: a
+plain `native build` bakes the CI runner's CPU features into the binary, which
+is how v0.2.1's Windows exe shipped requiring AVX-512 and silently failed to
+start on most machines. `scripts/audit-cpu-baseline.sh` disassembles each
+shipped x86-64 artifact in CI and fails the leg if the pin ever regresses.
+
 Two runner pins are deliberate. `ubuntu-24.04` because Linux can't be
 cross-compiled (the binary links the GTK4 system stack, 113 shared libraries,
 nothing bundled) and because ubuntu-22.04's GTK 4.6 would compile the

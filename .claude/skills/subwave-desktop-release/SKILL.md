@@ -112,6 +112,13 @@ marketing gloss) and approved examples live there.
 
 ## Facts that keep biting
 
+- **`-Dcpu=baseline` on every release build is load bearing.** A plain
+  `native build` bakes the CI runner's CPU features into the binary; v0.2.1's
+  Windows exe carried the runner's AVX-512 and died on an illegal instruction
+  at startup on most listeners' machines ("app does not load", no dialog).
+  The smoke test cannot catch it — it runs on the CPU that built the binary.
+  `scripts/audit-cpu-baseline.sh` disassembles each shipped x86-64 artifact
+  in CI and fails the leg if any AVX register reference appears.
 - **SDK patches vanish on upgrade** — see preflight. This has already
   happened once (0.5.2 → 0.5.3 wiped both patches mid-day).
 - **The app keeps running from the tray after its window closes** (that's the

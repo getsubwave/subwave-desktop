@@ -69,5 +69,6 @@ jobs:
 
       - name: Build
         # Catches anything that compiles under the test build but not the
-        # release one.
-        run: native build
+        # release one. -Dcpu=baseline matches the release workflows, so CI
+        # builds the same configuration that ships.
+        run: native build -Dcpu=baseline
