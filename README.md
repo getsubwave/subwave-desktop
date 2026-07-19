@@ -157,13 +157,15 @@ transport, and per-track fetch of the station's own metadata (the app polls
 
 ## Shipping checklist
 
-All three artifacts are built by CI. Publishing a GitHub release fires
+All four artifacts are built by CI. Publishing a GitHub release fires
 `release: published`, and one workflow per platform builds, verifies and
-uploads its asset onto that release:
+uploads its asset onto that release (the macOS workflow is a two-leg matrix,
+one per CPU flavor):
 
 | Workflow | Runner | Asset | Notes |
 | --- | --- | --- | --- |
-| `release-macos.yml` | `macos-15` | `.dmg` | ad-hoc signed, so first launch needs right-click → Open |
+| `release-macos.yml` | `macos-15` | `.dmg` | Apple Silicon; ad-hoc signed, so first launch needs right-click → Open |
+| `release-macos.yml` | `macos-15-intel` | `-intel.dmg` | Intel (x86_64), built and tested natively; label supported until Aug 2027 |
 | `release-windows.yml` | `windows-latest` | `-windows-x64.zip` | built and launched on real Windows |
 | `release-linux.yml` | `ubuntu-24.04` | `-linux-x64.tar.gz` | needs glibc 2.39+ and GTK4 |
 
@@ -184,11 +186,12 @@ cross-compiled and hoped for.
 `./scripts/make-release.sh` is the way to cut one. It builds nothing itself:
 it checks that main is clean, in sync, on an unused tag and **already green in
 CI on that exact commit**, then creates the release and follows the three runs
-until every asset is attached. Since nothing is built locally, a release can be
-cut from any machine.
+until every asset is attached (four in all — the macOS run uploads two DMGs).
+Since nothing is built locally, a release can be cut from any machine.
 
 Every push to main and every pull request also runs `native check`, `native
-test` and `native build` on all three platforms (`.github/workflows/ci.yml`).
+test` and `native build` on every release platform, both macOS CPU flavors
+included (`.github/workflows/ci.yml`).
 Platform-specific code can only be tested where it runs — a decode-gate bug
 shipped from 0.1.0 to 0.2.0 because Windows was only ever cross-compiled, and
 cross-compiling never runs the target's suite.

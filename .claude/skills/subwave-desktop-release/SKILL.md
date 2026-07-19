@@ -1,6 +1,6 @@
 ---
 name: subwave-desktop-release
-description: Cut and publish a release of the SUB/WAVE desktop player — version bump, macOS DMG + Windows zip via scripts/make-release.sh, GitHub release, and announcement drafts. Use this whenever the user asks to release, ship, publish, or tag a new version of the desktop app, build a dmg/installer/windows build, upload release artifacts, or draft a release announcement — even if they only mention one piece (e.g. "make a new dmg" or "bump the version and ship it").
+description: Cut and publish a release of the SUB/WAVE desktop player — version bump, macOS DMGs (Apple Silicon + Intel) + Windows zip via scripts/make-release.sh, GitHub release, and announcement drafts. Use this whenever the user asks to release, ship, publish, or tag a new version of the desktop app, build a dmg/installer/windows build, upload release artifacts, or draft a release announcement — even if they only mention one piece (e.g. "make a new dmg" or "bump the version and ship it").
 ---
 
 # SUB/WAVE Desktop release
@@ -14,13 +14,14 @@ announcement. The heavy lifting is one script (run from the repo root):
 ./scripts/make-release.sh --publish    # + create the release, follow the runs
 ```
 
-**The script builds nothing.** All three artifacts come from CI, triggered by
+**The script builds nothing.** All four artifacts come from CI, triggered by
 `release: published`. The script reads the version from `app.zon`, refuses to
 run unless main is clean and in sync, refuses to reuse an existing tag, and
 **refuses to publish unless `ci.yml` is already green on this exact commit
-across all three platforms** — v0.2.0 shipped half-populated because nothing
-checked that. Then it creates the release and follows the three runs until
-every asset is attached, failing if fewer than three arrive.
+across every leg (Linux, macOS on both CPU flavors, Windows)** — v0.2.0
+shipped half-populated because nothing checked that. Then it creates the
+release and follows the three runs (the macOS one is a two-leg matrix) until
+every asset is attached, failing if fewer than four arrive.
 
 Useful flags: `--notes-file <path>` (instead of `--generate-notes`) and
 `--skip-ci-check` for emergencies.
@@ -59,9 +60,9 @@ the previous tag's assets, which is only right for re-cutting a botched build.
 ./scripts/make-release.sh --publish
 ```
 
-- Takes ~10-15 minutes, nearly all of it waiting on the three runners
+- Takes ~10-15 minutes, nearly all of it waiting on the runners
   (Windows is by far the slowest). The script prints each leg's status as it
-  goes and exits non-zero if fewer than three assets land.
+  goes and exits non-zero if fewer than four assets land.
 - **CI signs macOS ad-hoc.** There is no `SIGN_IDENTITY` path any more,
   because signing happens on a runner that holds no certificate. Giving CI a
   real Developer ID means putting a `.p12` plus an App Store Connect key into
@@ -82,8 +83,8 @@ gh release view vX.Y.Z --json assets --jq '.assets[].name'
 gh run list --workflow release-linux.yml --limit 1   # Linux leg
 ```
 
-All three assets must be listed — DMG, Windows zip, and the Linux tarball
-that CI attaches a few minutes later. For more than a smoke: mount the DMG
+All four assets must be listed — both DMGs (Apple Silicon and `-intel`),
+the Windows zip, and the Linux tarball that CI attaches a few minutes later. For more than a smoke: mount the DMG
 (`hdiutil attach … -nobrowse`), launch the app binary inside, detach. The
 running dev copy of the app is unaffected — but if one is running from
 `zig-out/`, rebuilding replaced its binary on disk; relaunch it after.
@@ -94,9 +95,13 @@ Download URLs follow this pattern:
 
 ```
 https://github.com/getsubwave/subwave-desktop/releases/download/vX.Y.Z/SUBWAVE-Player-X.Y.Z.dmg
+https://github.com/getsubwave/subwave-desktop/releases/download/vX.Y.Z/SUBWAVE-Player-X.Y.Z-intel.dmg
 https://github.com/getsubwave/subwave-desktop/releases/download/vX.Y.Z/SUBWAVE-Player-X.Y.Z-windows-x64.zip
 https://github.com/getsubwave/subwave-desktop/releases/download/vX.Y.Z/SUBWAVE-Player-X.Y.Z-linux-x64.tar.gz
 ```
+
+(The plain `.dmg` is Apple Silicon; `-intel.dmg` is for Intel Macs — say which
+is which when announcing, most people don't know their CPU by name.)
 
 (The repo moved to the `getsubwave` org; `perminder-klair/subwave-desktop`
 URLs still redirect but don't hand those out.)
@@ -117,12 +122,12 @@ marketing gloss) and approved examples live there.
   `native package --target windows --binary zig-out/bin/subwave-desktop.exe` —
   no Windows machine needed to build, but one IS needed to honestly claim it
   works.
-- **All three artifacts are also built by CI**, one workflow per platform
-  (`release-macos.yml`, `release-windows.yml`, `release-linux.yml`), triggered
-  by `release: published`. So `--publish` starts them automatically and the CI
-  assets land a few minutes after the script's own upload, clobbering it with
-  an equivalent build. Don't announce until all three are listed; re-run a
-  failed leg with `gh workflow run release-<os>.yml -f tag=vX.Y.Z`.
+- **All four artifacts are built by CI**, one workflow per platform
+  (`release-macos.yml` — a two-leg matrix producing both DMGs,
+  `release-windows.yml`, `release-linux.yml`), triggered by
+  `release: published`. So `--publish` starts them automatically. Don't
+  announce until all four are listed; re-run a failed leg with
+  `gh workflow run release-<os>.yml -f tag=vX.Y.Z`.
 - Linux exists ONLY as CI — it cannot be cross-compiled from the Mac (the
   binary links the GTK4 system stack, 113 shared libraries, nothing bundled).
 - Two runner pins are load bearing. `ubuntu-24.04`: ubuntu-22.04 ships GTK 4.6

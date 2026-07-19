@@ -37,11 +37,14 @@ runs:
         ZIG_VERSION: ${{ inputs.zig-version }}
       run: |
         set -euo pipefail
-        case "$RUNNER_OS" in
-          Linux)   slug="x86_64-linux";   ext="tar.xz"; sha="70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00" ;;
-          macOS)   slug="aarch64-macos";  ext="tar.xz"; sha="b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489" ;;
-          Windows) slug="x86_64-windows"; ext="zip";    sha="68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e" ;;
-          *) echo "error: unsupported runner OS '$RUNNER_OS'" >&2; exit 1 ;;
+        # macOS comes in both CPU flavors (macos-15 is arm64, macos-15-intel
+        # is x86_64), so that leg keys on RUNNER_ARCH as well.
+        case "$RUNNER_OS-$RUNNER_ARCH" in
+          Linux-X64)     slug="x86_64-linux";   ext="tar.xz"; sha="70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00" ;;
+          macOS-ARM64)   slug="aarch64-macos";  ext="tar.xz"; sha="b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489" ;;
+          macOS-X64)     slug="x86_64-macos";   ext="tar.xz"; sha="0387557ed1877bc6a2e1802c8391953baddba76081876301c522f52977b52ba7" ;;
+          Windows-X64)   slug="x86_64-windows"; ext="zip";    sha="68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e" ;;
+          *) echo "error: unsupported runner '$RUNNER_OS-$RUNNER_ARCH'" >&2; exit 1 ;;
         esac
 
         archive="zig.${ext}"

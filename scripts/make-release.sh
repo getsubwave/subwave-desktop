@@ -145,11 +145,13 @@ echo "==> assets on $tag"
 gh release view "$tag" --json assets --jq '.assets[] | "  \(.name)  \(.size) bytes"'
 gh release view "$tag" --json url --jq .url
 
+# Two DMGs (Apple Silicon + Intel) come out of the macOS workflow's matrix,
+# plus the Windows zip and the Linux tarball.
 count="$(gh release view "$tag" --json assets --jq '.assets | length')"
-if [ "$count" -lt 3 ]; then
+if [ "$count" -lt 4 ]; then
     echo
-    echo "warning: only $count/3 assets uploaded. Check the runs above and re-run a"
+    echo "warning: only $count/4 assets uploaded. Check the runs above and re-run a"
     echo "failed leg with: gh workflow run release-<os>.yml -f tag=$tag" >&2
     exit 1
 fi
-echo "all three assets present"
+echo "all four assets present"

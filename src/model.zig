@@ -1130,6 +1130,7 @@ pub const Msg = union(enum) {
     tune_station, // from the sidebar address field
     pick_recent: []const u8, // payload = url
     pick_discover: []const u8, // payload = url
+    forget_recent: []const u8, // payload = url
     follow_station,
     pick_theme: []const u8, // payload = theme id
     pick_format: []const u8, // payload = format id ("mp3" | "aac" | "opus" | "flac")
@@ -1428,6 +1429,28 @@ fn pushRecent(model: *Model, name: []const u8, url: []const u8) void {
     setStr(&model.recents_name_store[0], &model.recents[0].name, if (name.len > 0) name else url);
     setStr(&model.recents_url_store[0], &model.recents[0].url, url);
     if (existing == null) model.recents_count = @min(model.recents_count + 1, max_recents);
+}
+
+// Drop a station from the recents list by url (the sidebar's per-row remove).
+// Rows after it shift up one slot into their own store buffers — the mirror
+// of pushRecent's shift-down. An unknown url is a no-op.
+fn forgetRecent(model: *Model, url: []const u8) bool {
+    var found: ?usize = null;
+    for (model.recents[0..model.recents_count], 0..) |r, i| {
+        if (std.mem.eql(u8, r.url, url)) {
+            found = i;
+            break;
+        }
+    }
+    const at = found orelse return false;
+    var i: usize = at;
+    while (i + 1 < model.recents_count) : (i += 1) {
+        setStr(&model.recents_name_store[i], &model.recents[i].name, model.recents[i + 1].name);
+        setStr(&model.recents_url_store[i], &model.recents[i].url, model.recents[i + 1].url);
+    }
+    model.recents_count -= 1;
+    model.recents[model.recents_count] = .{};
+    return true;
 }
 
 // Re-point everything at a (possibly new) station base: fresh stream + feeds,
@@ -2286,6 +2309,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 retune(model, fx);
             } else |_| {}
         },
+        .forget_recent => |url| {
+            if (forgetRecent(model, url)) saveSettings(model, fx);
+        },
         .follow_station => {
             model.theme_override = "";
             fetchThemes(model, fx);
@@ -2570,6 +2596,27 @@ test "pushRecent dedupes by url and keeps MRU order" {
     try testing.expectEqual(@as(usize, 2), m.recents_count);
     try testing.expectEqualStrings("One again", m.recents[0].name);
     try testing.expectEqualStrings("https://two.example", m.recents[1].url);
+}
+
+test "forgetRecent removes by url and closes the gap; unknown url is a no-op" {
+    var m: Model = .{};
+    pushRecent(&m, "One", "https://one.example");
+    pushRecent(&m, "Two", "https://two.example");
+    pushRecent(&m, "Three", "https://three.example");
+    // MRU order is Three, Two, One. Forget the middle row.
+    try testing.expect(forgetRecent(&m, "https://two.example"));
+    try testing.expectEqual(@as(usize, 2), m.recents_count);
+    try testing.expectEqualStrings("Three", m.recents[0].name);
+    try testing.expectEqualStrings("One", m.recents[1].name);
+    try testing.expectEqualStrings("https://one.example", m.recents[1].url);
+    // Unknown url: nothing changes.
+    try testing.expect(!forgetRecent(&m, "https://nope.example"));
+    try testing.expectEqual(@as(usize, 2), m.recents_count);
+    // Forget the last remaining rows down to empty.
+    try testing.expect(forgetRecent(&m, "https://three.example"));
+    try testing.expect(forgetRecent(&m, "https://one.example"));
+    try testing.expectEqual(@as(usize, 0), m.recents_count);
+    try testing.expect(!m.has_recents());
 }
 
 test "day_slots compresses the grid into contiguous ranges" {
