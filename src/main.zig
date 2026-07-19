@@ -29,11 +29,15 @@ pub const AppUi = canvas.Ui(Msg);
 // `pub const app_icons` is the model-contract mirror `native check` verifies
 // markup names against.
 const disc_icon = canvas.svg_icon.parseComptime(@embedFile("icons/disc.svg"));
+const heart_icon = canvas.svg_icon.parseComptime(@embedFile("icons/heart.svg"));
+const heart_fill_icon = canvas.svg_icon.parseComptime(@embedFile("icons/heart-fill.svg"));
 const logo_icon = canvas.svg_icon.parseComptime(@embedFile("icons/logo.svg"));
 const power_icon = canvas.svg_icon.parseComptime(@embedFile("icons/power.svg"));
 const radio_icon = canvas.svg_icon.parseComptime(@embedFile("icons/radio.svg"));
 pub const app_icons = [_]canvas.icons.Entry{
     .{ .name = "disc", .icon = &disc_icon },
+    .{ .name = "heart", .icon = &heart_icon },
+    .{ .name = "heart-fill", .icon = &heart_fill_icon },
     .{ .name = "logo", .icon = &logo_icon },
     .{ .name = "power", .icon = &power_icon },
     .{ .name = "radio", .icon = &radio_icon },
@@ -57,6 +61,7 @@ fn onKey(keyboard: canvas.WidgetKeyboardEvent) ?Msg {
     if (std.ascii.eqlIgnoreCase(key, "arrowup") or std.ascii.eqlIgnoreCase(key, "up")) return .vol_up;
     if (std.ascii.eqlIgnoreCase(key, "arrowdown") or std.ascii.eqlIgnoreCase(key, "down")) return .vol_down;
     if (std.ascii.eqlIgnoreCase(key, "m")) return .toggle_mute;
+    if (std.ascii.eqlIgnoreCase(key, "l")) return .press_like;
     if (std.ascii.eqlIgnoreCase(key, "escape")) return .escape;
     if (key.len == 1) {
         switch (key[0]) {
@@ -253,6 +258,7 @@ test "key fallback maps transport, navigation, and dial keys" {
     try testing.expect(onKey(.{ .phase = .key_down, .key = "ArrowUp" }).? == .vol_up);
     try testing.expect(onKey(.{ .phase = .key_down, .key = "arrowdown" }).? == .vol_down);
     try testing.expect(onKey(.{ .phase = .key_down, .key = "M" }).? == .toggle_mute);
+    try testing.expect(onKey(.{ .phase = .key_down, .key = "L" }).? == .press_like);
     try testing.expect(onKey(.{ .phase = .key_down, .key = "Escape" }).? == .escape);
     try testing.expect(onKey(.{ .phase = .key_down, .key = "k", .modifiers = .{ .super = true } }).? == .toggle_sidebar);
     try testing.expectEqual(Msg{ .pick_tab = .booth }, onKey(.{ .phase = .key_down, .key = "4" }).?);

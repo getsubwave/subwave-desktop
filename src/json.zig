@@ -210,6 +210,18 @@ pub const SchedulePayload = struct {
     schedule: ?SchedGrid = null,
 };
 
+// /api/like — GET returns liked-state + count for the current airing; the
+// POST response carries the same fields plus ok/alreadyLiked. One struct
+// covers both (unknown fields are ignored by parse()).
+pub const LikeStatus = struct {
+    enabled: ?bool = null,
+    ok: ?bool = null,
+    songId: ?[]const u8 = null,
+    liked: ?bool = null,
+    alreadyLiked: ?bool = null,
+    count: ?i64 = null,
+};
+
 // settings.json on disk (v2: recents ride along; the legacy "skin" key is
 // simply ignored on load — old files still parse).
 pub const SettingsRecent = struct {

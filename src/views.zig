@@ -95,7 +95,7 @@ fn fmtThousands(arena: std.mem.Allocator, value: i64) []const u8 {
 // record-in-sleeve, square per the latest direction).
 fn stageView(ui: *Ui, model: *const Model) Ui.Node {
     const arena = ui.arena;
-    const info = arena.alloc(Ui.Node, 8) catch {
+    const info = arena.alloc(Ui.Node, 9) catch {
         ui.failed = true;
         return ui.column(.{}, .{});
     };
@@ -136,6 +136,26 @@ fn stageView(ui: *Ui, model: *const Model) Ui.Node {
         spans[0] = .{ .text = model.artist, .weight = .medium };
         spans[1] = .{ .text = model.album_line(arena), .color = .text_muted };
         info[n] = ui.paragraph(.{}, spans[0..2]);
+        n += 1;
+    }
+
+    // Like heart (web parity, #991): hidden until the station confirms the
+    // airing is likeable, fills only on server confirmation. The whole row is
+    // the press target — a 15px glyph alone is a cruel thing to aim at.
+    if (model.like_available) {
+        info[n] = ui.row(.{
+            .gap = 5,
+            .cross = .center,
+            .on_press = .press_like,
+            .semantics = .{ .label = model.like_hint() },
+        }, .{
+            ui.appIcon(.{
+                .width = 15,
+                .height = 15,
+                .style_tokens = .{ .foreground = if (model.like_liked) .accent else .text_muted },
+            }, if (model.like_liked) "heart-fill" else "heart"),
+            ui.text(.{ .size = .sm, .style_tokens = .{ .foreground = .text_muted } }, model.like_count_str(arena)),
+        });
         n += 1;
     }
 

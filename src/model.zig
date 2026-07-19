@@ -41,6 +41,8 @@ pub const keys = struct {
     pub const post_beacon: u64 = 33;
     pub const fetch_ob_health: u64 = 34;
     pub const fetch_ob_dj: u64 = 35;
+    pub const fetch_like: u64 = 36;
+    pub const post_like: u64 = 37;
     pub const save_settings: u64 = 30;
     pub const save_debounce: u64 = 31;
 };
@@ -294,6 +296,18 @@ pub const Model = struct {
     discover_sub_store: [max_discover][64]u8 = undefined,
     discover_rows: [max_discover]DiscoverRow = [_]DiscoverRow{.{}} ** max_discover,
     discover_count: usize = 0,
+
+    // Listener like for the current airing (mirrors web useTrackLike): the
+    // heart stays hidden until GET /api/like confirms the station has likes
+    // enabled and something likeable is on air, and only fills on server
+    // confirmation — no optimistic state.
+    like_song_buf: [64]u8 = undefined,
+    like_song: []const u8 = "", // subsonic id the like state refers to
+    like_body_buf: [96]u8 = undefined, // POST body must outlive the frame
+    like_available: bool = false,
+    like_liked: bool = false,
+    like_pending: bool = false,
+    like_count: u32 = 0,
 
     // schedule / station guide
     show_names_store: [max_shows][48]u8 = undefined,
@@ -987,6 +1001,15 @@ pub const Model = struct {
     }
 
     // One-word transport status (tray + status assertions).
+    // ----------------------------------------------------------------- like
+    pub fn like_count_str(self: *const Model, arena: std.mem.Allocator) []const u8 {
+        if (self.like_count == 0) return "";
+        return std.fmt.allocPrint(arena, "{d}", .{self.like_count}) catch "";
+    }
+    pub fn like_hint(self: *const Model) []const u8 {
+        return if (self.like_liked) "Liked" else "Like this track";
+    }
+
     pub fn status_word(self: *const Model) []const u8 {
         if (self.stream_failed) return "reconnecting";
         if (self.buffering) return "buffering";
@@ -1036,6 +1059,9 @@ pub const Model = struct {
         "recents_name_store", "recents_url_store",   "recents",             "recents_count",
         "discover_name_store", "discover_url_store", "discover_sub_store",  "discover_rows",
         "discover_count",
+        // like state consumed by the Zig stage view / update, not markup
+        "like_song_buf",      "like_song",           "like_body_buf",       "like_pending",
+        "like_count",         "like_count_str",      "like_hint",
         // consumed by derived methods, not bound directly
         "elapsed_str",        "vol_pct",             "listeners",           "genre",
         "album",              "theme_id",            "req_ack",
@@ -1074,6 +1100,8 @@ pub const Msg = union(enum) {
     got_dj: native_sdk.EffectResponse,
     got_directory: native_sdk.EffectResponse,
     got_beacon: native_sdk.EffectResponse,
+    got_like_status: native_sdk.EffectResponse,
+    got_like_post: native_sdk.EffectResponse,
     got_reqpost: native_sdk.EffectResponse,
     got_reqstat: native_sdk.EffectResponse,
     got_ob_health: native_sdk.EffectResponse,
@@ -1135,6 +1163,9 @@ pub const Msg = union(enum) {
     pick_theme: []const u8, // payload = theme id
     pick_format: []const u8, // payload = format id ("mp3" | "aac" | "opus" | "flac")
 
+    // listener like (stage heart / mini heart / L key)
+    press_like,
+
     // onboarding
     ob_pick_scheme: bool,
     ob_run_check,
@@ -1149,6 +1180,7 @@ pub const Msg = union(enum) {
         "got_state",     "got_themes",     "got_cover",   "got_session",
         "got_reqpost",   "got_reqstat",    "got_health",  "got_dj",
         "got_directory", "got_beacon",     "got_ob_health", "got_ob_dj",
+        "got_like_status", "got_like_post",
         "audio_event",   "saved",          "got_schedule", "tick_save",
         "chrome_changed", "toggle_play",   "vol_up",      "vol_down",
         "escape",        "mini_closed",    "tune_out",    "toggle_mini",
@@ -1408,6 +1440,21 @@ fn scheduleReconnect(model: *Model, fx: *Effects) void {
     fx.startTimer(.{ .key = keys.reconnect, .interval_ms = delay, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick_reconnect) });
 }
 
+// Ask the station for the current airing's liked-state + count. A station
+// without the endpoint (or with likes disabled) simply never flips
+// like_available on, which keeps the heart hidden — correct for old stations.
+fn fetchLikeStatus(model: *Model, fx: *Effects) void {
+    var b: [256]u8 = undefined;
+    if (api.like(&b, model.base)) |u| {
+        fx.fetch(.{ .key = keys.fetch_like, .url = u, .on_response = Effects.responseMsg(.got_like_status) });
+    } else |_| {}
+}
+
+fn likeCount(v: ?i64) u32 {
+    const c = v orelse 0;
+    return if (c <= 0) 0 else @intCast(@min(c, std.math.maxInt(u32)));
+}
+
 // Push a station onto the MRU recents list (dedupe by url, cap 8). Each row
 // owns its own store buffers, so shifting backward row-by-row never overlaps.
 fn pushRecent(model: *Model, name: []const u8, url: []const u8) void {
@@ -1493,6 +1540,11 @@ fn retune(model: *Model, fx: *Effects) void {
     model.ctx_vibe = "";
     model.ctx_cond = "";
     model.ctx_temp = -999;
+    model.like_song = "";
+    model.like_available = false;
+    model.like_liked = false;
+    model.like_pending = false;
+    model.like_count = 0;
     // The format pick is per station: the new station's mounts are unknown
     // until its first poll, and the old pick doesn't carry over.
     model.format_pref = .mp3;
@@ -1507,6 +1559,8 @@ fn retune(model: *Model, fx: *Effects) void {
     fx.cancel(keys.fetch_session);
     fx.cancel(keys.fetch_themes);
     fx.cancel(keys.fetch_cover);
+    fx.cancel(keys.fetch_like);
+    fx.cancel(keys.post_like);
     fx.cancel(keys.fetch_schedule);
     fx.cancel(keys.fetch_health);
     fx.cancel(keys.fetch_dj);
@@ -1701,6 +1755,15 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                         if (api.coverUrl(&model.cover_url_buf, model.base, sid)) |url| {
                             fx.fetch(.{ .key = keys.fetch_cover, .url = url, .on_response = Effects.responseMsg(.got_cover) });
                         } else |_| {}
+                        // The like state follows the airing: reset for every
+                        // new song and ask the station again — the heart stays
+                        // hidden until the answer confirms it's likeable.
+                        setStr(&model.like_song_buf, &model.like_song, sid);
+                        model.like_available = false;
+                        model.like_liked = false;
+                        model.like_pending = false;
+                        model.like_count = 0;
+                        fetchLikeStatus(model, fx);
                     }
                 }
             }
@@ -2312,6 +2375,67 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .forget_recent => |url| {
             if (forgetRecent(model, url)) saveSettings(model, fx);
         },
+        .press_like => {
+            // Guarded so the L key (and a stale heart) is a no-op when there
+            // is nothing likeable, it's already liked, or a POST is in flight.
+            if (!model.like_available or model.like_liked or model.like_pending) return;
+            if (model.like_song.len == 0) return;
+            var b: [256]u8 = undefined;
+            const url = api.like(&b, model.base) catch return;
+            // The client sends what it thinks is on air so a tap that lands
+            // just after a track change cannot like the wrong song (409).
+            var w = std.Io.Writer.fixed(&model.like_body_buf);
+            var esc: [64]u8 = undefined;
+            w.print("{{\"songId\":\"{s}\"}}", .{jsonEscape(&esc, model.like_song)}) catch return;
+            model.like_pending = true;
+            fx.fetch(.{
+                .key = keys.post_like,
+                .method = .POST,
+                .url = url,
+                .headers = &.{.{ .name = "content-type", .value = "application/json" }},
+                .body = w.buffered(),
+                .on_response = Effects.responseMsg(.got_like_post),
+            });
+        },
+        .got_like_status => |r| {
+            if (r.outcome != .ok or r.status != 200) return;
+            const parsed = json.parse(json.LikeStatus, std.heap.page_allocator, r.body) catch return;
+            defer parsed.deinit();
+            const st = parsed.value;
+            if (st.enabled) |e| if (!e) {
+                model.like_available = false;
+                return;
+            };
+            const sid = st.songId orelse {
+                // Nothing likeable on air (jingle, spoken segment).
+                model.like_available = false;
+                return;
+            };
+            // An answer about some other song is stale — the next now-playing
+            // poll re-asks with the fresh id.
+            if (model.like_song.len == 0 or !std.mem.eql(u8, sid, model.like_song)) return;
+            model.like_available = true;
+            model.like_liked = st.liked orelse false;
+            model.like_count = likeCount(st.count);
+        },
+        .got_like_post => |r| {
+            model.like_pending = false;
+            if (r.outcome != .ok) return;
+            if (r.status == 409) {
+                // The track flipped mid-tap — re-sync instead of guessing.
+                fetchLikeStatus(model, fx);
+                return;
+            }
+            if (r.status != 200) return; // 429 / disabled: stay tappable
+            const parsed = json.parse(json.LikeStatus, std.heap.page_allocator, r.body) catch return;
+            defer parsed.deinit();
+            const st = parsed.value;
+            if (st.songId) |sid| {
+                if (model.like_song.len > 0 and !std.mem.eql(u8, sid, model.like_song)) return;
+            }
+            model.like_liked = st.liked orelse true;
+            model.like_count = likeCount(st.count);
+        },
         .follow_station => {
             model.theme_override = "";
             fetchThemes(model, fx);
@@ -2617,6 +2741,36 @@ test "forgetRecent removes by url and closes the gap; unknown url is a no-op" {
     try testing.expect(forgetRecent(&m, "https://one.example"));
     try testing.expectEqual(@as(usize, 0), m.recents_count);
     try testing.expect(!m.has_recents());
+}
+
+test "like flow: song change resets, status arms the heart, press likes once" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    // A new song on air resets the state and asks the station for status.
+    update(&m, .{ .got_np = .{ .key = keys.fetch_np, .outcome = .ok, .status = 200, .body = "{\"nowPlaying\":{\"title\":\"T\",\"subsonic_id\":\"s1\"}}" } }, &fx);
+    try testing.expectEqualStrings("s1", m.like_song);
+    try testing.expect(!m.like_available);
+    // Status for the current song arms the heart with the airing's count.
+    update(&m, .{ .got_like_status = .{ .key = keys.fetch_like, .outcome = .ok, .status = 200, .body = "{\"enabled\":true,\"songId\":\"s1\",\"liked\":false,\"count\":2}" } }, &fx);
+    try testing.expect(m.like_available);
+    try testing.expect(!m.like_liked);
+    try testing.expectEqual(@as(u32, 2), m.like_count);
+    // A stale status (some other song) changes nothing.
+    update(&m, .{ .got_like_status = .{ .key = keys.fetch_like, .outcome = .ok, .status = 200, .body = "{\"enabled\":true,\"songId\":\"sX\",\"liked\":true,\"count\":9}" } }, &fx);
+    try testing.expectEqual(@as(u32, 2), m.like_count);
+    // Press → pending; a second press is a no-op; the server confirm fills.
+    update(&m, .press_like, &fx);
+    try testing.expect(m.like_pending);
+    update(&m, .press_like, &fx);
+    update(&m, .{ .got_like_post = .{ .key = keys.post_like, .outcome = .ok, .status = 200, .body = "{\"ok\":true,\"songId\":\"s1\",\"liked\":true,\"count\":3}" } }, &fx);
+    try testing.expect(m.like_liked);
+    try testing.expect(!m.like_pending);
+    try testing.expectEqual(@as(u32, 3), m.like_count);
+    // Likes disabled station-side hides the heart entirely.
+    update(&m, .{ .got_like_status = .{ .key = keys.fetch_like, .outcome = .ok, .status = 200, .body = "{\"enabled\":false}" } }, &fx);
+    try testing.expect(!m.like_available);
 }
 
 test "day_slots compresses the grid into contiguous ranges" {
