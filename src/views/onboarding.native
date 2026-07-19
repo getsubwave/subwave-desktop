@@ -23,7 +23,7 @@
 
         <!-- Brand -->
         <row gap="10" cross="center">
-          <icon name="app:disc" width="22" height="22" foreground="accent"/>
+          <icon name="app:logo" width="22" height="22" foreground="accent"/>
           <text size="sm"><span weight="bold">SUB/WAVE</span></text>
         </row>
         <text size="sm" foreground="text_muted">SELF-HOSTED INTERNET RADIO</text>

@@ -29,10 +29,12 @@ pub const AppUi = canvas.Ui(Msg);
 // `pub const app_icons` is the model-contract mirror `native check` verifies
 // markup names against.
 const disc_icon = canvas.svg_icon.parseComptime(@embedFile("icons/disc.svg"));
+const logo_icon = canvas.svg_icon.parseComptime(@embedFile("icons/logo.svg"));
 const power_icon = canvas.svg_icon.parseComptime(@embedFile("icons/power.svg"));
 const radio_icon = canvas.svg_icon.parseComptime(@embedFile("icons/radio.svg"));
 pub const app_icons = [_]canvas.icons.Entry{
     .{ .name = "disc", .icon = &disc_icon },
+    .{ .name = "logo", .icon = &logo_icon },
     .{ .name = "power", .icon = &power_icon },
     .{ .name = "radio", .icon = &radio_icon },
 };
