@@ -19,7 +19,7 @@ inputs:
     default: "0.16.0"
   native-sdk-version:
     description: "@native-sdk/cli version to install"
-    default: "0.5.3"
+    default: "0.6.0"
   apply-patches:
     description: Whether to run scripts/apply-sdk-patches.sh
     default: "true"
