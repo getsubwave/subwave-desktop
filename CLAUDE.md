@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A native desktop player (macOS + Linux) for the SUB/WAVE internet radio station, built on the **Vercel Native SDK**: declarative `.native` markup + Zig logic, rendered by the SDK's own engine — no browser, no WebView. Requires **Zig 0.16.0** and a global `@native-sdk/cli` (`npm i -g @native-sdk/cli`).
+A native desktop player (macOS + Linux + Windows) for the SUB/WAVE internet radio station, built on the **Vercel Native SDK**: declarative `.native` markup + Zig logic, rendered by the SDK's own engine — no browser, no WebView. Requires **Zig 0.16.0** and a global `@native-sdk/cli` **0.6.0+** (`npm i -g @native-sdk/cli`).
 
 ## Commands
 
@@ -27,15 +27,17 @@ native automate wait && native automate screenshot main-canvas
 
 Point the app at a dev station with `SUBWAVE_STATION_URL=http://localhost:<port>` (overrides the persisted station).
 
-## CRITICAL: local SDK patches
+## CRITICAL: local SDK patch
 
-The globally installed `@native-sdk/cli` carries **required local patches** (`patches/native-sdk-local.patch`, documented in `docs/sdk-notes.md`):
+The globally installed `@native-sdk/cli` carries **one required local patch** (`patches/native-sdk-local.patch`, documented in `docs/sdk-notes.md`):
 
-1. **canonicalizeComptime quota fix** in `ui_markup.zig` — without it, `native build` fails with `error: evaluation exceeded 1000 backwards branches` at ui_markup.zig ~line 1014. The markup documents in this app are too large for the SDK's default comptime quota.
-2. **Close-hides-window behavior** in `appkit_host.m` — without it the red close button quits the app instead of hiding to the menu-bar extra. Also reserves tray item ids 100 (unhide) / 101 (quit), which `main.zig`'s `statusItem` depends on.
-3. **Fractional HiDPI scale** in `gtk_host.c` — without it the host reports the integer `gtk_widget_get_scale_factor()` instead of the true `gdk_surface_get_scale()`, so on a fractional-scale Linux desktop (e.g. 167%) the canvas is rasterized oversized and nearest-neighbour-resampled down, which shreds glyph antialiasing and makes all text look pixelated. Linux-only; macOS/Windows already read fractional densities.
+- **Fractional HiDPI scale** in `gtk_host.c` — without it the host reports the integer `gtk_widget_get_scale_factor()` instead of the true `gdk_surface_get_scale()`, so on a fractional-scale Linux desktop (e.g. 167%) the canvas is rasterized oversized and nearest-neighbour-resampled down, which shreds glyph antialiasing and makes all text look pixelated. Linux-only; macOS/Windows already read fractional densities.
 
 **After every `npm i -g @native-sdk/cli` upgrade, run `./scripts/apply-sdk-patches.sh` then `native test`.** The script is idempotent and detects partial application.
+
+SDK 0.6.0 absorbed the other two patches (comptime quota; close-hides-window + reserved tray ids 100/101) — do not re-add them. Their replacements are `app.zon`'s `close_policy` plus `fx.showWindow` / `fx.quitApp`; see `docs/sdk-notes.md`.
+
+**`close_policy` is per-build-target, and `app.zon` cannot scope per platform.** The manifest declares `"quit"` (the only thing Linux compiles — the GTK host has no tray to bring a hidden window back), and `scripts/set-close-policy.sh hide` flips it on the macOS and Windows legs of CI and both release workflows. If you touch that line in `app.zon`, keep the `.close_policy = "…"` shape — the script asserts on it and fails the build rather than silently shipping the wrong close behavior.
 
 ## Architecture
 
@@ -43,7 +45,7 @@ Elm-style app: a single `Model`, a `Msg` union, and an `update` reducer. All sid
 
 - `src/main.zig` — thin entry point: shell/window config, `App.create` wiring (`update_fx`, `init_fx`, `tokens_fn`, `view`, `windows_fn`, …), app-level keyboard fallback (`onKey`), tray menu (`statusItem` / `onCommand`), model-declared mini-player window (`windowsFn`), and slider→model sync. Settings load synchronously here *before* the window opens so a saved station skips onboarding.
 - `src/model.zig` — the heart (~2300 lines): `Model`, `Msg`, `boot` (init effects), `update` (the reducer, wires every effect), effect keys, settings JSON apply/save. All strings the model keeps are **copied into fixed `*_store` buffers on the Model** — row structs hold slices into those buffers. No heap ownership in the model.
-- `src/views.zig` — view registry + composition. The main window dispatches on `model.phase` (onboarding → player). The player is **composed**: five markup fragments (`views/player-top/-sidebar/-panel/-deck/-sheets.native`) around a Zig-built LIVE stage (`stageView`) — the stage is Zig because it needs `ui.image` for square cover art, which markup deliberately excludes. The mini player (`views/mini.native`) is a model-declared secondary window.
+- `src/views.zig` — view registry + composition, and nothing else. The main window dispatches on `model.phase` (onboarding → player); the player is **composed** from six markup fragments (`views/player-top/-sidebar/-stage/-panel/-deck/-sheets.native`), and this file only decides which conditional ones appear. The LIVE stage was hand-built Zig until SDK 0.6.0 added markup's `<image>` leaf (it needs a square runtime image for cover art); there is no Zig view code left. The mini player (`views/mini.native`) is a model-declared secondary window.
 - `src/views/*.native` — markup fragments compiled at comptime via `CompiledMarkupView`; a Model field drift is a compile error.
 - Pure support modules, each with inline tests: `api.zig` (endpoint URL builders — the one authority on the station API shape), `json.zig` (std.json typed decoders, `ignore_unknown_fields`; parsed strings are arena-owned so callers copy), `color.zig` (hex/rgb/oklch/color-mix(in oklab) → canvas.Color, real OKLab math), `spectrum.zig` (32-band analyzer ballistics: instant attack, linear decay), `stream_format.zig` (format ↔ Icecast mount table + platform decode gate), `theme.zig` (7 station tokens → `DesignTokens` overrides; only color slots are written so app material survives), `settings.zig` (settings.json in the OS per-app config dir).
 - `app.zon` — manifest (id, platforms, permissions, main window + GPU surface).
@@ -56,7 +58,8 @@ Data flow at runtime: timers poll `/api/now-playing`, `/api/state`, `/api/themes
 - **A `/` in a scene window title crashes GTK at app_start on Linux.** Keep the branded "SUB/WAVE" slash out of `app.zon` / `shell_windows` titles; it's fine in `runWithOptions.window_title`.
 - **The SDK cannot resize a live window.** Per-mode window shapes apply at next launch only.
 - **The FFT spectrum feed only emits while a window is visibly on screen** (occlusion gate in the SDK). A flat visualizer from an app launched in the background is not a bug — activate the app first.
-- SDK 0.5.x has **no OS media-controls surface** (no MPNowPlayingInfoCenter / MPRemoteCommandCenter / MPRIS / hardware media keys). The tray extra + in-window keyboard transport are the substitutes.
+- SDK 0.6.0 still has **no OS media-controls surface** (no MPNowPlayingInfoCenter / MPRemoteCommandCenter / MPRIS / hardware media keys — re-checked at the 0.6.0 upgrade). The tray extra + in-window keyboard transport are the substitutes.
+- **Cover art loads through `fx.loadImage`, not `fx.fetch` + `registerImageBytes`** — the fetch and the platform decode run on a worker thread, with a content-addressed disk cache under the OS caches dir. Its ImageId **is** the effect key, which is why the counter starts at `keys.cover_image_base` (1000) clear of every other effect key. An id only reaches `model.cover_id` once the runtime reports `.loaded`; anything else leaves the initials disc standing.
 - Stream format is listener-selectable (`stream_format.zig`): MP3 is the always-available floor, AAC additionally decodes on macOS (AVPlayer) and Windows (Media Foundation), and the Ogg-encapsulated Opus/FLAC mounts are Linux-only (neither AVPlayer nor Media Foundation has an Ogg demuxer). Every host asserts its **full** matrix in the `platformSupports` test — Windows fell through the defensive `else` for two releases and shipped MP3-only because cross-compiling never ran the suite for the target. Linux offers Ogg mounts optimistically and `scheduleReconnect` drops a failing non-MP3 pick back to MP3 after 3 retries; the picker only shows mounts the station advertises via the `stream` flags on `/api/now-playing`.
 - `native automate assert` regex does **not** support `|` alternation.
 

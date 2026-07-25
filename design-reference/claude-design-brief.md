@@ -49,10 +49,13 @@ responsive breakpoints); windows have min sizes instead.
 
 ## What was adapted in the current build (and what to redesign)
 
-1. **FM dial band** → became a centered strip of 5 small toggle-chips
-   (SHWS · TML · LIVE · BTH · REQ). Redesign the dial as a chip/tab strip —
-   no ruler ticks, no animated needle. An accent-filled active chip is the
-   "needle".
+1. **FM dial band** → became a centered SEGMENTED TAB STRIP of 5 full-word
+   stops (SHOWS · TIMELINE · LIVE · BOOTH · REQUEST) — the five triggers share
+   one muted rounded track, and the active one is filled with the station
+   accent. Redesign the dial that way: no ruler ticks, no animated needle; the
+   accent-filled trigger is the "needle". (It began as five detached
+   abbreviation chips — SHWS · TML · BTH — which read as scattered pills and
+   needed separate accessibility labels because they were not words.)
 2. **Cover art** → the SDK clips images to a CIRCLE (avatar). Build shows a
    square bordered "sleeve" card with a round disc inside — a record-in-sleeve
    look. Either embrace that in the design, or accept the circle; corner

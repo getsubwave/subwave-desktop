@@ -1,0 +1,84 @@
+<!-- Player fragment: the LIVE stage — record sleeve left, track text right,
+     spectrum wave underneath. This was the one Zig-built view in the player:
+     it needed `ui.image` for the square cover art, which markup excluded until
+     SDK 0.6.0 added the `<image>` leaf. -->
+<column grow="1" min-width="0">
+
+  <row grow="1" gap="32" padding="24" cross="center">
+    <!-- Record sleeve: field card around SQUARE art. Pressing it opens the
+         timeline. `<image>` draws nothing for id 0, so the initials disc is
+         the explicit fallback while the cover loads (or after it fails). -->
+    <panel padding="12" background="surface" border-color="border" radius="lg"
+           on-press="open_timeline" label="Open timeline">
+      <if test="{has_cover}">
+        <image image="{cover_id}" width="180" height="180" label="Cover art"/>
+      </if>
+      <else>
+        <panel width="180" height="180" background="surface_subtle">
+          <column grow="1" main="center" cross="center">
+            <text size="heading" foreground="text_muted">{initials}</text>
+          </column>
+        </panel>
+      </else>
+    </panel>
+
+    <!-- Default cross-stretch bounds every text leaf to the column's width, so
+         long titles and DJ lines elide instead of running under the artwork. -->
+    <column gap="8" main="center" grow="1" min-width="0">
+      <if test="{has_state}">
+        <text size="sm" foreground="accent">{state_line}</text>
+      </if>
+
+      <!-- "NOW PLAYING — 1:15 / 2:53" with the like heart and the token meter
+           riding the same strip: heart ahead of the spark glyph, no words. -->
+      <row gap="10" cross="center">
+        <text size="sm" foreground="text_muted">{np_head}</text>
+        <if test="{like_available}">
+          <row gap="4" cross="center" on-press="press_like" label="{like_hint}">
+            <if test="{like_liked}">
+              <icon name="app:heart-fill" width="13" height="13" foreground="accent"/>
+            </if>
+            <else>
+              <icon name="app:heart" width="13" height="13" foreground="text_muted"/>
+            </else>
+            <text size="sm" foreground="text_muted">{like_count_str}</text>
+          </row>
+        </if>
+        <if test="{has_tokens}">
+          <row gap="4" cross="center" label="LLM tokens">
+            <icon name="app:spark" width="12" height="12" foreground="text_muted"/>
+            <text size="sm" foreground="text_muted">{thousands(llm_tokens)}</text>
+          </row>
+        </if>
+      </row>
+
+      <text size="display" wrap="false">{title}</text>
+
+      <!-- Artist · album · year as one paragraph of styled runs. No whitespace
+           between the span tags: the runs abut and album_line brings its own
+           leading separator. -->
+      <text><span weight="medium">{artist}</span><span foreground="text_muted">{album_line}</span></text>
+
+      <!-- "WORLDWIDE · 99 BPM · 11A — ROMANTIC · CALM · LOW ENERGY". Three
+           unconditional runs; meta_mood_sep is empty unless both sides exist,
+           and an empty run draws nothing. -->
+      <if test="{has_meta_or_mood}">
+        <text><span foreground="text_muted">{meta_line}</span><span foreground="text_muted">{meta_mood_sep}</span><span foreground="accent">{mood_line}</span></text>
+      </if>
+
+      <if test="{has_booth}">
+        <text size="sm" wrap="false" foreground="text_muted"
+              on-press="open_booth" label="Open booth feed">DJ — {booth_line}</text>
+      </if>
+    </column>
+  </row>
+
+  <!-- Spectrum wave under the stage: 32 FFT bands, pinned to an absolute
+       0..1 domain so the bars mean the same thing frame to frame. -->
+  <column padding="10">
+    <chart height="44" y-min="0" y-max="1" label="Spectrum">
+      <series kind="bar" values="{bands}" color="accent"/>
+    </chart>
+  </column>
+
+</column>

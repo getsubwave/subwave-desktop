@@ -16,8 +16,10 @@ repo from the main `subwave` monorepo; it tracks the same station HTTP API.
   `/api/session`: title, artist, album, year, genre, BPM, key, moods, energy,
   LLM-token ticker, DJ, active show, listeners, elapsed, and the masthead
   context line (show · vibe · weather).
-- **Cover art** — fetches `/api/cover/:id`, registers it as the stage's square
-  record sleeve (initials placeholder while it loads).
+- **Cover art** — `fx.loadImage` pulls `/api/cover/:id` and decodes it off the
+  loop thread into the stage's square record sleeve (initials placeholder while
+  it loads), keeping a disk cache under the OS caches dir so a track that aired
+  recently comes back without touching the network.
 - **Real spectrum** — the SDK's FFT `.spectrum` feed (32 bands) rendered as an
   accent-themed bar analyzer with classic attack/decay ballistics.
 - **Station themes** — 30 s poll of `/api/themes` repaints live via
@@ -29,7 +31,8 @@ repo from the main `subwave` monorepo; it tracks the same station HTTP API.
 - **Station switcher** — Cmd/Ctrl+K sidebar: persisted recents (MRU, 8) plus
   the community directory (`getsubwave.com/stations.json`). A
   `SUBWAVE_STATION_URL` env var overrides the persisted station.
-- **Section dial** — five stops (keys 1–5): station guide (`/api/schedule`
+- **Section dial** — a segmented tab strip of five stops (keys 1–5) sharing one
+  track, the active stop filled with the station accent: station guide (`/api/schedule`
   show list + 7×24 week grid with day tabs), timeline (up next + history), the
   bare LIVE stage, booth feed (all/DJ/tracks filter; the DJ's latest line
   tickers on the stage), and the request slip (`POST /api/request` with an
@@ -37,10 +40,12 @@ repo from the main `subwave` monorepo; it tracks the same station HTTP API.
 - **Signal + sleep** — timed `/api/health` probe → latency readout while
   playing; sleep timer (15–90 min) from the tray or the back panel.
 - **Mini player** — a compact secondary window (420×168) toggled from the tray.
-- **Menu-bar extra** — macOS `NSStatusItem` (tray on Linux where supported):
-  live now-playing rows, tune in/out, mute, sleep cycle, open player, mini
-  player, quit. The red close button **hides** the main window — playback and
-  the tray stay alive (one of the local SDK patches, see below).
+- **Menu-bar extra** — macOS `NSStatusItem` and the Windows tray (the GTK host
+  still has none): live now-playing rows, tune in/out, mute, sleep cycle, open
+  player, mini player, quit. On macOS and Windows the close button **hides** the
+  main window — playback and the tray stay alive — via `app.zon`'s
+  `close_policy`; on Linux it quits, because there is no tray to bring a hidden
+  window back (see `docs/sdk-notes.md`).
 - **Keyboard transport** — space play/pause, ↑/↓ volume, M mute, L like the
   current track, Esc back to LIVE, Cmd/Ctrl+K stations, 1–5 dial stops
   (app-level fallback; never steals typing from the text fields).
@@ -61,34 +66,33 @@ src/
   theme.zig             7 station tokens → DesignTokens (tokens_fn)
   spectrum.zig          band ballistics (pure) + tests
   stream_format.zig     format ↔ mount table + platform decode gate + tests
-  views.zig             view registry; composes the fragments around a Zig stage
-  views/*.native        onboarding, mini, player-top/-sidebar/-panel/-deck/-sheets
+  views.zig             view registry; composes the markup fragments
+  views/*.native        onboarding, mini, player-top/-sidebar/-stage/-panel/-deck/-sheets
   icons/*.svg           app icons, registered at boot as icon="app:<name>"
   tests.zig             view build/layout contract + the pure modules' unit tests
 ```
 
 The player runs entirely through the SDK **effects channel** (`.update_fx`):
 timers drive polling, `fx.fetch` does HTTP, results return as typed Msgs, and
-`fx.playAudio`/`registerImageBytes` handle audio + cover art. The player view
-is **composed**: markup fragments around a Zig-built LIVE stage (the stage
-needs `ui.image` for the square cover art, which markup deliberately excludes).
+`fx.playAudio`/`fx.loadImage` handle audio + cover art. Every player view is
+markup — `views.zig` only composes the fragments, deciding which conditional
+ones appear.
 
 ## Build & run
 
-Requires **Zig 0.16.0** and the `@native-sdk/cli` (`npm i -g @native-sdk/cli`,
-currently 0.5.3) — **plus the local SDK patches**. After every SDK
+Requires **Zig 0.16.0** and `@native-sdk/cli` **0.6.0+**
+(`npm i -g @native-sdk/cli`) — **plus one local SDK patch**. After every SDK
 install/upgrade:
 
 ```bash
 ./scripts/apply-sdk-patches.sh && native test
 ```
 
-The patches (comptime quota fix for large markup, close-button-hides window,
-reserved tray ids) are documented in `docs/sdk-notes.md`; upstream issues
-[vercel-labs/native#148](https://github.com/vercel-labs/native/issues/148) and
-[#149](https://github.com/vercel-labs/native/issues/149). Symptoms of missing
-patches: `native build` fails in `ui_markup.zig`, and the close button quits
-the app.
+The remaining patch fixes fractional-HiDPI text rendering on Linux
+([vercel-labs/native#156](https://github.com/vercel-labs/native/issues/156));
+it is documented in `docs/sdk-notes.md`. Symptom of a missing patch: pixelated
+text on a fractional-scale display. (0.6.0 absorbed the two older patches — the
+comptime quota fix and close-button-hides-window.)
 
 ```bash
 native build && ./zig-out/bin/subwave-desktop   # release build + run
@@ -130,11 +134,12 @@ default, so its builds shipped with no AAC and a hidden format picker. Nothing
 caught it because cross-compiling the Windows binary never ran the test suite
 for the target; building on a Windows runner did, immediately.
 
-**OS media integration.** The SDK (0.5.3) has no system now-playing or
-media-key surface — no `MPNowPlayingInfoCenter`/`MPRemoteCommandCenter` on
-macOS, no MPRIS on Linux — so hardware play/pause keys and the OS Now Playing
-widget can't be wired up yet (SDK feature request). What IS wired up: the
-menu-bar status item (tray on Linux where supported), the in-window keyboard
+**OS media integration.** The SDK (re-checked at 0.6.0) has no system
+now-playing or media-key surface — no `MPNowPlayingInfoCenter`/
+`MPRemoteCommandCenter` on macOS, no MPRIS on Linux — so hardware play/pause
+keys and the OS Now Playing widget can't be wired up yet (SDK feature request).
+What IS wired up: the menu-bar status item (macOS and Windows; the GTK host has
+no tray, so Linux gets neither the extra nor close-to-hide), the in-window keyboard
 transport, and per-track fetch of the station's own metadata (the app polls
 `/api/now-playing` rather than relying on ICY in-stream metadata).
 
@@ -169,9 +174,12 @@ one per CPU flavor):
 | `release-windows.yml` | `windows-latest` | `-windows-x64.zip` | built and launched on real Windows |
 | `release-linux.yml` | `ubuntu-24.04` | `-linux-x64.tar.gz` | needs glibc 2.39+ and GTK4 |
 
-Each one applies the local SDK patches before building
-(`scripts/apply-sdk-patches.sh`), so a release cannot ship without them, and
-each refuses to run if the tag disagrees with `.version` in `app.zon`. Shared
+Each one applies the local SDK patch before building
+(`scripts/apply-sdk-patches.sh`), so a release cannot ship without it, and
+each refuses to run if the tag disagrees with `.version` in `app.zon`. The
+macOS and Windows legs additionally run `scripts/set-close-policy.sh hide`
+before testing, which is how those builds get the menu-bar close semantics that
+`app.zon` cannot declare for all three targets at once. Shared
 toolchain setup and the Zig/SDK version pins live in
 `.github/actions/setup-native`.
 

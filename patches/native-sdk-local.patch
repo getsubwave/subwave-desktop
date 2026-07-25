@@ -1,67 +1,6 @@
---- a/src/primitives/canvas/ui_markup.zig
-+++ b/src/primitives/canvas/ui_markup.zig
-@@ -983,6 +983,11 @@
- /// of arena allocations. The branch quota scales with the tree it walks.
- pub fn canonicalizeComptime(comptime document: MarkupDocument) MarkupDocument {
-     comptime {
-+        // Raise the quota BEFORE computing the scaled quota: the byte-size
-+        // scan below is itself recursive, and a large document exceeds the
-+        // default 1000-branch budget while measuring itself. The scan is
-+        // linear in nodes+attrs, so 1M covers any realistic document.
-+        @setEvalBranchQuota(1_000_000);
-         @setEvalBranchQuota(comptime_parse_quota_base +
-             (documentByteSize(document) + 1) * comptime_canonicalize_quota_per_byte);
-         var out = document;
---- a/src/platform/macos/appkit_host.m
-+++ b/src/platform/macos/appkit_host.m
-@@ -1022,6 +1022,24 @@
-     return [self.host emitDroppedFileURLs:urls windowId:self.windowId];
- }
- 
-+/* Local patch (subwave-desktop, 2026-07-18): menu-bar-app close semantics.
-+ * While a status item is installed, closing the STARTUP window ("main")
-+ * hides the app instead of destroying its one unrecreatable window —
-+ * playback and the tray stay alive, and a Dock-icon click unhides it.
-+ * Cmd+Q, SIGTERM, and AppleScript quit still terminate through the
-+ * normal paths; model-declared windows (the mini player) keep their
-+ * real close + on_close dispatch. */
-+- (BOOL)windowShouldClose:(NSWindow *)sender {
-+    (void)sender;
-+    if (self.host.statusItem == nil) return YES;
-+    NSString *label = self.host.windowLabels[@(self.windowId)];
-+    if ([label isEqualToString:@"main"]) {
-+        [NSApp hide:nil];
-+        return NO;
-+    }
-+    return YES;
-+}
-+
- - (void)windowWillClose:(NSNotification *)notification {
-     (void)notification;
-     if (self.observesContentLayout) {
-@@ -9630,6 +9648,19 @@
- }
- 
- - (void)trayMenuItemClicked:(NSMenuItem *)menuItem {
-+    /* Local patch (subwave-desktop, 2026-07-18): reserved tray item ids for
-+     * app-lifecycle actions the runtime's update loop cannot perform.
-+     * 100 = open/unhide + activate the app (the tray's "Open player" row,
-+     * pairing with the close-hides-the-app patch above); 101 = quit.
-+     * Both still forward through trayCallback so the app's command mapping
-+     * sees the selection (it may map to no Msg). */
-+    if (menuItem.tag == 100) {
-+        [NSApp unhide:nil];
-+        [NSApp activateIgnoringOtherApps:YES];
-+    } else if (menuItem.tag == 101) {
-+        [NSApp terminate:nil];
-+        return;
-+    }
-     if (self.trayCallback) {
-         self.trayCallback(self.trayContext, (uint32_t)menuItem.tag);
-     }
 --- a/src/platform/linux/gtk_host.c
 +++ b/src/platform/linux/gtk_host.c
-@@ -844,6 +844,41 @@
+@@ -983,6 +983,41 @@
      g_free(preedit);
  }
  
@@ -103,7 +42,7 @@
  static double native_sdk_gpu_surface_width(native_sdk_gtk_native_view_t *view) {
      int width = view->widget ? gtk_widget_get_width(view->widget) : 0;
      if (width > 0) return (double)width;
-@@ -901,7 +936,7 @@
+@@ -1040,7 +1075,7 @@
      const double width = native_sdk_gpu_surface_width(view);
      const double height = native_sdk_gpu_surface_height(view);
      if (width <= 0 || height <= 0) return;
@@ -112,7 +51,7 @@
      if (native_sdk_gpu_surface_sync_geometry(view, width, height, scale)) {
          gtk_widget_queue_draw(view->widget);
      }
-@@ -941,7 +976,7 @@
+@@ -1080,7 +1115,7 @@
  
      const double width = native_sdk_gpu_surface_width(view);
      const double height = native_sdk_gpu_surface_height(view);
@@ -121,7 +60,7 @@
      if (width <= 0 || height <= 0) return;
  
      (void)native_sdk_gpu_surface_sync_geometry(view, width, height, scale);
-@@ -1051,7 +1086,7 @@
+@@ -1190,7 +1225,7 @@
      const double logical_width = native_sdk_gpu_surface_width(view);
      const double logical_height = native_sdk_gpu_surface_height(view);
      if (logical_width <= 0 || logical_height <= 0) return;
@@ -130,7 +69,7 @@
      if (native_sdk_gpu_surface_sync_geometry(view, logical_width, logical_height, scale)) {
          gtk_widget_queue_draw(view->widget);
      }
-@@ -1066,18 +1101,29 @@
+@@ -1205,18 +1240,29 @@
          return;
      }
      cairo_save(cr);
@@ -171,7 +110,7 @@
          cairo_set_source_surface(cr, surface, 0, 0);
          cairo_pattern_set_filter(cairo_get_source(cr), exact ? CAIRO_FILTER_NEAREST : CAIRO_FILTER_BILINEAR);
      } else {
-@@ -2214,7 +2260,7 @@
+@@ -2487,7 +2533,7 @@
      int w = 0, h = 0;
      native_sdk_window_content_size(win, &w, &h);
      GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(win->gtk_window));
@@ -180,7 +119,7 @@
      int focused = gtk_window_is_active(win->gtk_window) ? 1 : 0;
      native_sdk_emit(host, (native_sdk_gtk_event_t){
          .kind = NATIVE_SDK_GTK_EVENT_WINDOW_FRAME,
-@@ -2236,7 +2282,7 @@
+@@ -2509,7 +2555,7 @@
      int w = 0, h = 0;
      native_sdk_window_content_size(win, &w, &h);
      GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(win->gtk_window));
@@ -189,7 +128,7 @@
      native_sdk_emit(host, (native_sdk_gtk_event_t){
          .kind = NATIVE_SDK_GTK_EVENT_RESIZE,
          .window_id = win->id,
-@@ -2357,7 +2403,7 @@
+@@ -2654,7 +2700,7 @@
          const double w = (double)gtk_widget_get_width(GTK_WIDGET(win->gtk_window));
          const double h = (double)gtk_widget_get_height(GTK_WIDGET(win->gtk_window));
          GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(win->gtk_window));

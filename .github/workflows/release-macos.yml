@@ -74,6 +74,14 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_ENV"
 
+      - name: Enable menu-bar close semantics
+        # app.zon ships close_policy "quit" because the SDK refuses "hide" at
+        # comptime on Linux (no GTK tray to bring a hidden window back) and the
+        # manifest has no per-platform scoping. macOS is the platform the
+        # menu-bar shape was designed for, so flip it before Test — that way the
+        # suite compiles the manifest that actually ships. See docs/sdk-notes.md.
+        run: ./scripts/set-close-policy.sh hide
+
       - name: Test
         run: native test
 

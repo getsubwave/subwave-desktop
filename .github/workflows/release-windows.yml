@@ -64,6 +64,13 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_ENV"
 
+      - name: Enable tray close semantics
+        # Same flip as the macOS leg (app.zon ships the Linux-safe "quit"). The
+        # "tray" capability in app.zon is what makes the SDK accept "hide" on
+        # this target: hiding removes the taskbar entry and windows has no dock
+        # reopen path, so the status item is the only way back.
+        run: ./scripts/set-close-policy.sh hide
+
       - name: Test
         run: native test
 

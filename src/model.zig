@@ -30,7 +30,6 @@ pub const keys = struct {
     pub const fetch_np: u64 = 20;
     pub const fetch_state: u64 = 21;
     pub const fetch_themes: u64 = 22;
-    pub const fetch_cover: u64 = 23;
     pub const fetch_session: u64 = 24;
     pub const post_request: u64 = 25;
     pub const fetch_reqstat: u64 = 26;
@@ -45,6 +44,12 @@ pub const keys = struct {
     pub const post_like: u64 = 37;
     pub const save_settings: u64 = 30;
     pub const save_debounce: u64 = 31;
+
+    // Cover art loads through `fx.loadImage`, where the ImageId IS the effect
+    // key — so the id counter has to start clear of every key above or a cover
+    // load and, say, the now-playing poll would collide on one key. 1000 leaves
+    // room for the keys to grow without anyone having to remember this.
+    pub const cover_image_base: u64 = 1000;
 };
 
 pub const max_themes = 12;
@@ -128,10 +133,12 @@ pub const SleepOpt = struct {
     label: []const u8,
 };
 
-// Dial stops (derived rows carry the Tab payload for pick_tab).
+// Dial stops (derived rows carry the Tab payload for pick_tab). `name` is the
+// visible trigger text AND the accessible name — the stops used to render as
+// radio-preset abbreviations (SHWS / TML / BTH) that needed a separate label to
+// be announceable, which is exactly the redundancy a real word removes.
 pub const DialStop = struct {
-    abbr: []const u8,
-    label: []const u8,
+    name: []const u8,
     tab: Tab,
 };
 
@@ -158,6 +165,11 @@ pub const Model = struct {
     stream_url_buf: [256]u8 = undefined,
     settings_path_buf: [768]u8 = undefined,
     settings_path: []const u8 = "",
+    // OS per-app cache dir (resolved beside settings_path at startup). Empty
+    // means "could not resolve" — cover loads then simply run uncached rather
+    // than guessing a path.
+    cache_dir_buf: [640]u8 = undefined,
+    cache_dir: []const u8 = "",
 
     // station identity (/api/dj)
     station_name_buf: [48]u8 = undefined,
@@ -202,12 +214,19 @@ pub const Model = struct {
     ctx_cond: []const u8 = "",
     ctx_temp: i64 = -999, // -999 = unknown
 
-    // cover art (registered image ids; 0 = disc/initials fallback)
+    // cover art (registered image ids; 0 = disc/initials fallback). The art is
+    // loaded by `fx.loadImage`, which runs the fetch and the decode on a worker
+    // thread and keeps a disk cache, so a track that aired recently comes back
+    // without touching the network. `cover_id` is only ever the id of pixels
+    // the runtime has confirmed registered; `cover_loading_id` is the one still
+    // in flight (0 = none), kept so a new track can cancel the old load.
     cover_id: u64 = 0,
-    next_cover_id: u64 = 1,
+    cover_loading_id: u64 = 0,
+    next_cover_id: u64 = keys.cover_image_base,
     cover_sid_buf: [64]u8 = undefined,
     cover_sid: []const u8 = "",
     cover_url_buf: [256]u8 = undefined,
+    cover_cache_buf: [832]u8 = undefined,
 
     // transport / audio
     transport: Transport = .playing,
@@ -489,6 +508,17 @@ pub const Model = struct {
     pub fn has_mood(self: *const Model) bool {
         return self.moods.len > 0 or self.energy.len > 0;
     }
+    /// Whether the stage draws the meta/mood paragraph at all.
+    pub fn has_meta_or_mood(self: *const Model) bool {
+        return self.has_meta() or self.has_mood();
+    }
+    /// The dash between the meta run and the mood run — empty unless BOTH
+    /// sides are there, so the stage can lay the paragraph out as three
+    /// unconditional spans (an empty span contributes nothing) instead of
+    /// branching the separator into the markup.
+    pub fn meta_mood_sep(self: *const Model) []const u8 {
+        return if (self.has_meta() and self.has_mood()) " — " else "";
+    }
 
     pub fn vol_pct(self: *const Model) i64 {
         return @intFromFloat(@round(self.volume * 100));
@@ -540,6 +570,14 @@ pub const Model = struct {
 
     pub fn has_booth(self: *const Model) bool {
         return self.booth_line.len > 0;
+    }
+
+    /// Whether real cover pixels are registered. 0 is the no-image sentinel,
+    /// and `<image>` draws nothing for it — the stage swaps in the initials
+    /// disc instead, which is honest both before the first load and after a
+    /// failed one.
+    pub fn has_cover(self: *const Model) bool {
+        return self.cover_id != 0;
     }
 
     // ------------------------------------------------------- signal meter
@@ -645,12 +683,14 @@ pub const Model = struct {
         .{ .min = 90, .label = "90 minutes" },
     };
 
+    // Uppercase is authored, not styled — the toolkit has no text-transform,
+    // and this matches the masthead's KLAIR RADIO / WITH HEER register.
     pub const dial_stops = [_]DialStop{
-        .{ .abbr = "SHWS", .label = "Shows", .tab = .schedule },
-        .{ .abbr = "TML", .label = "Timeline", .tab = .timeline },
-        .{ .abbr = "LIVE", .label = "Live", .tab = .live },
-        .{ .abbr = "BTH", .label = "Booth", .tab = .booth },
-        .{ .abbr = "REQ", .label = "Request", .tab = .request },
+        .{ .name = "SHOWS", .tab = .schedule },
+        .{ .name = "TIMELINE", .tab = .timeline },
+        .{ .name = "LIVE", .tab = .live },
+        .{ .name = "BOOTH", .tab = .booth },
+        .{ .name = "REQUEST", .tab = .request },
     };
 
     pub const day_tabs = [_]DayTab{
@@ -1037,6 +1077,7 @@ pub const Model = struct {
         "buffering",          "elapsed_ms",          "band_levels",         "req_buffer",
         "req_name_buffer",    "retry",               "offline_streak",      "stream_failed",
         "stream_online",      "cover_sid",           "next_cover_id",       "req_id",
+        "cover_loading_id",   "cover_cache_buf",     "cache_dir",           "cache_dir_buf",
         "theme_scheme",       "station_colors",      "active_tab",          "sheet",
         "booth_filter",       "day_sel",             "req_phase",           "mini_open",
         "sleep_deadline_ms",  "sleep_minutes",       "now_wall_ms",         "latency_ms",
@@ -1093,7 +1134,7 @@ pub const Msg = union(enum) {
     got_np: native_sdk.EffectResponse,
     got_state: native_sdk.EffectResponse,
     got_themes: native_sdk.EffectResponse,
-    got_cover: native_sdk.EffectResponse,
+    got_cover: native_sdk.EffectImageResult,
     got_session: native_sdk.EffectResponse,
     got_schedule: native_sdk.EffectResponse,
     got_health: native_sdk.EffectResponse,
@@ -1166,6 +1207,15 @@ pub const Msg = union(enum) {
     // listener like (stage heart / mini heart / L key)
     press_like,
 
+    // tray-only window/app verbs (SDK 0.6.0: fx.showWindow / fx.quitApp — the
+    // model can drive these itself now, so no reserved host-side tray ids).
+    show_player,
+    quit_app,
+
+    // app-level lifecycle (SDK 0.6.0 on_lifecycle), not window focus
+    app_activated,
+    app_deactivated,
+
     // onboarding
     ob_pick_scheme: bool,
     ob_run_check,
@@ -1185,6 +1235,7 @@ pub const Msg = union(enum) {
         "chrome_changed", "toggle_play",   "vol_up",      "vol_down",
         "escape",        "mini_closed",    "tune_out",    "toggle_mini",
         "sleep_cycle",   "open_timeline",  "open_booth",
+        "show_player",   "quit_app",       "app_activated", "app_deactivated",
     };
 };
 
@@ -1500,12 +1551,51 @@ fn forgetRecent(model: *Model, url: []const u8) bool {
     return true;
 }
 
+// Forget the current cover art: kill any load still in flight and release the
+// registered pixels. Leaves `cover_sid` alone — the caller decides whether the
+// track identity is also stale. `cover_id` 0 is the honest state while nothing
+// is loaded: the stage falls back to the initials disc.
+fn dropCover(model: *Model, fx: *Effects) void {
+    if (model.cover_loading_id != 0) {
+        fx.cancel(model.cover_loading_id);
+        model.cover_loading_id = 0;
+    }
+    if (model.cover_id != 0) {
+        _ = fx.unregisterImage(model.cover_id);
+        model.cover_id = 0;
+    }
+}
+
+// Start loading the art for `sid`. One load at a time: the previous one is
+// cancelled, and the id is minted here (it is both the ImageId the stage draws
+// and the effect key) but only promoted to `cover_id` when the runtime reports
+// the pixels registered — a failed load leaves the initials disc standing.
+fn loadCover(model: *Model, fx: *Effects, sid: []const u8) void {
+    dropCover(model, fx);
+    const url = api.coverUrl(&model.cover_url_buf, model.base, sid) catch return;
+    const id = model.next_cover_id;
+    model.next_cover_id += 1;
+    // Cache into the OS caches dir when we know where that is. An unresolved
+    // cache_dir (or a path that will not fit the buffer) just means this load
+    // goes to the network like it always did — never a reason to skip the art.
+    const cache_path: []const u8 = if (model.cache_dir.len > 0)
+        native_sdk.imageCachePath(&model.cover_cache_buf, model.cache_dir, url) catch ""
+    else
+        "";
+    fx.loadImage(.{
+        .id = id,
+        .url = url,
+        .cache_path = cache_path,
+        .on_result = Effects.imageMsg(.got_cover),
+    });
+    model.cover_loading_id = id;
+}
+
 // Re-point everything at a (possibly new) station base: fresh stream + feeds,
 // nothing left over from the old one. `url` must already be normalized into
 // model.base by the caller.
 fn retune(model: *Model, fx: *Effects) void {
-    if (model.cover_id != 0) _ = fx.unregisterImage(model.cover_id);
-    model.cover_id = 0;
+    dropCover(model, fx);
     model.cover_sid = "";
     model.title = "Tuning in…";
     model.artist = "";
@@ -1558,7 +1648,7 @@ fn retune(model: *Model, fx: *Effects) void {
     fx.cancel(keys.fetch_state);
     fx.cancel(keys.fetch_session);
     fx.cancel(keys.fetch_themes);
-    fx.cancel(keys.fetch_cover);
+    // (the cover load, whose key is its ImageId, was cancelled by dropCover)
     fx.cancel(keys.fetch_like);
     fx.cancel(keys.post_like);
     fx.cancel(keys.fetch_schedule);
@@ -1746,15 +1836,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 if (t.subsonic_id) |sid| {
                     if (sid.len > 0 and !std.mem.eql(u8, sid, model.cover_sid)) {
                         setStr(&model.cover_sid_buf, &model.cover_sid, sid);
-                        // Drop the previous track's art right away — the
+                        // Drops the previous track's art right away — the
                         // initials disc is honest while the new cover loads.
-                        if (model.cover_id != 0) {
-                            _ = fx.unregisterImage(model.cover_id);
-                            model.cover_id = 0;
-                        }
-                        if (api.coverUrl(&model.cover_url_buf, model.base, sid)) |url| {
-                            fx.fetch(.{ .key = keys.fetch_cover, .url = url, .on_response = Effects.responseMsg(.got_cover) });
-                        } else |_| {}
+                        loadCover(model, fx, sid);
                         // The like state follows the airing: reset for every
                         // new song and ask the station again — the heart stays
                         // hidden until the answer confirms it's likeable.
@@ -1911,12 +1995,21 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             }
         },
         .got_cover => |r| {
-            if (r.outcome != .ok or r.status != 200 or r.truncated) return;
-            const nid = model.next_cover_id;
-            _ = fx.registerImageBytes(nid, r.body) catch return;
+            // Exactly one terminal per load. A result for anything but the
+            // current in-flight id is a late arrival the track already moved
+            // past: release its pixels if it managed to register them, and
+            // leave the art on screen alone.
+            if (r.id != model.cover_loading_id) {
+                if (r.outcome == .loaded) _ = fx.unregisterImage(r.id);
+                return;
+            }
+            model.cover_loading_id = 0;
+            // Every other outcome (404 on an unknown id, a dead network, a
+            // decode the platform codec refused) keeps cover_id at 0, which
+            // the stage already draws as the initials disc.
+            if (r.outcome != .loaded) return;
             if (model.cover_id != 0) _ = fx.unregisterImage(model.cover_id);
-            model.cover_id = nid;
-            model.next_cover_id += 1;
+            model.cover_id = r.id;
         },
         .got_session => |r| {
             if (r.outcome != .ok or r.status != 200) return;
@@ -2315,6 +2408,25 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .toggle_mini => model.mini_open = !model.mini_open,
         .expand_mini => model.mini_open = false,
         .mini_closed => model.mini_open = false,
+
+        // --------------------------------------------------- tray window verbs
+        // The player window closes to hidden (close_policy = .hide in app.zon),
+        // so the tray needs a real way back — and a real way out.
+        .show_player => fx.showWindow("main"),
+        .quit_app => fx.quitApp(),
+
+        // ------------------------------------------------------- app lifecycle
+        // Coming back to the app (from the tray, the Dock, cmd+tab) should show
+        // the truth immediately rather than up to one poll interval of stale
+        // track. The feed poll keeps running while we are away, so this is a
+        // freshness nudge, not a repair.
+        .app_activated => if (model.phase == .player) fetchFeed(model, fx),
+        // Going away stops the FFT feed (the SDK gates it on the window being
+        // visibly on screen), and that feed is also the visualizer's clock. Zero
+        // the bars on the way out so returning never shows a frozen pattern from
+        // whenever we were last on screen — they rise again from the first live
+        // frame.
+        .app_deactivated => model.band_levels = [_]f32{0} ** spectrum.band_count,
 
         // ------------------------------------------------------- sleep timer
         .sleep_pick => |min| {

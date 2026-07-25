@@ -9,7 +9,12 @@
     .icons = .{"assets/icon.png"},
     .platforms = .{ "macos", "linux", "windows" },
     .permissions = .{ "view", "command" },
-    .capabilities = .{ "native_views", "gpu_surfaces" },
+    // "tray": the app installs a status item (main.zig statusItem), which macOS
+    // and Windows both honor. Declaring it is also what makes the SDK accept
+    // close_policy "hide" on Windows — hiding there removes the taskbar entry,
+    // so a status item is the only way back. The GTK host has no tray and logs
+    // once.
+    .capabilities = .{ "native_views", "gpu_surfaces", "tray" },
     .shell = .{
         .windows = .{
             .{
@@ -22,6 +27,12 @@
                 .titlebar = "hidden_inset_tall",
                 .restore_state = false,
                 .restore_policy = "center_on_primary",
+                // See docs/sdk-notes.md: "hide" (the menu-bar-app close) is what
+                // macOS/Windows want, but the SDK refuses it at comptime on Linux
+                // (GTK host has no tray, so a hidden window would be stranded) and
+                // app.zon has no per-platform scoping. The macOS/Windows release
+                // workflows flip this to "hide" for their builds.
+                .close_policy = "quit",
                 .views = .{
                     .{ .label = "main-canvas", .kind = "gpu_surface", .fill = true, .role = "Player canvas", .accessibility_label = "Player", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },
                 },

@@ -24,11 +24,29 @@ const onboarding_markup = @embedFile("views/onboarding.native");
 const mini_markup = @embedFile("views/mini.native");
 const player_top_markup = @embedFile("views/player-top.native");
 const player_sidebar_markup = @embedFile("views/player-sidebar.native");
+const player_stage_markup = @embedFile("views/player-stage.native");
 const player_panel_markup = @embedFile("views/player-panel.native");
 const player_deck_markup = @embedFile("views/player-deck.native");
 const player_sheets_markup = @embedFile("views/player-sheets.native");
 
+// `main()` registers the app icon table before any view builds; the suite has
+// no main(), so without this every `icon="app:logo"` in the fragments below
+// resolved to the missing-icon fallback and the run buried the real output
+// under "unknown icon" warnings. Registering here makes the suite exercise the
+// same name lookup the app does — a fragment naming an icon that is not in
+// `main.app_icons` now shows up as a warning in `native test`, where it can be
+// noticed, instead of drawing a slashed circle at runtime.
+fn registerAppIcons() void {
+    const State = struct {
+        var done = false;
+    };
+    if (State.done) return;
+    canvas.icons.registerAppIcons(&main.app_icons);
+    State.done = true;
+}
+
 fn buildAndLayout(arena: std.mem.Allocator, source: []const u8, model: *const Model, w: f32, h: f32) !void {
+    registerAppIcons();
     var view = try AppMarkup.init(arena, source);
     var ui = AppUi.init(arena);
     const node = view.build(&ui, model) catch |err| {
@@ -50,10 +68,29 @@ test "player fragments build and lay out (every panel + sheets)" {
     var model: Model = .{};
     model.phase = .player;
     model.sidebar_open = true;
-    inline for (.{ player_top_markup, player_sidebar_markup, player_deck_markup }) |source| {
+    inline for (.{ player_top_markup, player_sidebar_markup, player_stage_markup, player_deck_markup }) |source| {
         var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
         defer arena_state.deinit();
         try buildAndLayout(arena_state.allocator(), source, &model, 980, 660);
+    }
+    // The stage again with every optional run present: real cover pixels, the
+    // like heart armed and liked, the token meter, and both metadata halves so
+    // meta_mood_sep renders. The default model exercises the empty arms above.
+    {
+        var arena_stage = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena_stage.deinit();
+        var loaded: Model = model;
+        loaded.cover_id = 1000;
+        loaded.like_available = true;
+        loaded.like_liked = true;
+        loaded.like_count = 42;
+        loaded.llm_tokens = 1_234_567;
+        loaded.genre = "SOUNDTRACK";
+        loaded.track_bpm = 99;
+        loaded.moods = "reflective";
+        loaded.energy = "low";
+        loaded.booth_line = "Blue Hour with Heer";
+        try buildAndLayout(arena_stage.allocator(), player_stage_markup, &loaded, 980, 660);
     }
     // Section panel: every tab branch must build.
     inline for (.{ .schedule, .timeline, .booth, .request }) |tab| {
@@ -81,7 +118,50 @@ test "player fragments build and lay out (every panel + sheets)" {
     }
 }
 
-test "composed player view (Zig stage + fragments) builds and lays out" {
+// The dial strip carries full words (SHOWS / TIMELINE / LIVE / BOOTH /
+// REQUEST), which is roughly half again the width the old SHWS/TML/BTH
+// abbreviations took. It is centered in its own full-width band, so it cannot
+// collide with the masthead — but it CAN outgrow the window, and the toolkit
+// has no responsive breakpoints to save it. The narrowest the window ever gets
+// is app.zon's min_width, so pin the check there. A live `native automate
+// resize` cannot verify this (the SDK relayouts a resized window only at the
+// next launch), which is exactly why it belongs in the suite.
+test "dial strip fits the minimum window width" {
+    const min_width: f32 = 880; // app.zon .shell.windows[0].min_width
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var model: Model = .{};
+    model.phase = .player;
+
+    registerAppIcons();
+    var view = try AppMarkup.init(arena, player_top_markup);
+    var ui = AppUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+    var nodes: [1024]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(tree.root, native_sdk.geometry.RectF.init(0, 0, min_width, 660), &nodes);
+
+    var dial_width: f32 = 0;
+    var tabs: usize = 0;
+    for (layout.nodes) |node| {
+        // Nothing in the masthead band may run off the right edge.
+        try testing.expect(node.frame.x + node.frame.width <= min_width + 0.5);
+        if (std.mem.eql(u8, node.widget.semantics.label, "Dial")) dial_width = node.frame.width;
+        if (node.widget.kind == .segmented_control) tabs += 1;
+    }
+    // All five stops present, lowered to segmented triggers (a `<button>` that
+    // stopped being a `<tabs>` child would silently lose the track treatment).
+    try testing.expectEqual(@as(usize, model_dial_stops_len), tabs);
+    try testing.expect(dial_width > 0);
+    // Comfortably inside the band rather than merely fitting: if a future
+    // rename pushes the strip past this, it needs a layout decision, not a
+    // slightly wider assertion.
+    try testing.expect(dial_width <= min_width * 0.6);
+}
+
+const model_dial_stops_len = @typeInfo(@TypeOf(Model.dial_stops)).array.len;
+
+test "composed player view (every fragment) builds and lays out" {
     const views = @import("views.zig");
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -94,6 +174,7 @@ test "composed player view (Zig stage + fragments) builds and lays out" {
     model.like_available = true;
     model.like_liked = true;
     model.like_count = 3;
+    registerAppIcons();
     var ui = AppUi.init(arena);
     const tree = try ui.finalize(views.rootView(&ui, &model));
     var nodes: [1024]canvas.WidgetLayoutNode = undefined;

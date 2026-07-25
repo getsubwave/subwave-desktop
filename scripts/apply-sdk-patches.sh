@@ -12,9 +12,9 @@ patch_file="$repo/patches/native-sdk-local.patch"
 [ -f "$patch_file" ] || { echo "error: $patch_file missing" >&2; exit 1; }
 
 # marker<TAB>file<TAB>description — one row per patch in native-sdk-local.patch.
+# (The 0.5.x canonicalizeComptime-quota and close-hides-window patches are gone:
+# both shipped upstream in SDK 0.6.0. See docs/sdk-notes.md.)
 patches=$(cat <<'ROWS'
-Raise the quota BEFORE computing	src/primitives/canvas/ui_markup.zig	canonicalizeComptime quota
-windowShouldClose	src/platform/macos/appkit_host.m	close-hides-window (macOS)
 native_sdk_surface_device_scale	src/platform/linux/gtk_host.c	fractional HiDPI scale (Linux)
 ROWS
 )

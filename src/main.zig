@@ -78,15 +78,18 @@ fn onKey(keyboard: canvas.WidgetKeyboardEvent) ?Msg {
     return null;
 }
 
-// Status-item menu selections arrive as named commands (source .tray).
-// "open-player" and "quit" are handled host-side (reserved tray ids 100/101
-// in the local SDK patch — unhide / terminate are outside the model's reach),
-// so they map to no Msg here.
+// Status-item menu selections arrive as named commands (source .tray). Every
+// row is a real Msg now: SDK 0.6.0 gave the model `fx.showWindow` / `fx.quitApp`,
+// so "Open player" and "Quit" no longer need the reserved host-side tray ids
+// the old local patch carved out (and they work on every platform's tray, not
+// just the patched macOS one).
 fn onCommand(name: []const u8) ?Msg {
     if (std.mem.eql(u8, name, "tune-toggle")) return .tune_toggle;
     if (std.mem.eql(u8, name, "toggle-mute")) return .toggle_mute;
     if (std.mem.eql(u8, name, "sleep-cycle")) return .sleep_cycle;
     if (std.mem.eql(u8, name, "toggle-mini")) return .toggle_mini;
+    if (std.mem.eql(u8, name, "open-player")) return .show_player;
+    if (std.mem.eql(u8, name, "quit")) return .quit_app;
     return null;
 }
 
@@ -125,18 +128,27 @@ fn statusItem(m: *const Model, scratch: *model.App.StatusItemScratch) model.App.
     n += 1;
     scratch.items[n] = .{ .id = 8, .separator = true };
     n += 1;
-    // Reserved ids (local SDK patch): 100 unhides + activates the app,
-    // 101 terminates — both before the command callback dispatches.
-    scratch.items[n] = .{ .id = 100, .label = "Open player", .command = "open-player" };
+    scratch.items[n] = .{ .id = 9, .label = "Open player", .command = "open-player" };
     n += 1;
-    scratch.items[n] = .{ .id = 9, .label = if (m.mini_open) "Close mini player" else "Mini player", .command = "toggle-mini" };
+    scratch.items[n] = .{ .id = 10, .label = if (m.mini_open) "Close mini player" else "Mini player", .command = "toggle-mini" };
     n += 1;
-    scratch.items[n] = .{ .id = 10, .separator = true };
+    scratch.items[n] = .{ .id = 11, .separator = true };
     n += 1;
-    scratch.items[n] = .{ .id = 101, .label = "Quit SUB/WAVE", .command = "quit" };
+    scratch.items[n] = .{ .id = 12, .label = "Quit SUB/WAVE", .command = "quit" };
     n += 1;
     const title: []const u8 = if (m.transport == .playing) "S/W ♪" else "S/W";
     return .{ .title = title, .items = scratch.items[0..n] };
+}
+
+// App-level lifecycle → model. Only the activate/deactivate edges are of
+// interest: `.frame` fires every frame and `.start`/`.stop` are already covered
+// by boot and teardown, so mapping them would be per-frame dispatch for nothing.
+fn onLifecycle(event: native_sdk.LifecycleEvent) ?Msg {
+    return switch (event) {
+        .activate => .app_activated,
+        .deactivate => .app_deactivated,
+        else => null,
+    };
 }
 
 // Hidden-titlebar chrome geometry → model (masthead pads around the traffic
@@ -193,6 +205,10 @@ const shell_windows = [_]native_sdk.ShellWindow{.{
     .min_height = 560,
     .restore_state = false,
     .titlebar = .hidden_inset_tall,
+    // NOTE: close_policy is NOT set here. Close handling is host window state
+    // fixed at create time, so the STARTUP window takes it from app.zon (the
+    // host creates the window before this scene loads); declaring it here would
+    // read as authoritative and never apply. See app.zon / docs/sdk-notes.md.
     .views = &shell_views,
 }};
 const shell_scene: native_sdk.ShellConfig = .{ .windows = &shell_windows };
@@ -212,6 +228,7 @@ pub fn main(init: std.process.Init) !void {
         .window_view = views.windowView,
         .on_key = onKey,
         .on_command = onCommand,
+        .on_lifecycle = onLifecycle,
         .on_chrome = onChrome,
         .sync = syncModel,
         .status_item = .{ .tooltip = "SUB/WAVE Player" },
@@ -269,6 +286,15 @@ test "key fallback maps transport, navigation, and dial keys" {
     try testing.expect(onKey(.{ .phase = .key_down, .key = "a" }) == null);
 }
 
+test "lifecycle maps only the activate/deactivate edges" {
+    try testing.expect(onLifecycle(.activate).? == .app_activated);
+    try testing.expect(onLifecycle(.deactivate).? == .app_deactivated);
+    // .frame arrives every frame — mapping it would dispatch a Msg per frame.
+    try testing.expect(onLifecycle(.frame) == null);
+    try testing.expect(onLifecycle(.start) == null);
+    try testing.expect(onLifecycle(.stop) == null);
+}
+
 test "status-item menu derives from the model and maps commands back" {
     var m: Model = .{};
     m.title = "Night Drive";
@@ -283,9 +309,9 @@ test "status-item menu derives from the model and maps commands back" {
     try testing.expectEqualStrings("Sleep timer: off", state.items[5].label);
     try testing.expect(onCommand(state.items[5].command).? == .sleep_cycle);
     try testing.expectEqualStrings("Open player", state.items[7].label);
-    try testing.expectEqual(@as(u32, 100), @as(u32, @intCast(state.items[7].id)));
-    try testing.expect(onCommand(state.items[7].command) == null); // host-side action
+    try testing.expect(onCommand(state.items[7].command).? == .show_player);
     try testing.expectEqualStrings("Quit SUB/WAVE", state.items[10].label);
+    try testing.expect(onCommand(state.items[10].command).? == .quit_app);
     try testing.expect(onCommand("toggle-mini").? == .toggle_mini);
     try testing.expect(onCommand("unknown") == null);
 }

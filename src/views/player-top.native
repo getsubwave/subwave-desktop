@@ -22,13 +22,18 @@
   </row>
   <separator/>
 
-  <!-- Dial band — toggle-chip strip (the accent chip is the needle) -->
+  <!-- Dial band — one segmented track, the accent-filled trigger is the needle.
+       `<button>` children of `<tabs>` lower to segmented_control triggers, so
+       the five stops read as a single control sitting on one muted rounded
+       wash instead of five chips floating in the band. The visible name is the
+       accessible name (no separate label). -->
   <row main="center" cross="center" padding="10">
-    <toggle-group gap="8" label="Dial">
+    <tabs label="Dial">
       <for each="dial_stops" as="s">
-        <toggle-button size="sm" selected="{s.tab == active_tab}" on-toggle="pick_tab:{s.tab}" label="{s.label}">{s.abbr}</toggle-button>
+        <button size="sm" selected="{s.tab == active_tab}" on-press="pick_tab:{s.tab}"
+                accent="accent" accent-foreground="accent_text">{s.name}</button>
       </for>
-    </toggle-group>
+    </tabs>
   </row>
   <separator/>
 

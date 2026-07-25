@@ -61,6 +61,16 @@ jobs:
 
       - uses: ./.github/actions/setup-native
 
+      - name: Match the release close_policy
+        # The macOS and Windows release legs flip app.zon's close_policy to
+        # "hide" (the menu-bar-app close) before they build, so do it here too:
+        # otherwise every push validates the Linux-safe "quit" and a break in
+        # the shape that actually ships surfaces at release time. Same class of
+        # miss as the Windows MP3-only bug. Linux keeps "quit" — the SDK
+        # refuses "hide" on the GTK host at comptime.
+        if: runner.os != 'Linux'
+        run: ./scripts/set-close-policy.sh hide
+
       - name: Check markup and manifest
         run: native check
 
