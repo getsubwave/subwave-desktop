@@ -21,8 +21,22 @@ patch_file="$repo/patches/native-sdk-local.patch"
 
 # Read the version off the package being patched, not off `native --version`:
 # this is the exact tree the hunks land in.
-installed_version="$(node -p "require('$sdk/package.json').version" 2>/dev/null || true)"
-[ -n "$installed_version" ] || { echo "error: could not read a version from $sdk/package.json" >&2; exit 1; }
+#
+# The path goes through the ENVIRONMENT, never interpolated into the JS: on
+# Windows `npm root -g` answers a backslash path (C:\npm\prefix\node_modules),
+# and inside a string literal its separators are escape sequences — \n became a
+# newline, require() got a mangled path, and this check failed the whole
+# Windows leg. Keep node's error too; swallowing it is what turned a one-line
+# escaping bug into a blank "could not read a version".
+if ! installed_version="$(SDK_PACKAGE_JSON="$sdk/package.json" node -p "require(process.env.SDK_PACKAGE_JSON).version" 2>&1)"; then
+    echo "error: could not read the installed SDK version from $sdk/package.json" >&2
+    printf '       node: %s\n' "$installed_version" >&2
+    exit 1
+fi
+case "$installed_version" in
+    [0-9]*.[0-9]*.[0-9]*) ;;
+    *) echo "error: $sdk/package.json gave an unexpected version '$installed_version'" >&2; exit 1 ;;
+esac
 
 if [ "$installed_version" != "$patch_sdk_version" ]; then
     echo "error: installed @native-sdk/cli is $installed_version, but" >&2
