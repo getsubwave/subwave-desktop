@@ -8,9 +8,41 @@ native test   # verify
 ```
 
 The unified diff lives at `patches/native-sdk-local.patch`, generated against
-the pristine 0.6.0 npm tarball. If a future SDK version shifts the context
-lines, regenerate it from the section below. Symptom of a lost patch: pixelated
-text on a fractional-scale Linux display.
+the pristine 0.6.0 npm tarball. Symptom of a lost patch: pixelated text on a
+fractional-scale Linux display.
+
+## Two version pins, and they must agree
+
+- `.github/actions/setup-native/action.yml` → `native-sdk-version`: what CI
+  **installs**.
+- `scripts/apply-sdk-patches.sh` → `patch_sdk_version`: what the patch was
+  **generated against**. The script reads the installed package's version and
+  refuses to run on anything else — a unified diff carries no version of its
+  own, so `patch` would otherwise land the hunks on a different release by
+  offset or fuzz and report success against a tree nobody checked.
+
+Upgrading the SDK, in order:
+
+```bash
+npm i -g @native-sdk/cli@<new>
+./scripts/apply-sdk-patches.sh          # fails: patch says 0.6.0, install says <new>
+```
+
+That failure is the prompt to do the real work: check whether the patch is
+still needed at all (upstream may have fixed it — two of the three were fixed
+in 0.6.0), and if it is, regenerate it against the new tarball:
+
+```bash
+npm pack @native-sdk/cli@<new> && tar xzf native-sdk-cli-<new>.tgz    # pristine tree
+#   apply the old hunks to a copy, diff the two, drop the timestamp lines
+#   from the +++/--- header so the checked-in patch stays stable
+```
+
+Then bump `patch_sdk_version` AND `native-sdk-version`, and run `native test`.
+Skipping the second bump is how CI ends up installing an SDK the app no longer
+builds against — which is exactly what happened on the 0.6.0 upgrade: the pin
+stayed at 0.5.3 and all four jobs failed on `<image>`, an element that release
+did not have.
 
 ## What SDK 0.6.0 took over (patches deleted 2026-07-25)
 

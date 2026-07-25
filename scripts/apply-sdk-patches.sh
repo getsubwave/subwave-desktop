@@ -4,12 +4,39 @@
 # See docs/sdk-notes.md for what each patch does and why.
 set -euo pipefail
 
+# The SDK version patches/native-sdk-local.patch was generated against. A
+# unified diff carries no version of its own, and `patch` will happily land
+# hunks on a DIFFERENT release by offset or fuzz — quietly patching the wrong
+# lines, or reporting success against a tree the app can no longer build. Bump
+# this together with .github/actions/setup-native's native-sdk-version whenever
+# the patch is regenerated (docs/sdk-notes.md walks through it).
+patch_sdk_version="0.6.0"
+
 sdk="$(npm root -g)/@native-sdk/cli"
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 patch_file="$repo/patches/native-sdk-local.patch"
 
 [ -d "$sdk" ] || { echo "error: @native-sdk/cli not found at $sdk" >&2; exit 1; }
 [ -f "$patch_file" ] || { echo "error: $patch_file missing" >&2; exit 1; }
+
+# Read the version off the package being patched, not off `native --version`:
+# this is the exact tree the hunks land in.
+installed_version="$(node -p "require('$sdk/package.json').version" 2>/dev/null || true)"
+[ -n "$installed_version" ] || { echo "error: could not read a version from $sdk/package.json" >&2; exit 1; }
+
+if [ "$installed_version" != "$patch_sdk_version" ]; then
+    echo "error: installed @native-sdk/cli is $installed_version, but" >&2
+    echo "       patches/native-sdk-local.patch was generated against $patch_sdk_version." >&2
+    echo >&2
+    echo "Applying it anyway would land the hunks by offset/fuzz on a tree nobody" >&2
+    echo "checked. Pick one:" >&2
+    echo "  - install the expected SDK:  npm i -g @native-sdk/cli@$patch_sdk_version" >&2
+    echo "  - or move to $installed_version: confirm the patch is still needed," >&2
+    echo "    regenerate it against the new tarball, then bump BOTH" >&2
+    echo "    patch_sdk_version here and native-sdk-version in" >&2
+    echo "    .github/actions/setup-native/action.yml (docs/sdk-notes.md)." >&2
+    exit 1
+fi
 
 # marker<TAB>file<TAB>description — one row per patch in native-sdk-local.patch.
 # (The 0.5.x canonicalizeComptime-quota and close-hides-window patches are gone:
