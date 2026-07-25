@@ -1,6 +1,6 @@
 ---
 name: subwave-desktop-release
-description: Cut and publish a release of the SUB/WAVE desktop player — version bump, macOS DMGs (Apple Silicon + Intel) + Windows zip via scripts/make-release.sh, GitHub release, and announcement drafts. Use this whenever the user asks to release, ship, publish, or tag a new version of the desktop app, build a dmg/installer/windows build, upload release artifacts, or draft a release announcement — even if they only mention one piece (e.g. "make a new dmg" or "bump the version and ship it").
+description: Cut and publish a release of the SUB/WAVE desktop player — version bump, then macOS DMGs (Apple Silicon + Intel), a Windows zip and a Linux tarball built by CI via scripts/make-release.sh, GitHub release, and announcement drafts. Use this whenever the user asks to release, ship, publish, or tag a new version of the desktop app, build a dmg/installer/windows/linux build, upload release artifacts, or draft a release announcement — even if they only mention one piece (e.g. "make a new dmg" or "bump the version and ship it").
 ---
 
 # SUB/WAVE Desktop release
@@ -38,14 +38,24 @@ no longer needs a Mac.
   publishing. Leave `.claude/`, `design-reference/`, and `dist/` alone; they're
   local by design.
 - `./scripts/apply-sdk-patches.sh` — the installed `@native-sdk/cli` loses the
-  local patches on EVERY npm upgrade, silently. The script is idempotent and
+  local patch on EVERY npm upgrade, silently. The script is idempotent and
   the release script also runs it, but checking first gives a clearer error.
-  Symptoms of lost patches: `native build` fails in `ui_markup.zig` around
-  line 1014, or the red close button quits the app. Details and upstream
-  issue links: `docs/sdk-notes.md` (vercel-labs/native#148, #149).
+  As of SDK 0.6.0 there is exactly ONE patch left, the Linux fractional-HiDPI
+  fix (vercel-labs/native#156); its symptom is pixelated text on a
+  fractional-scale Linux display, and integer scales look fine, so it hides on
+  a second machine. Details: `docs/sdk-notes.md`.
+- **Two SDK version pins must agree**, and a mismatch is a release-stopper:
+  `native-sdk-version` in `.github/actions/setup-native` (what CI installs)
+  and `patch_sdk_version` in `scripts/apply-sdk-patches.sh` (what the patch
+  was generated against). The patch script reads the installed package's
+  version and refuses to run on anything else. On the 0.6.0 upgrade the CI pin
+  was left at 0.5.3 and every leg died several steps later on markup the older
+  SDK could not parse — that gate exists so the next one fails at setup with
+  both versions named.
 - If the SDK version changed since the last release (`native --version` vs
-  what docs/sdk-notes.md mentions), run `native test` early and check the
-  upstream issues — a fix may have shipped that lets a patch retire.
+  `docs/sdk-notes.md`), run `native test` early and check the upstream issues —
+  a fix may have shipped that lets a patch retire. This is not theoretical:
+  0.6.0 retired two of the three patches at once.
 
 ### 2. Version
 
@@ -73,8 +83,11 @@ the previous tag's assets, which is only right for re-cutting a botched build.
   used by v0.1.0 — what's new (concrete, feature-level), a download table
   with per-platform caveats, and build-from-source including the SDK patch
   step. Keep the honest flags: macOS ad-hoc = "right-click → Open on first
-  launch"; Windows = "cross-compiled, not yet tested on real hardware —
-  reports welcome" until someone actually has.
+  launch"; Linux = needs glibc 2.39+ and GTK4, older distros build from
+  source. The old Windows caveat ("cross-compiled, not yet tested on real
+  hardware") is retired — `release-windows.yml` builds AND launches the app on
+  a real Windows runner. Don't reinstate it, but don't overclaim either: CI
+  launching the binary is not the same as a person listening on it.
 
 ### 4. Verify before telling the user it's done
 
@@ -119,16 +132,30 @@ marketing gloss) and approved examples live there.
   The smoke test cannot catch it — it runs on the CPU that built the binary.
   `scripts/audit-cpu-baseline.sh` disassembles each shipped x86-64 artifact
   in CI and fails the leg if any AVX register reference appears.
-- **SDK patches vanish on upgrade** — see preflight. This has already
-  happened once (0.5.2 → 0.5.3 wiped both patches mid-day).
-- **The app keeps running from the tray after its window closes** (that's the
-  close-hides patch working). `pkill -f zig-out/bin/subwave-desktop` before
-  builds if a stale instance holds the binary.
-- Windows builds cross-compile from macOS (`-Dtarget=x86_64-windows-gnu`,
-  zig's mingw headers) and package with
-  `native package --target windows --binary zig-out/bin/subwave-desktop.exe` —
-  no Windows machine needed to build, but one IS needed to honestly claim it
-  works.
+- **The SDK patch vanishes on upgrade** — see preflight. This has already
+  happened (0.5.2 → 0.5.3 wiped the patches mid-day, back when there were
+  two).
+- **Close-to-hide is `app.zon`, not a patch, and it is per-target.** SDK 0.6.0
+  made it a manifest field, and it is validated against the BUILD TARGET at
+  comptime: macOS allows `"hide"`, Windows allows it with the `"tray"`
+  capability, Linux refuses it outright (the GTK host has no tray, so a hidden
+  window would be stranded). `app.zon` has no per-platform scoping, so it ships
+  the Linux-safe `"quit"` and **`scripts/set-close-policy.sh hide` flips it on
+  the macOS and Windows legs** of `ci.yml` and both release workflows. Keep the
+  `.close_policy = "…"` shape in `app.zon` intact — the script asserts on it
+  and fails rather than silently shipping the wrong close behavior. Consequence
+  for announcements: the window keeps playing when closed on macOS and Windows,
+  and QUITS on Linux. Say so; it reads as a bug otherwise.
+- **A stale instance can hold the binary** before a build. On macOS/Windows the
+  app survives its window closing, so it may be running invisibly. Kill it by
+  exact name — `pgrep -x subwave-desktop` then kill those pids. Avoid
+  `pkill -f zig-out/bin/subwave-desktop`: the pattern matches the killing
+  shell's own command line and takes the tool session down with it.
+- All four artifacts build NATIVELY on their own runner, Windows included
+  (`windows-latest`). There is no cross-compile step any more — an older note
+  here described building the Windows exe from a Mac with
+  `-Dtarget=x86_64-windows-gnu`, which is no longer how any shipped binary is
+  produced.
 - **All four artifacts are built by CI**, one workflow per platform
   (`release-macos.yml` — a two-leg matrix producing both DMGs,
   `release-windows.yml`, `release-linux.yml`), triggered by
