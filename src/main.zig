@@ -2,6 +2,7 @@
 //! model.zig; the views are views/*.native (see views.zig).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const runner = @import("runner");
 const native_sdk = @import("native_sdk");
 const model = @import("model.zig");
@@ -160,6 +161,200 @@ fn onChrome(chrome: native_sdk.platform.WindowChrome) ?Msg {
     } };
 }
 
+// --------------------------------------------------- Discord RPC helper mode
+// The app re-invokes its own binary with argv[1] == "--discord-rpc-helper"
+// (see model.zig's respawnDiscordHelper) as a short-lived child process that
+// owns the raw Discord IPC socket I/O. Kept out of the main event loop
+// because this is a genuinely separate process, not an SDK effect.
+fn isDiscordHelperMode(init: std.process.Init) bool {
+    const argv = init.minimal.args.toSlice(init.arena.allocator()) catch return false;
+    return argv.len > 1 and std.mem.eql(u8, argv[1], "--discord-rpc-helper");
+}
+
+// Reads one activity JSON payload from stdin, connects to Discord's local
+// IPC endpoint, completes the handshake, sends SET_ACTIVITY, prints one
+// status line, then blocks (reading from the connection) until fx.cancel
+// SIGKILLs this process — that's what keeps the presence visible, since
+// Discord clears it the instant the connection closes.
+//
+// Transport differs by platform (Discord's choice, not ours): macOS/Linux
+// expose the IPC endpoint as a Unix domain socket file under
+// $TMPDIR/$XDG_RUNTIME_DIR (discord_rpc.resolveSocketPath), but Windows has
+// no AF_UNIX equivalent for this — Discord instead listens on a named pipe
+// at \\.\pipe\discord-ipc-N, the same convention every third-party Discord
+// RPC client on Windows relies on. Once open, a named pipe HANDLE behaves
+// like an ordinary file handle for read/write purposes, and
+// std.Io.Dir.openFileAbsolute already lowers an absolute `\\.\pipe\...`
+// path to the right NtCreateFile call on Windows — so the Windows branch
+// only has to pick the transport; the handshake/SET_ACTIVITY/blocking-read
+// protocol logic below (runDiscordSession) is written once and shared
+// across both platforms via a std.Io.net.Stream on macOS/Linux or a
+// std.Io.File on Windows, since both expose the same reader()/writer()/
+// close() shape.
+fn runDiscordHelper(init: std.process.Init) void {
+    const io = init.io;
+    const alloc = init.arena.allocator();
+    const stdout = std.Io.File.stdout();
+
+    var stdin_buf: [64]u8 = undefined;
+    var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buf);
+    const request_json = stdin_reader.interface.allocRemaining(alloc, .limited(2048)) catch {
+        stdout.writeStreamingAll(io, "ERROR: bad payload\n") catch {};
+        return;
+    };
+
+    if (builtin.os.tag == .windows) {
+        const pipe = connectDiscordPipe(io) orelse {
+            stdout.writeStreamingAll(io, "ERROR: Discord not running\n") catch {};
+            return;
+        };
+        defer pipe.close(io);
+        runDiscordSession(io, alloc, stdout, request_json, pipe);
+        return;
+    }
+
+    const discord_rpc = @import("discord_rpc.zig");
+    var path_buf: [256]u8 = undefined;
+    const socket_path = discord_rpc.resolveSocketPath(
+        &path_buf,
+        init.environ_map.get("XDG_RUNTIME_DIR"),
+        init.environ_map.get("TMPDIR"),
+        init.environ_map.get("TMP"),
+    ) catch {
+        stdout.writeStreamingAll(io, "ERROR: no socket path\n") catch {};
+        return;
+    };
+
+    const address = std.Io.net.UnixAddress.init(socket_path) catch {
+        stdout.writeStreamingAll(io, "ERROR: bad socket path\n") catch {};
+        return;
+    };
+    const stream = address.connect(io) catch {
+        stdout.writeStreamingAll(io, "ERROR: Discord not running\n") catch {};
+        return;
+    };
+    defer stream.close(io);
+    runDiscordSession(io, alloc, stdout, request_json, stream);
+}
+
+// Windows-only: Discord's RPC server listens on \\.\pipe\discord-ipc-N,
+// trying N in sequence (0, 1, 2, ...) until one is live — the same
+// discovery convention every other Discord RPC client uses on Windows,
+// since there's no env-var-based lookup the way there is for the
+// macOS/Linux socket path. Returns the first pipe that opens; null if none
+// of the first 10 do (Discord not running, or not accepting RPC clients).
+fn connectDiscordPipe(io: std.Io) ?std.Io.File {
+    var name_buf: [32]u8 = undefined;
+    var n: u8 = 0;
+    while (n < 10) : (n += 1) {
+        const path = std.fmt.bufPrint(&name_buf, "\\\\.\\pipe\\discord-ipc-{d}", .{n}) catch unreachable;
+        const pipe = std.Io.Dir.openFileAbsolute(io, path, .{ .mode = .read_write }) catch continue;
+        return pipe;
+    }
+    return null;
+}
+
+// The actual Discord IPC protocol sequence, identical on every platform:
+// parse the raw request from stdin, write the opcode-0 handshake, wait for
+// the opcode-1 READY dispatch (read + discard by header length), build the
+// real activity JSON (converting elapsed_ms to absolute timestamps using
+// this process's real clock) and write it as the opcode-1 SET_ACTIVITY
+// frame, announce readiness on stdout, then block reading until the
+// connection closes or errors. `conn` is a std.Io.net.Stream (macOS/Linux)
+// or a std.Io.File (Windows) — both expose reader()/writer()/close() with
+// the same shape, so this is written once and shared rather than
+// duplicated per platform.
+fn runDiscordSession(io: std.Io, alloc: std.mem.Allocator, stdout: std.Io.File, request_json: []const u8, conn: anytype) void {
+    const discord_rpc = @import("discord_rpc.zig");
+    const json = @import("json.zig");
+    const pid: i32 = @bitCast(@as(u32, if (builtin.os.tag == .windows) std.os.windows.GetCurrentProcessId() else std.c.getpid()));
+
+    // model.zig's update() is a pure reducer with no wall clock, so it
+    // sends the raw display fields + elapsed_ms/duration_s (see
+    // discord_rpc.ActivityRequest) instead of a ready-made activity object.
+    const parsed = json.parse(discord_rpc.ActivityRequest, alloc, request_json) catch {
+        stdout.writeStreamingAll(io, "ERROR: bad payload\n") catch {};
+        return;
+    };
+    const req = parsed.value;
+
+    var frame_buf: [2560]u8 = undefined;
+    const handshake = discord_rpc.encodeHandshakeFrame(&frame_buf, discord_rpc.client_id) catch {
+        stdout.writeStreamingAll(io, "ERROR: handshake encode failed\n") catch {};
+        return;
+    };
+    var write_buf: [512]u8 = undefined;
+    var writer = conn.writer(io, &write_buf);
+    writer.interface.writeAll(handshake) catch {
+        stdout.writeStreamingAll(io, "ERROR: handshake write failed\n") catch {};
+        return;
+    };
+    writer.interface.flush() catch {};
+
+    // The READY dispatch (opcode 1, a JSON event) — read and discard the
+    // header + body; a successful read this far means Discord accepted
+    // the handshake.
+    var read_buf: [4096]u8 = undefined;
+    var reader = conn.reader(io, &read_buf);
+    var header: [8]u8 = undefined;
+    reader.interface.readSliceAll(&header) catch {
+        stdout.writeStreamingAll(io, "ERROR: no handshake response\n") catch {};
+        return;
+    };
+    const ready_len = std.mem.readInt(u32, header[4..8], .little);
+    reader.interface.discardAll(ready_len) catch {};
+
+    // Convert elapsed_ms to an absolute epoch-ms start (and end, if
+    // duration is known) using this process's real clock, right before
+    // sending — the anchor is only ever computed at the moment we're
+    // actually about to tell Discord "this is playing now", not on every
+    // now-playing poll (see buildActivityRequestJson's doc comment for why
+    // that matters).
+    const now_ms = std.Io.Clock.real.now(io).toMilliseconds();
+    const start_ms = now_ms - req.elapsed_ms;
+    const timestamps: discord_rpc.Timestamps = .{
+        .start_ms = start_ms,
+        .end_ms = if (req.duration_s > 0) start_ms + req.duration_s * 1000 else null,
+    };
+    var activity_body_buf: [1024]u8 = undefined;
+    const activity_json = discord_rpc.buildActivityJson(&activity_body_buf, req.details, req.state, req.url, req.cover_url, now_ms, timestamps) catch {
+        stdout.writeStreamingAll(io, "ERROR: activity build failed\n") catch {};
+        return;
+    };
+
+    // pid must be a real, currently-running process id — Discord clients
+    // silently drop SET_ACTIVITY when it doesn't correspond to one (an
+    // anti-spoofing check so a stale/ghost activity can't outlive the
+    // process that set it). Use this helper's own pid, not the parent
+    // app's: this process is the one holding the IPC connection open.
+    const activity_frame = discord_rpc.encodeActivityFrame(&frame_buf, pid, activity_json) catch {
+        stdout.writeStreamingAll(io, "ERROR: activity encode failed\n") catch {};
+        return;
+    };
+    writer.interface.writeAll(activity_frame) catch {
+        stdout.writeStreamingAll(io, "ERROR: activity write failed\n") catch {};
+        return;
+    };
+    writer.interface.flush() catch {};
+
+    stdout.writeStreamingAll(io, "READY\n") catch {};
+
+    // Block until killed (fx.cancel SIGKILLs this process) — closing the
+    // connection ourselves would clear the presence early. Uses
+    // readSliceAll (not readSliceShort): a graceful peer close (e.g. the
+    // user quits Discord) is a 0-byte OS read, which the reader's readVec
+    // turns into error.EndOfStream — readSliceAll re-raises that (its
+    // ShortError includes EndOfStream) so `catch break` actually fires and
+    // this function returns, letting the spawn's on_exit reach model.zig.
+    // readSliceShort's ShortError deliberately excludes EndOfStream (short
+    // reads aren't meant to error), so it would instead return an Ok(0)
+    // forever and spin this loop tight without ever returning.
+    while (true) {
+        var discard: [256]u8 = undefined;
+        reader.interface.readSliceAll(&discard) catch break;
+    }
+}
+
 // Mirror runtime-owned widget values into the model before update/rebuild:
 // the transport deck's volume slider is the one continuous control.
 fn syncModel(m: *Model, layout: canvas.WidgetLayoutTree) void {
@@ -214,6 +409,7 @@ const shell_windows = [_]native_sdk.ShellWindow{.{
 const shell_scene: native_sdk.ShellConfig = .{ .windows = &shell_windows };
 
 pub fn main(init: std.process.Init) !void {
+    if (isDiscordHelperMode(init)) return runDiscordHelper(init);
     canvas.icons.registerAppIcons(&app_icons);
 
     const app_state = try model.App.create(std.heap.page_allocator, .{
@@ -242,6 +438,8 @@ pub fn main(init: std.process.Init) !void {
     // SUBWAVE_STATION_URL env override (wins over the persisted station).
     settings.resolvePath(&app_state.model, init.environ_map);
     settings.loadFromDisk(&app_state.model, init.io);
+    const exe_len = std.process.executablePath(init.io, &app_state.model.self_exe_path_buf) catch 0;
+    app_state.model.self_exe_path = app_state.model.self_exe_path_buf[0..exe_len];
     if (init.environ_map.get("SUBWAVE_STATION_URL")) |env_station| {
         if (env_station.len > 0) {
             if (api.normalizeBase(&app_state.model.base_buf, env_station)) |b| {

@@ -53,6 +53,17 @@
             </row>
           </row>
         </if>
+        <use template="section-label" title="INTEGRATIONS"/>
+        <row on-press="open_discord" main="space_between" cross="center" padding="10" label="Discord Rich Presence">
+          <row gap="10" cross="center">
+            <icon name="app:radio" width="16" height="16" foreground="text_muted"/>
+            <text>Discord Rich Presence</text>
+          </row>
+          <row gap="6" cross="center">
+            <text size="sm" foreground="text_muted">{discord_row_value}</text>
+            <icon name="chevron-right" width="14" height="14" foreground="text_muted"/>
+          </row>
+        </row>
         <use template="section-label" title="SHORTCUTS"/>
         <card padding="12">
           <grid columns="2" gap="10">
@@ -178,6 +189,37 @@
             <separator/>
           </for>
         </column>
+      </column>
+    </sheet>
+  </if>
+
+  <!-- Discord Rich Presence sheet -->
+  <if test="{sheet_discord}">
+    <sheet text="INTEGRATIONS / DISCORD" on-dismiss="close_sheet">
+      <column gap="10" padding="4">
+        <spacer height="30"/>
+        <row gap="8" cross="center">
+          <button variant="ghost" size="sm" icon="chevron-left" label="Back panel" on-press="open_panel"/>
+          <text size="sm" foreground="text_muted">BACK PANEL</text>
+        </row>
+        <if test="{discord_configured}">
+          <row on-press="toggle_discord" main="space_between" cross="center" padding="10" label="Discord Rich Presence">
+            <column gap="2">
+              <text>Discord Rich Presence</text>
+              <text size="sm" foreground="text_muted">Share what's playing on your Discord profile</text>
+            </column>
+            <if test="{discord_enabled}">
+              <icon name="check" width="15" height="15" foreground="accent"/>
+            </if>
+          </row>
+          <if test="{discord_enabled}">
+            <separator/>
+            <text size="sm" foreground="text_muted">{discord_status_line}</text>
+          </if>
+        </if>
+        <else>
+          <text size="sm" foreground="text_muted" wrap="true">Discord Rich Presence — not configured for this build. Set client_id in discord.zon to enable it.</text>
+        </else>
       </column>
     </sheet>
   </if>

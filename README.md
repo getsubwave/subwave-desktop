@@ -52,6 +52,11 @@ repo from the main `subwave` monorepo; it tracks the same station HTTP API.
 - **Settings persistence** — volume / theme override / stream format / station
   (+ name) / recents survive restarts (`settings.json` in the OS per-app
   config dir), saved debounced + serialized via `fx.writeFile`.
+- **Discord Rich Presence** — opt-in; shows the current track/artist (title
+  clickable through to the station, cover art included) on your Discord
+  profile while the SDK's `fx.spawn` drives a small self-relaunched helper
+  (`--discord-rpc-helper`) that owns the local Discord IPC socket. Requires
+  a client ID in `discord.zon` (see below) — ships disabled otherwise.
 
 ## Layout
 
@@ -109,6 +114,22 @@ native build -Dautomation=true
 ./zig-out/bin/subwave-desktop &
 native automate wait && native automate screenshot main-canvas
 ```
+
+### Discord Rich Presence setup (optional)
+
+Discord Rich Presence needs an application client ID. Create one at
+[discord.com/developers/applications](https://discord.com/developers/applications),
+then fill it into `src/discord.zon`:
+
+```zig
+.{
+    .client_id = "your-application-id-here",
+}
+```
+
+Leave it empty (the checked-in default) to ship without the feature — the
+settings sheet shows it as unconfigured rather than hiding it, and no
+Discord IPC connection is ever attempted.
 
 ## Codecs & the format picker
 

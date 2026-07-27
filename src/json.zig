@@ -235,6 +235,7 @@ pub const Settings = struct {
     station: ?[]const u8 = null,
     stationName: ?[]const u8 = null,
     recents: ?[]SettingsRecent = null,
+    discordEnabled: ?bool = null,
 };
 
 // Parse `body` into T, tolerating unknown/extra fields. Caller owns the result
