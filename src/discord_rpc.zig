@@ -21,14 +21,23 @@ const discord_config = @import("discord.zon");
 pub const client_id: []const u8 = discord_config.client_id;
 pub const configured_at_build: bool = client_id.len > 0;
 
-/// discord-ipc-0's home varies by platform; this is the fallback chain
-/// every third-party Discord RPC client uses. Parameters are passed in
+/// The socket's home varies by platform; the base-dir fallback chain here
+/// is the one every third-party Discord RPC client uses. `subdir` ("" for
+/// a regular install; see socket_subdirs) and `n` (0-9) pick the candidate
+/// within that base — main.zig's helper scans subdir x n the same way the
+/// Windows named-pipe path scans discord-ipc-N. Parameters are passed in
 /// explicitly (rather than read from the environment here) so this stays
 /// pure and testable.
-pub fn resolveSocketPath(buf: []u8, xdg_runtime_dir: ?[]const u8, tmpdir: ?[]const u8, tmp: ?[]const u8) ![]const u8 {
+pub fn resolveSocketPath(buf: []u8, xdg_runtime_dir: ?[]const u8, tmpdir: ?[]const u8, tmp: ?[]const u8, subdir: []const u8, n: u8) ![]const u8 {
     const base = nonEmpty(xdg_runtime_dir) orelse nonEmpty(tmpdir) orelse nonEmpty(tmp) orelse "/tmp";
-    return std.fmt.bufPrint(buf, "{s}/discord-ipc-0", .{base});
+    return std.fmt.bufPrint(buf, "{s}/{s}discord-ipc-{d}", .{ base, subdir, n });
 }
+
+/// Where Discord parks the socket relative to the base dir: directly in it
+/// for a regular install, or inside the app's own runtime subdirectory for
+/// sandboxed Flatpak/Snap installs (both remap the socket rather than
+/// exposing it at the top level, so a plain discord-ipc-N scan misses them).
+pub const socket_subdirs = [_][]const u8{ "", "app/com.discordapp.Discord/", "snap.discord/" };
 
 fn nonEmpty(v: ?[]const u8) ?[]const u8 {
     if (v) |s| {
@@ -43,9 +52,10 @@ fn nonEmpty(v: ?[]const u8) ?[]const u8 {
 // module stays a leaf with no dependency on model.zig.
 fn jsonEscape(buf: []u8, s: []const u8) []const u8 {
     var w: usize = 0;
-    for (s) |ch| {
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
         if (w + 2 > buf.len) break;
-        switch (ch) {
+        switch (s[i]) {
             '"' => {
                 buf[w] = '\\';
                 buf[w + 1] = '"';
@@ -63,10 +73,21 @@ fn jsonEscape(buf: []u8, s: []const u8) []const u8 {
             },
             0x00...0x09, 0x0b...0x1f => {},
             else => {
-                buf[w] = ch;
+                buf[w] = s[i];
                 w += 1;
             },
         }
+    }
+    // On truncation, never leave a split multi-byte UTF-8 sequence at the
+    // end — invalid UTF-8 inside the JSON gets the whole SET_ACTIVITY
+    // silently rejected. If the first unprocessed byte is a continuation
+    // byte we stopped mid-codepoint: drop the partial codepoint's
+    // already-written bytes (bytes >= 0x80 always map 1:1 through the else
+    // arm, so input distance equals output distance).
+    if (i < s.len and s[i] & 0xC0 == 0x80) {
+        var j = i;
+        while (j > 0 and s[j] & 0xC0 == 0x80) j -= 1;
+        w -= @min(w, i - j);
     }
     return buf[0..w];
 }
@@ -103,7 +124,10 @@ pub const Timestamps = struct { start_ms: i64, end_ms: ?i64 = null };
 /// settings surface. `url` gets you the same click-through via the details
 /// line and cover art instead.
 pub fn buildActivityJson(buf: []u8, details: []const u8, state: []const u8, url: []const u8, cover_url: []const u8, created_at_ms: i64, timestamps: ?Timestamps) ![]const u8 {
-    var esc: [4][160]u8 = undefined;
+    // 256 so URLs never truncate: base_buf/cover_url_buf are [256]u8, and a
+    // cut-off details_url/large_url is a broken link. Overlong title/artist
+    // text merely truncates for display, which is acceptable.
+    var esc: [4][256]u8 = undefined;
     var w = std.Io.Writer.fixed(buf);
     try w.print("{{\"type\":2,\"status_display_type\":2,\"instance\":false,\"created_at\":{d},\"details\":\"{s}\",\"state\":\"{s}\"", .{
         created_at_ms,
@@ -157,14 +181,15 @@ pub fn buildActivityJson(buf: []u8, details: []const u8, state: []const u8, url:
 /// full respawn+reconnect of the helper on every now-playing poll instead
 /// of only on a real change (track, label, or station).
 ///
-/// A generous size cap for one buildActivityRequestJson output — model.zig
-/// sizes its buffers (the persisted signature field and its two scratch
-/// buffers) off this one constant rather than picking three separate
-/// numbers that would all just need to agree anyway. main.zig's stdin read
-/// limit and encodeActivityFrame's body buffer (both 2048) must stay
-/// comfortably larger than this; they're sized independently rather than
-/// sharing this constant since they're already well clear of it.
-pub const activity_request_max = 640;
+/// A size cap for one buildActivityRequestJson output, sized to cover the
+/// actual worst case: four escaped fields at up to 256 bytes each (the esc
+/// buffers' cap) plus the JSON scaffolding and two i64s (~120 bytes) is
+/// ~1150; 1280 leaves headroom. model.zig sizes its buffers (the persisted
+/// signature field and its two scratch buffers) off this one constant
+/// rather than picking three separate numbers that would all just need to
+/// agree anyway. main.zig's stdin read limit and encodeActivityFrame's
+/// body buffer (both 2048) must stay comfortably larger than this.
+pub const activity_request_max = 1280;
 
 pub const ActivityRequest = struct {
     details: []const u8 = "",
@@ -176,7 +201,8 @@ pub const ActivityRequest = struct {
 };
 
 pub fn buildActivityRequestJson(buf: []u8, req: ActivityRequest, include_elapsed: bool) ![]const u8 {
-    var esc: [4][160]u8 = undefined;
+    var esc: [4][256]u8 = undefined; // matches buildActivityJson's cap — see the note there
+
     var w = std.Io.Writer.fixed(buf);
     try w.print("{{\"details\":\"{s}\",\"state\":\"{s}\",\"url\":\"{s}\",\"cover_url\":\"{s}\",\"duration_s\":{d}", .{
         jsonEscape(&esc[0], req.details),
@@ -219,10 +245,45 @@ const testing = std.testing;
 
 test "resolveSocketPath prefers XDG_RUNTIME_DIR, then TMPDIR, then TMP, then /tmp" {
     var buf: [256]u8 = undefined;
-    try testing.expectEqualStrings("/run/user/1000/discord-ipc-0", try resolveSocketPath(&buf, "/run/user/1000", "/should/not/win", null));
-    try testing.expectEqualStrings("/tmp/xyz/discord-ipc-0", try resolveSocketPath(&buf, null, "/tmp/xyz", null));
-    try testing.expectEqualStrings("/tmp/discord-ipc-0", try resolveSocketPath(&buf, null, null, null));
-    try testing.expectEqualStrings("/tmp/discord-ipc-0", try resolveSocketPath(&buf, "", "", ""));
+    try testing.expectEqualStrings("/run/user/1000/discord-ipc-0", try resolveSocketPath(&buf, "/run/user/1000", "/should/not/win", null, "", 0));
+    try testing.expectEqualStrings("/tmp/xyz/discord-ipc-0", try resolveSocketPath(&buf, null, "/tmp/xyz", null, "", 0));
+    try testing.expectEqualStrings("/tmp/discord-ipc-0", try resolveSocketPath(&buf, null, null, null, "", 0));
+    try testing.expectEqualStrings("/tmp/discord-ipc-0", try resolveSocketPath(&buf, "", "", "", "", 0));
+}
+
+test "resolveSocketPath covers sandboxed installs and higher socket indices" {
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings(
+        "/run/user/1000/app/com.discordapp.Discord/discord-ipc-3",
+        try resolveSocketPath(&buf, "/run/user/1000", null, null, socket_subdirs[1], 3),
+    );
+    try testing.expectEqualStrings(
+        "/run/user/1000/snap.discord/discord-ipc-9",
+        try resolveSocketPath(&buf, "/run/user/1000", null, null, socket_subdirs[2], 9),
+    );
+}
+
+test "jsonEscape truncation never splits a multi-byte UTF-8 sequence" {
+    var buf: [2048]u8 = undefined;
+    // 200 two-byte codepoints = 400 bytes, well past the 256-byte escape
+    // cap; the cut must land on a codepoint boundary or Discord rejects
+    // the whole payload as invalid JSON.
+    const long = "é" ** 200;
+    const out = try buildActivityRequestJson(&buf, .{ .details = long }, false);
+    try testing.expect(std.unicode.utf8ValidateSlice(out));
+}
+
+test "activity_request_max covers worst-case field lengths" {
+    var buf: [activity_request_max]u8 = undefined;
+    const long = "x" ** 300; // past the escape cap in every field at once
+    _ = try buildActivityRequestJson(&buf, .{
+        .details = long,
+        .state = long,
+        .url = long,
+        .cover_url = long,
+        .duration_s = std.math.maxInt(i64),
+        .elapsed_ms = std.math.minInt(i64),
+    }, true);
 }
 
 test "buildActivityJson always sends instance and created_at, and includes details_url only when a URL is given" {

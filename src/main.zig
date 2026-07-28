@@ -213,23 +213,28 @@ fn runDiscordHelper(init: std.process.Init) void {
         return;
     }
 
+    // Scan subdir x index the same way the Windows branch scans pipe
+    // indices: a plain install parks the socket at <base>/discord-ipc-N,
+    // Flatpak/Snap installs remap it into an app subdirectory, and N can be
+    // above 0 when another RPC client already holds the low slots.
     const discord_rpc = @import("discord_rpc.zig");
     var path_buf: [256]u8 = undefined;
-    const socket_path = discord_rpc.resolveSocketPath(
-        &path_buf,
-        init.environ_map.get("XDG_RUNTIME_DIR"),
-        init.environ_map.get("TMPDIR"),
-        init.environ_map.get("TMP"),
-    ) catch {
-        stdout.writeStreamingAll(io, "ERROR: no socket path\n") catch {};
-        return;
-    };
-
-    const address = std.Io.net.UnixAddress.init(socket_path) catch {
-        stdout.writeStreamingAll(io, "ERROR: bad socket path\n") catch {};
-        return;
-    };
-    const stream = address.connect(io) catch {
+    const stream = blk: {
+        for (discord_rpc.socket_subdirs) |subdir| {
+            var n: u8 = 0;
+            while (n < 10) : (n += 1) {
+                const socket_path = discord_rpc.resolveSocketPath(
+                    &path_buf,
+                    init.environ_map.get("XDG_RUNTIME_DIR"),
+                    init.environ_map.get("TMPDIR"),
+                    init.environ_map.get("TMP"),
+                    subdir,
+                    n,
+                ) catch continue;
+                const address = std.Io.net.UnixAddress.init(socket_path) catch continue;
+                break :blk address.connect(io) catch continue;
+            }
+        }
         stdout.writeStreamingAll(io, "ERROR: Discord not running\n") catch {};
         return;
     };
@@ -267,7 +272,14 @@ fn connectDiscordPipe(io: std.Io) ?std.Io.File {
 fn runDiscordSession(io: std.Io, alloc: std.mem.Allocator, stdout: std.Io.File, request_json: []const u8, conn: anytype) void {
     const discord_rpc = @import("discord_rpc.zig");
     const json = @import("json.zig");
-    const pid: i32 = @bitCast(@as(u32, if (builtin.os.tag == .windows) std.os.windows.GetCurrentProcessId() else std.c.getpid()));
+    // Linux takes the raw-syscall getpid: `native test`'s analysis object
+    // compiles this module without libc, so std.c.getpid (an extern "c"
+    // symbol) is a compile error there. macOS always links libc.
+    const pid: i32 = switch (builtin.os.tag) {
+        .windows => @bitCast(std.os.windows.GetCurrentProcessId()),
+        .linux => @intCast(std.os.linux.getpid()),
+        else => std.c.getpid(),
+    };
 
     // model.zig's update() is a pure reducer with no wall clock, so it
     // sends the raw display fields + elapsed_ms/duration_s (see
@@ -316,7 +328,7 @@ fn runDiscordSession(io: std.Io, alloc: std.mem.Allocator, stdout: std.Io.File, 
         .start_ms = start_ms,
         .end_ms = if (req.duration_s > 0) start_ms + req.duration_s * 1000 else null,
     };
-    var activity_body_buf: [1024]u8 = undefined;
+    var activity_body_buf: [2048]u8 = undefined;
     const activity_json = discord_rpc.buildActivityJson(&activity_body_buf, req.details, req.state, req.url, req.cover_url, now_ms, timestamps) catch {
         stdout.writeStreamingAll(io, "ERROR: activity build failed\n") catch {};
         return;

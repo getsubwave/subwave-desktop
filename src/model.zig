@@ -330,9 +330,12 @@ pub const Model = struct {
     // change, then always report the delta since that anchor as "how far
     // into this track" rather than the ever-climbing raw position. See
     // updateDiscordPresence.
-    discord_track_title_buf: [96]u8 = undefined,
+    // Sized to match title_buf/artist_buf exactly: a smaller snapshot would
+    // truncate, the identity check in updateDiscordPresence would then never
+    // match a long title, and the anchor would reset on every poll.
+    discord_track_title_buf: [512]u8 = undefined,
     discord_track_title: []const u8 = "",
-    discord_track_artist_buf: [96]u8 = undefined,
+    discord_track_artist_buf: [256]u8 = undefined,
     discord_track_artist: []const u8 = "",
     discord_track_anchor_ms: i64 = 0,
 
@@ -1574,6 +1577,10 @@ fn likeCount(v: ?i64) u32 {
 fn updateDiscordPresence(model: *Model, fx: *Effects) void {
     if (!model.discord_configured or !model.discord_enabled) return cancelDiscordPresence(model, fx);
     if (model.transport != .playing and model.transport != .paused) return cancelDiscordPresence(model, fx);
+    // No resolved own-binary path means nothing to spawn — without this,
+    // a failed executablePath at startup would put the exit handler's
+    // retry loop into a permanent spawn("")-and-fail cycle.
+    if (model.self_exe_path.len == 0) return cancelDiscordPresence(model, fx);
     // Re-anchor the moment the track identity changes (see the field docs
     // on discord_track_anchor_ms) — this is the one place that snapshot
     // can happen, since every real presence update flows through here.
@@ -1609,6 +1616,12 @@ fn cancelDiscordPresence(model: *Model, fx: *Effects) void {
 }
 
 fn respawnDiscordHelper(model: *Model, fx: *Effects, signature: []const u8, req: discord_rpc.ActivityRequest) void {
+    // Build the stdin payload before touching any state: bailing out after
+    // the cancel would kill the live helper without a replacement, and
+    // committing the signature first would suppress the retry that could
+    // have fixed it.
+    var stdin_buf: [discord_rpc.activity_request_max]u8 = undefined;
+    const stdin_payload = discord_rpc.buildActivityRequestJson(&stdin_buf, req, true) catch return;
     fx.cancel(model.discord_spawn_key);
     // Ping-pong the effect key: cancel() may leave the old slot draining
     // rather than immediately idle, and fx.spawn() rejects a same-tick
@@ -1616,8 +1629,6 @@ fn respawnDiscordHelper(model: *Model, fx: *Effects, signature: []const u8, req:
     // entirely instead of depending on internal drain timing.
     model.discord_spawn_key = if (model.discord_spawn_key == keys.discord_rpc_a) keys.discord_rpc_b else keys.discord_rpc_a;
     setStr(&model.discord_last_payload_buf, &model.discord_last_payload, signature);
-    var stdin_buf: [discord_rpc.activity_request_max]u8 = undefined;
-    const stdin_payload = discord_rpc.buildActivityRequestJson(&stdin_buf, req, true) catch return;
     fx.spawn(.{
         .key = model.discord_spawn_key,
         .argv = &.{ model.self_exe_path, "--discord-rpc-helper" },
@@ -2509,13 +2520,20 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             }
         },
         .discord_line => |line| {
+            if (line.key != model.discord_spawn_key) return; // stale helper from before a respawn
             if (std.mem.eql(u8, line.line, "READY")) {
                 model.discord_connected = true;
                 model.discord_retry_count = 0;
             }
         },
         .discord_exited => |exit| {
-            if (exit.reason == .cancelled) return; // superseded by a newer spawn
+            // Both filters are needed: the key check drops events from a
+            // superseded helper whose natural exit was already in flight
+            // when the respawn flipped keys (reason .exited, not
+            // .cancelled) — without it, that stale exit would clear the
+            // signature and the retry would kill the healthy new helper.
+            if (exit.key != model.discord_spawn_key) return;
+            if (exit.reason == .cancelled) return; // cancelled without respawn (disable / tune-out)
             model.discord_connected = false;
             model.discord_last_payload = ""; // forces the retry below to actually respawn
             if (!model.discord_enabled) return;
@@ -3187,9 +3205,9 @@ test "enabling Discord Rich Presence while playing spawns the helper" {
     var m: Model = .{};
     m.discord_configured = true;
     m.transport = .playing;
+    m.self_exe_path = "/usr/local/bin/subwave-desktop";
     m.title = "Night Drive";
     m.artist = "The Midnight";
-    m.self_exe_path = "/Applications/SUBWAVE.app/Contents/MacOS/subwave-desktop";
     update(&m, .toggle_discord, &fx);
     try testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
     const req = fx.pendingSpawnAt(0).?;
@@ -3205,6 +3223,7 @@ test "an unchanged now-playing poll does not respawn the helper" {
     var m: Model = .{};
     m.discord_configured = true;
     m.transport = .playing;
+    m.self_exe_path = "/usr/local/bin/subwave-desktop";
     m.title = "Night Drive";
     m.artist = "The Midnight";
     update(&m, .toggle_discord, &fx);
@@ -3221,6 +3240,7 @@ test "a track change respawns the helper with the new payload" {
     var m: Model = .{};
     m.discord_configured = true;
     m.transport = .playing;
+    m.self_exe_path = "/usr/local/bin/subwave-desktop";
     m.title = "Night Drive";
     m.artist = "The Midnight";
     update(&m, .toggle_discord, &fx);
@@ -3237,6 +3257,7 @@ test "track elapsed is anchored to when the track actually changed, not the raw 
     var m: Model = .{};
     m.discord_configured = true;
     m.transport = .playing;
+    m.self_exe_path = "/usr/local/bin/subwave-desktop";
     m.title = "Night Drive";
     m.artist = "The Midnight";
     m.elapsed_ms = 200_000; // continuous stream position, unrelated to this track's own length
@@ -3265,6 +3286,7 @@ test "tuning out cancels the helper without respawning" {
     var m: Model = .{};
     m.discord_configured = true;
     m.transport = .playing;
+    m.self_exe_path = "/usr/local/bin/subwave-desktop";
     update(&m, .toggle_discord, &fx);
     try testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
     update(&m, .tune_out, &fx);
@@ -3279,12 +3301,35 @@ test "a READY line marks connected; a non-cancelled exit schedules a retry" {
     var m: Model = .{};
     m.discord_configured = true;
     m.transport = .playing;
+    m.self_exe_path = "/usr/local/bin/subwave-desktop";
     update(&m, .toggle_discord, &fx);
     update(&m, .{ .discord_line = .{ .key = m.discord_spawn_key, .line = "READY" } }, &fx);
     try testing.expect(m.discord_connected);
     update(&m, .{ .discord_exited = .{ .key = m.discord_spawn_key, .reason = .signaled } }, &fx);
     try testing.expect(!m.discord_connected);
     try testing.expectEqual(@as(u6, 1), m.discord_retry_count);
+}
+
+test "a stale exit from a superseded helper does not disturb the current one" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.discord_configured = true;
+    m.transport = .playing;
+    m.self_exe_path = "/usr/local/bin/subwave-desktop";
+    m.title = "Night Drive";
+    update(&m, .toggle_discord, &fx);
+    update(&m, .{ .discord_line = .{ .key = m.discord_spawn_key, .line = "READY" } }, &fx);
+    // A pre-respawn helper's natural exit can already be in flight when the
+    // keys flip, so it arrives carrying the other key and a non-cancelled
+    // reason. It must not clear the signature or schedule a retry — that
+    // would kill the healthy current helper on the next retry tick.
+    const stale_key = if (m.discord_spawn_key == keys.discord_rpc_a) keys.discord_rpc_b else keys.discord_rpc_a;
+    update(&m, .{ .discord_exited = .{ .key = stale_key, .reason = .signaled } }, &fx);
+    try testing.expect(m.discord_connected);
+    try testing.expectEqual(@as(u6, 0), m.discord_retry_count);
+    try testing.expect(m.discord_last_payload.len > 0);
 }
 
 test "switching stations resets the format pick to the floor" {
