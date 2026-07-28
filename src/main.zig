@@ -49,14 +49,17 @@ pub const app_icons = [_]canvas.icons.Entry{
 // ------------------------------------------------------- OS integration seams
 // App-level key fallback — consulted only for keys no focused widget consumed
 // (typing in the request/station fields is never stolen). Space = tune toggle,
-// arrows = volume, M = mute, cmd/ctrl+K = stations, Esc = back to LIVE,
-// 1–5 = dial stops.
+// arrows = volume, M = mute, cmd/ctrl+K = stations, cmd/ctrl+shift+M = mini
+// player (plain cmd+M is the macOS system minimize), Esc = back to LIVE,
+// 1–5 = dial stops. The shortcut is also the only way into mini mode on
+// Linux, where the GTK host has no tray to offer the menu item.
 fn onKey(keyboard: canvas.WidgetKeyboardEvent) ?Msg {
     if (keyboard.phase != .key_down) return null;
     const mods = keyboard.modifiers;
     const key = keyboard.key;
     if (mods.super or mods.control) {
-        if (!mods.alt and std.ascii.eqlIgnoreCase(key, "k")) return .toggle_sidebar;
+        if (!mods.alt and !mods.shift and std.ascii.eqlIgnoreCase(key, "k")) return .toggle_sidebar;
+        if (!mods.alt and mods.shift and std.ascii.eqlIgnoreCase(key, "m")) return .toggle_mini;
         return null;
     }
     if (mods.alt) return null;
@@ -490,6 +493,9 @@ test "key fallback maps transport, navigation, and dial keys" {
     try testing.expect(onKey(.{ .phase = .key_down, .key = "L" }).? == .press_like);
     try testing.expect(onKey(.{ .phase = .key_down, .key = "Escape" }).? == .escape);
     try testing.expect(onKey(.{ .phase = .key_down, .key = "k", .modifiers = .{ .super = true } }).? == .toggle_sidebar);
+    try testing.expect(onKey(.{ .phase = .key_down, .key = "m", .modifiers = .{ .control = true, .shift = true } }).? == .toggle_mini);
+    try testing.expect(onKey(.{ .phase = .key_down, .key = "M", .modifiers = .{ .super = true, .shift = true } }).? == .toggle_mini);
+    try testing.expect(onKey(.{ .phase = .key_down, .key = "k", .modifiers = .{ .super = true, .shift = true } }) == null);
     try testing.expectEqual(Msg{ .pick_tab = .booth }, onKey(.{ .phase = .key_down, .key = "4" }).?);
     try testing.expect(onKey(.{ .phase = .key_up, .key = "space" }) == null);
     try testing.expect(onKey(.{ .phase = .key_down, .key = "space", .modifiers = .{ .super = true } }) == null);

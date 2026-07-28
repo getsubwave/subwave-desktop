@@ -2639,14 +2639,30 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .open_format => model.sheet = .format,
         .open_discord => model.sheet = .discord,
         .close_sheet => model.sheet = .none,
-        .toggle_mini => model.mini_open = !model.mini_open,
-        .expand_mini => model.mini_open = false,
-        .mini_closed => model.mini_open = false,
+        // One player surface at a time: entering mini mode tucks the full
+        // player into the Dock/taskbar (minimize is the only reversible
+        // app-driven "get it off the glass" verb the SDK has — fx.closeWindow
+        // is a real close and a closed shell window cannot come back), and
+        // every path out of mini mode brings the full player back.
+        .toggle_mini => {
+            model.mini_open = !model.mini_open;
+            if (model.mini_open) fx.minimizeWindow("main") else fx.showWindow("main");
+        },
+        .expand_mini, .mini_closed => {
+            model.mini_open = false;
+            fx.showWindow("main");
+        },
 
         // --------------------------------------------------- tray window verbs
-        // The player window closes to hidden (close_policy = .hide in app.zon),
-        // so the tray needs a real way back — and a real way out.
-        .show_player => fx.showWindow("main"),
+        // The player window closes to hidden on the macOS/Windows release
+        // builds (close_policy "hide"; Linux and dev builds compile "quit" —
+        // see app.zon), so the tray needs a real way back — and a real way
+        // out. "Open player" asks for the full window, so it also leaves
+        // mini mode rather than putting a second surface on the glass.
+        .show_player => {
+            model.mini_open = false;
+            fx.showWindow("main");
+        },
         .quit_app => fx.quitApp(),
 
         // ------------------------------------------------------- app lifecycle
@@ -3020,6 +3036,43 @@ test "tune_station reports an invalid address instead of failing silently" {
     // Editing the field clears the error as the listener fixes it.
     update(&m, .{ .station_edit = .{ .insert_text = "x" } }, &fx);
     try testing.expectEqualStrings("", m.station_status);
+}
+
+test "mini flow keeps one player surface: open minimizes main, every exit restores it" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    // Entering mini mode tucks the full player away.
+    update(&m, .toggle_mini, &fx);
+    try testing.expect(m.mini_open);
+    try testing.expectEqual(@as(u32, 1), fx.windowActionState().minimize_count);
+    try testing.expectEqualStrings("main", fx.windowActionState().lastLabel());
+    // EXPAND leaves mini mode and restores the full player.
+    update(&m, .expand_mini, &fx);
+    try testing.expect(!m.mini_open);
+    try testing.expectEqual(@as(u32, 1), fx.windowActionState().show_count);
+    try testing.expectEqualStrings("main", fx.windowActionState().lastLabel());
+    // The user closing the mini window restores the full player too.
+    update(&m, .toggle_mini, &fx);
+    update(&m, .mini_closed, &fx);
+    try testing.expect(!m.mini_open);
+    try testing.expectEqual(@as(u32, 2), fx.windowActionState().show_count);
+    // Tray "Close mini player" (toggle while open) is an exit as well.
+    update(&m, .toggle_mini, &fx);
+    update(&m, .toggle_mini, &fx);
+    try testing.expect(!m.mini_open);
+    try testing.expectEqual(@as(u32, 3), fx.windowActionState().show_count);
+    // Tray "Open player" asks for the full window: mini mode ends with it.
+    update(&m, .toggle_mini, &fx);
+    update(&m, .show_player, &fx);
+    try testing.expect(!m.mini_open);
+    try testing.expectEqual(@as(u32, 4), fx.windowActionState().show_count);
+    try testing.expectEqual(@as(u32, 4), fx.windowActionState().minimize_count);
+    // The flow never really-closes a window (a closed shell window is gone
+    // for good) and never quits the app.
+    try testing.expectEqual(@as(u32, 0), fx.windowActionState().close_count);
+    try testing.expectEqual(@as(u32, 0), fx.windowActionState().quit_count);
 }
 
 test "jsonEscape escapes quotes and drops raw control bytes" {

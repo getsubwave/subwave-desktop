@@ -1,7 +1,8 @@
 <!-- Mini Player — compact secondary window (420x168, hidden_inset).
      Mirrors the native-constrained Claude Design (Mini Player.dc.html).
-     Top strip is the drag region; EXPAND closes the mini (the main window
-     stays open behind it). -->
+     Top strip is the drag region. While the mini is up the full player is
+     minimized away (one player surface at a time); EXPAND — or closing
+     this window — closes the mini and restores the full player. -->
 <column grow="1">
   <row cross="center" gap="10" height="30" padding="6" window-drag="true">
     <spacer width="66"/>
