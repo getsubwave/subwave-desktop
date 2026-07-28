@@ -5,6 +5,11 @@
 
 const std = @import("std");
 
+/// GitHub `releases/latest` payload — only the tag survives decoding.
+pub const Release = struct {
+    tag_name: ?[]const u8 = null,
+};
+
 pub const Track = struct {
     title: ?[]const u8 = null,
     artist: ?[]const u8 = null,

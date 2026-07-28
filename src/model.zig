@@ -12,6 +12,8 @@ const color = @import("color.zig");
 const spectrum = @import("spectrum.zig");
 const stream_format = @import("stream_format.zig");
 const discord_rpc = @import("discord_rpc.zig");
+// `update` is the reducer below, so the self-update module needs an alias.
+const updater = @import("update.zig");
 pub const StreamFormat = stream_format.StreamFormat;
 
 // Default listening volume on tune-in. (Decode/position/spectrum report
@@ -48,6 +50,9 @@ pub const keys = struct {
     pub const discord_rpc_a: u64 = 40;
     pub const discord_rpc_b: u64 = 41;
     pub const discord_retry: u64 = 42;
+    pub const fetch_update: u64 = 43;
+    pub const update_timer: u64 = 44;
+    pub const open_release_spawn: u64 = 45;
 
     // Cover art loads through `fx.loadImage`, where the ImageId IS the effect
     // key — so the id counter has to start clear of every key above or a cover
@@ -184,6 +189,11 @@ pub const Model = struct {
     station_loc: []const u8 = "",
 
     // now playing (slices point into the *_buf fixed buffers)
+    // Self-update notice: empty tag = no newer release known.
+    update_tag_buf: [24]u8 = undefined,
+    update_tag: []const u8 = "",
+    opener_inflight: bool = false,
+
     title_buf: [512]u8 = undefined,
     artist_buf: [256]u8 = undefined,
     album_buf: [256]u8 = undefined,
@@ -857,6 +867,18 @@ pub const Model = struct {
         return out.items;
     }
 
+    // ------------------------------------------------------- update notice
+    pub fn update_available(self: *const Model) bool {
+        return self.update_tag.len > 0;
+    }
+    pub fn update_value(self: *const Model) []const u8 {
+        return self.update_tag;
+    }
+    pub fn app_version(self: *const Model) []const u8 {
+        _ = self;
+        return updater.version;
+    }
+
     // -------------------------------------------------------------- request
     pub fn req_idle(self: *const Model) bool {
         return self.req_phase == .idle;
@@ -1210,6 +1232,9 @@ pub const Msg = union(enum) {
     tick_discord_retry: native_sdk.EffectTimer,
     audio_event: native_sdk.EffectAudio,
     chrome_changed: ChromeInsets,
+    got_update: native_sdk.EffectResponse,
+    tick_update: native_sdk.EffectTimer,
+    opener_exited: native_sdk.EffectExit,
 
     // transport + audio
     toggle_play,
@@ -1232,6 +1257,7 @@ pub const Msg = union(enum) {
     open_themes,
     open_format,
     open_discord,
+    open_release, // update notice row -> release page in the browser
     close_sheet,
     toggle_mini,
     expand_mini,
@@ -1297,6 +1323,7 @@ pub const Msg = union(enum) {
         "sleep_cycle",   "open_timeline",  "open_booth",
         "discord_line",  "discord_exited", "tick_discord_retry",
         "show_player",   "quit_app",       "app_activated", "app_deactivated",
+        "got_update",    "tick_update",    "opener_exited",
     };
 };
 
@@ -1433,6 +1460,23 @@ fn jsonEscape(buf: []u8, s: []const u8) []const u8 {
 fn fetchThemes(model: *Model, fx: *Effects) void {
     var b: [256]u8 = undefined;
     if (api.themes(&b, model.base)) |u| fx.fetch(.{ .key = keys.fetch_themes, .url = u, .on_response = Effects.responseMsg(.got_themes) }) else |_| {}
+}
+
+// Daily GitHub release poll. GitHub's API rejects UA-less requests and the
+// SDK sets no default User-Agent, so both headers are explicit. Every failure
+// mode (offline, rate-limited, truncated, junk) is silent — the next tick
+// retries.
+fn checkForUpdate(fx: *Effects) void {
+    fx.fetch(.{
+        .key = keys.fetch_update,
+        .url = updater.release_api_url,
+        .headers = &.{
+            .{ .name = "User-Agent", .value = "SUBWAVE-Player" },
+            .{ .name = "Accept", .value = "application/vnd.github+json" },
+        },
+        .timeout_ms = 10_000,
+        .on_response = Effects.responseMsg(.got_update),
+    });
 }
 
 fn fetchSchedule(model: *Model, fx: *Effects) void {
@@ -1878,6 +1922,10 @@ fn obStart(model: *Model, fx: *Effects, url: []const u8, name: []const u8) void 
 
 // ------------------------------------------------------------------ boot
 pub fn boot(model: *Model, fx: *Effects) void {
+    // Station-independent, so it runs in both phases; the repeating timer
+    // matters because close_policy = hide keeps the app resident for weeks.
+    checkForUpdate(fx);
+    fx.startTimer(.{ .key = keys.update_timer, .interval_ms = 86_400_000, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_update) });
     fetchDirectory(fx); // Discover rows for onboarding + sidebar
     if (model.phase == .player) {
         startStream(model, fx);
@@ -1905,6 +1953,27 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .tick_theme => |t| {
             if (t.outcome == .fired) fetchThemes(model, fx);
         },
+        .tick_update => |t| {
+            if (t.outcome == .fired) checkForUpdate(fx);
+        },
+        .got_update => |r| {
+            if (r.outcome != .ok or r.status != 200) return;
+            const parsed = json.parse(json.Release, std.heap.page_allocator, r.body) catch return;
+            defer parsed.deinit();
+            if (parsed.value.tag_name) |tag| {
+                if (updater.isNewer(tag)) setStr(&model.update_tag_buf, &model.update_tag, tag) else model.update_tag = "";
+            }
+        },
+        .open_release => {
+            if (model.opener_inflight) return;
+            model.opener_inflight = true;
+            fx.spawn(.{
+                .key = keys.open_release_spawn,
+                .argv = updater.opener_argv,
+                .on_exit = Effects.exitMsg(.opener_exited),
+            });
+        },
+        .opener_exited => model.opener_inflight = false,
         .tick_signal => |t| {
             if (t.outcome != .fired) return;
             if (model.transport != .playing or model.probe_inflight) return;
@@ -3345,4 +3414,40 @@ test "switching stations resets the format pick to the floor" {
     try testing.expectEqual(StreamFormat.mp3, m.format_pref);
     try testing.expect(!m.stream_flags_known);
     try testing.expect(!m.stream_aac);
+}
+
+test "update check: newer tag arms the notice, older clears it, failures keep state" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    // Newer release arms.
+    update(&m, .{ .got_update = .{ .key = keys.fetch_update, .outcome = .ok, .status = 200, .body = "{\"tag_name\":\"v99.0.0\"}" } }, &fx);
+    try testing.expectEqualStrings("v99.0.0", m.update_tag);
+    try testing.expect(m.update_available());
+    // Older (or equal) release disarms — covers a rollback of a bad release.
+    update(&m, .{ .got_update = .{ .key = keys.fetch_update, .outcome = .ok, .status = 200, .body = "{\"tag_name\":\"v0.0.1\"}" } }, &fx);
+    try testing.expect(!m.update_available());
+    // Failures leave the armed state untouched.
+    update(&m, .{ .got_update = .{ .key = keys.fetch_update, .outcome = .ok, .status = 200, .body = "{\"tag_name\":\"v99.0.0\"}" } }, &fx);
+    update(&m, .{ .got_update = .{ .key = keys.fetch_update, .outcome = .timed_out, .status = 0, .body = "" } }, &fx);
+    update(&m, .{ .got_update = .{ .key = keys.fetch_update, .outcome = .ok, .status = 403, .body = "rate limited" } }, &fx);
+    update(&m, .{ .got_update = .{ .key = keys.fetch_update, .outcome = .ok, .status = 200, .body = "not json" } }, &fx);
+    try testing.expect(m.update_available());
+}
+
+test "open_release spawns the opener once until it exits" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    update(&m, .open_release, &fx);
+    try testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+    try testing.expect(m.opener_inflight);
+    // Second click while the opener lives: no second spawn.
+    update(&m, .open_release, &fx);
+    try testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+    // Exit clears the guard.
+    update(&m, .{ .opener_exited = .{ .key = keys.open_release_spawn, .reason = .exited } }, &fx);
+    try testing.expect(!m.opener_inflight);
 }
