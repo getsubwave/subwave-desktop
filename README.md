@@ -39,7 +39,10 @@ repo from the main `subwave` monorepo; it tracks the same station HTTP API.
   optional signed name + status polling).
 - **Signal + sleep** — timed `/api/health` probe → latency readout while
   playing; sleep timer (15–90 min) from the tray or the back panel.
-- **Mini player** — a compact secondary window (420×168) toggled from the tray.
+- **Mini player** — a compact secondary window (420×168) toggled from the tray
+  or Cmd/Ctrl+Shift+M. One player surface at a time: opening it minimizes the
+  full player, and EXPAND — or closing the mini window — brings the full
+  player back.
 - **Menu-bar extra** — macOS `NSStatusItem` and the Windows tray (the GTK host
   still has none): live now-playing rows, tune in/out, mute, sleep cycle, open
   player, mini player, quit. On macOS and Windows the close button **hides** the
@@ -47,8 +50,9 @@ repo from the main `subwave` monorepo; it tracks the same station HTTP API.
   `close_policy`; on Linux it quits, because there is no tray to bring a hidden
   window back (see `docs/sdk-notes.md`).
 - **Keyboard transport** — space play/pause, ↑/↓ volume, M mute, L like the
-  current track, Esc back to LIVE, Cmd/Ctrl+K stations, 1–5 dial stops
-  (app-level fallback; never steals typing from the text fields).
+  current track, Esc back to LIVE, Cmd/Ctrl+K stations, Cmd/Ctrl+Shift+M mini
+  player, 1–5 dial stops (app-level fallback; never steals typing from the
+  text fields).
 - **Settings persistence** — volume / theme override / stream format / station
   (+ name) / recents survive restarts (`settings.json` in the OS per-app
   config dir), saved debounced + serialized via `fx.writeFile`.
