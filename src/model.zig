@@ -11,6 +11,7 @@ const json = @import("json.zig");
 const color = @import("color.zig");
 const spectrum = @import("spectrum.zig");
 const stream_format = @import("stream_format.zig");
+const discord_rpc = @import("discord_rpc.zig");
 pub const StreamFormat = stream_format.StreamFormat;
 
 // Default listening volume on tune-in. (Decode/position/spectrum report
@@ -44,6 +45,9 @@ pub const keys = struct {
     pub const post_like: u64 = 37;
     pub const save_settings: u64 = 30;
     pub const save_debounce: u64 = 31;
+    pub const discord_rpc_a: u64 = 40;
+    pub const discord_rpc_b: u64 = 41;
+    pub const discord_retry: u64 = 42;
 
     // Cover art loads through `fx.loadImage`, where the ImageId IS the effect
     // key — so the id counter has to start clear of every key above or a cover
@@ -75,7 +79,7 @@ pub const Phase = enum { onboarding, player };
 pub const Tab = enum { schedule, timeline, live, booth, request };
 
 /// Back-panel popover stack (none = closed).
-pub const Sheet = enum { none, panel, sleep, themes, format };
+pub const Sheet = enum { none, panel, sleep, themes, format, discord };
 
 pub const BoothFilter = enum { all, dj, tracks };
 
@@ -165,6 +169,8 @@ pub const Model = struct {
     stream_url_buf: [256]u8 = undefined,
     settings_path_buf: [768]u8 = undefined,
     settings_path: []const u8 = "",
+    self_exe_path_buf: [768]u8 = undefined,
+    self_exe_path: []const u8 = "",
     // OS per-app cache dir (resolved beside settings_path at startup). Empty
     // means "could not resolve" — cover loads then simply run uncached rather
     // than guessing a path.
@@ -304,6 +310,34 @@ pub const Model = struct {
     settings_json_buf: [2048]u8 = undefined,
     save_inflight: bool = false,
     save_dirty: bool = false,
+
+    // Discord Rich Presence (opt-in; see discord_rpc.zig / discord.zon).
+    discord_enabled: bool = false,
+    discord_configured: bool = discord_rpc.configured_at_build,
+    discord_connected: bool = false,
+    discord_retry_count: u6 = 0,
+    discord_spawn_key: u64 = keys.discord_rpc_a,
+    discord_last_payload_buf: [discord_rpc.activity_request_max]u8 = undefined,
+    // Despite the name, this holds the diff *signature* (details/state/
+    // url/duration, no elapsed_ms) used to decide whether to respawn — not
+    // the full stdin content actually sent. See updateDiscordPresence.
+    discord_last_payload: []const u8 = "",
+    // model.elapsed_ms is the raw audio-decoder stream position -- it never
+    // resets at track boundaries, since this is one continuous Icecast byte
+    // stream with no per-track structure at the decode level (title/artist
+    // come from a wholly separate now-playing poll). These three anchor it
+    // ourselves: snapshot elapsed_ms the moment the title/artist actually
+    // change, then always report the delta since that anchor as "how far
+    // into this track" rather than the ever-climbing raw position. See
+    // updateDiscordPresence.
+    // Sized to match title_buf/artist_buf exactly: a smaller snapshot would
+    // truncate, the identity check in updateDiscordPresence would then never
+    // match a long title, and the anchor would reset on every poll.
+    discord_track_title_buf: [512]u8 = undefined,
+    discord_track_title: []const u8 = "",
+    discord_track_artist_buf: [256]u8 = undefined,
+    discord_track_artist: []const u8 = "",
+    discord_track_anchor_ms: i64 = 0,
 
     // recents (persisted) + discover (community directory)
     recents_name_store: [max_recents][48]u8 = undefined,
@@ -650,6 +684,9 @@ pub const Model = struct {
     pub fn sheet_format(self: *const Model) bool {
         return self.sheet == .format;
     }
+    pub fn sheet_discord(self: *const Model) bool {
+        return self.sheet == .discord;
+    }
 
     // ------------------------------------------------------------ sleep timer
     pub fn sleep_armed(self: *const Model) bool {
@@ -665,6 +702,18 @@ pub const Model = struct {
     pub fn sleep_value(self: *const Model, arena: std.mem.Allocator) []const u8 {
         if (!self.sleep_armed()) return "Off";
         return std.fmt.allocPrint(arena, "{s} left", .{fmtSecs(arena, self.sleepRemainingS())}) catch "armed";
+    }
+
+    // ---------------------------------------------------------------- discord
+    pub fn discord_row_value(self: *const Model) []const u8 {
+        if (!self.discord_configured) return "Not configured";
+        return if (self.discord_enabled) "On" else "Off";
+    }
+
+    pub fn discord_status_line(self: *const Model) []const u8 {
+        if (!self.discord_enabled) return "";
+        if (self.discord_connected) return "Connected";
+        return "Waiting for Discord…";
     }
 
     // ------------------------------------------------------------- catalogues
@@ -1093,6 +1142,7 @@ pub const Model = struct {
         // station / settings / theme-override state
         "base",               "base_buf",            "stream_url_buf",      "settings_path",
         "settings_path_buf",  "settings_json_buf",   "station_buffer",      "theme_override",
+        "self_exe_path",      "self_exe_path_buf",
         "theme_override_buf", "theme_ids",           "theme_ids_store",     "theme_names",
         "theme_names_store",  "theme_descs",         "theme_descs_store",   "tray_status",
         "tray_status_buf",    "tray_track",          "tray_track_buf",
@@ -1117,6 +1167,11 @@ pub const Model = struct {
         "upcoming_rows",      "upcoming_count",      "hist_title_store",    "hist_artist_store",
         "hist_time_store",    "history_rows",        "history_count",       "booth_time_store",
         "booth_text_store",   "booth_turns",         "booth_count",
+        // discord rich presence (bound via getters, not the raw fields)
+        "discord_connected",  "discord_retry_count",
+        "discord_spawn_key",  "discord_last_payload", "discord_last_payload_buf",
+        "discord_track_title_buf", "discord_track_title", "discord_track_artist_buf",
+        "discord_track_artist", "discord_track_anchor_ms",
     };
 };
 
@@ -1150,6 +1205,9 @@ pub const Msg = union(enum) {
     tick_reqpoll: native_sdk.EffectTimer,
     tick_save: native_sdk.EffectTimer,
     saved: native_sdk.EffectFileResult,
+    discord_line: native_sdk.EffectLine,
+    discord_exited: native_sdk.EffectExit,
+    tick_discord_retry: native_sdk.EffectTimer,
     audio_event: native_sdk.EffectAudio,
     chrome_changed: ChromeInsets,
 
@@ -1173,6 +1231,7 @@ pub const Msg = union(enum) {
     open_sleep,
     open_themes,
     open_format,
+    open_discord,
     close_sheet,
     toggle_mini,
     expand_mini,
@@ -1203,6 +1262,7 @@ pub const Msg = union(enum) {
     follow_station,
     pick_theme: []const u8, // payload = theme id
     pick_format: []const u8, // payload = format id ("mp3" | "aac" | "opus" | "flac")
+    toggle_discord,
 
     // listener like (stage heart / mini heart / L key)
     press_like,
@@ -1235,6 +1295,7 @@ pub const Msg = union(enum) {
         "chrome_changed", "toggle_play",   "vol_up",      "vol_down",
         "escape",        "mini_closed",    "tune_out",    "toggle_mini",
         "sleep_cycle",   "open_timeline",  "open_booth",
+        "discord_line",  "discord_exited", "tick_discord_retry",
         "show_player",   "quit_app",       "app_activated", "app_deactivated",
     };
 };
@@ -1325,6 +1386,7 @@ fn startStream(model: *Model, fx: *Effects) void {
     });
     fx.setAudioVolume(if (model.muted) 0.0 else model.volume);
     model.transport = .playing;
+    updateDiscordPresence(model, fx);
 }
 
 fn fetchFeed(model: *Model, fx: *Effects) void {
@@ -1438,6 +1500,7 @@ pub fn applySettingsJson(model: *Model, bytes: []const u8) void {
             model.recents_count += 1;
         }
     }
+    if (s.discordEnabled) |v| model.discord_enabled = v;
 }
 
 // Persist the current settings (async via fx.writeFile). While a write is in
@@ -1451,12 +1514,13 @@ fn saveSettings(model: *Model, fx: *Effects) void {
     }
     var w = std.Io.Writer.fixed(&model.settings_json_buf);
     var esc: [256]u8 = undefined;
-    w.print("{{\"volume\":{d:.2},\"themeOverride\":\"{s}\",\"streamFormat\":\"{s}\",\"station\":\"{s}\",\"stationName\":\"{s}\",\"recents\":[", .{
+    w.print("{{\"volume\":{d:.2},\"themeOverride\":\"{s}\",\"streamFormat\":\"{s}\",\"station\":\"{s}\",\"stationName\":\"{s}\",\"discordEnabled\":{s},\"recents\":[", .{
         model.volume,
         jsonEscape(esc[0..64], model.theme_override),
         model.format_pref.id(),
         model.base,
         jsonEscape(esc[64..128], model.station_name),
+        if (model.discord_enabled) "true" else "false",
     }) catch return;
     for (model.recents[0..model.recents_count], 0..) |r, i| {
         if (i > 0) w.print(",", .{}) catch return;
@@ -1504,6 +1568,81 @@ fn fetchLikeStatus(model: *Model, fx: *Effects) void {
 fn likeCount(v: ?i64) u32 {
     const c = v orelse 0;
     return if (c <= 0) 0 else @intCast(@min(c, std.math.maxInt(u32)));
+}
+
+// Discord Rich Presence: (re)spawn the --discord-rpc-helper child whenever
+// the payload it should be showing actually changes; cancel it outright when
+// there is nothing to show. All state transitions are driven by the spawn's
+// on_line/on_exit results (see the .discord_line/.discord_exited arms).
+fn updateDiscordPresence(model: *Model, fx: *Effects) void {
+    if (!model.discord_configured or !model.discord_enabled) return cancelDiscordPresence(model, fx);
+    if (model.transport != .playing and model.transport != .paused) return cancelDiscordPresence(model, fx);
+    // No resolved own-binary path means nothing to spawn — without this,
+    // a failed executablePath at startup would put the exit handler's
+    // retry loop into a permanent spawn("")-and-fail cycle.
+    if (model.self_exe_path.len == 0) return cancelDiscordPresence(model, fx);
+    // Re-anchor the moment the track identity changes (see the field docs
+    // on discord_track_anchor_ms) — this is the one place that snapshot
+    // can happen, since every real presence update flows through here.
+    if (!std.mem.eql(u8, model.title, model.discord_track_title) or !std.mem.eql(u8, model.artist, model.discord_track_artist)) {
+        setStr(&model.discord_track_title_buf, &model.discord_track_title, model.title);
+        setStr(&model.discord_track_artist_buf, &model.discord_track_artist, model.artist);
+        model.discord_track_anchor_ms = model.elapsed_ms;
+    }
+    const track_elapsed_ms = @max(0, model.elapsed_ms - model.discord_track_anchor_ms);
+    var cover_url_buf: [256]u8 = undefined;
+    const cover_url = if (model.cover_sid.len > 0) api.coverUrl(&cover_url_buf, model.base, model.cover_sid) catch "" else "";
+    const req: discord_rpc.ActivityRequest = .{
+        .details = model.title,
+        .state = model.artist,
+        .url = model.base,
+        .cover_url = cover_url,
+        .duration_s = model.track_duration_s,
+        .elapsed_ms = track_elapsed_ms,
+    };
+    var sig_buf: [discord_rpc.activity_request_max]u8 = undefined;
+    // elapsed_ms excluded from the signature on purpose — see
+    // buildActivityRequestJson's doc comment. Only track/label/station
+    // content should trigger a respawn, never time simply passing.
+    const signature = discord_rpc.buildActivityRequestJson(&sig_buf, req, false) catch return;
+    if (std.mem.eql(u8, signature, model.discord_last_payload)) return; // nothing meaningful changed
+    respawnDiscordHelper(model, fx, signature, req);
+}
+
+fn cancelDiscordPresence(model: *Model, fx: *Effects) void {
+    fx.cancel(model.discord_spawn_key);
+    model.discord_last_payload = "";
+    model.discord_connected = false;
+}
+
+fn respawnDiscordHelper(model: *Model, fx: *Effects, signature: []const u8, req: discord_rpc.ActivityRequest) void {
+    // Build the stdin payload before touching any state: bailing out after
+    // the cancel would kill the live helper without a replacement, and
+    // committing the signature first would suppress the retry that could
+    // have fixed it.
+    var stdin_buf: [discord_rpc.activity_request_max]u8 = undefined;
+    const stdin_payload = discord_rpc.buildActivityRequestJson(&stdin_buf, req, true) catch return;
+    fx.cancel(model.discord_spawn_key);
+    // Ping-pong the effect key: cancel() may leave the old slot draining
+    // rather than immediately idle, and fx.spawn() rejects a same-tick
+    // reuse of a still-active key. Alternating keys sidesteps that race
+    // entirely instead of depending on internal drain timing.
+    model.discord_spawn_key = if (model.discord_spawn_key == keys.discord_rpc_a) keys.discord_rpc_b else keys.discord_rpc_a;
+    setStr(&model.discord_last_payload_buf, &model.discord_last_payload, signature);
+    fx.spawn(.{
+        .key = model.discord_spawn_key,
+        .argv = &.{ model.self_exe_path, "--discord-rpc-helper" },
+        .stdin = stdin_payload,
+        .on_line = Effects.lineMsg(.discord_line),
+        .on_exit = Effects.exitMsg(.discord_exited),
+    });
+}
+
+fn scheduleDiscordRetry(model: *Model, fx: *Effects) void {
+    const shift: u5 = @intCast(@min(model.discord_retry_count, 5));
+    const delay: u32 = @min(@as(u32, 1000) * (@as(u32, 1) << shift), 30_000);
+    model.discord_retry_count +|= 1;
+    fx.startTimer(.{ .key = keys.discord_retry, .interval_ms = delay, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick_discord_retry) });
 }
 
 // Push a station onto the MRU recents list (dedupe by url, cap 8). Each row
@@ -1659,7 +1798,7 @@ fn retune(model: *Model, fx: *Effects) void {
     fx.cancelTimer(keys.request_poll);
     fx.cancelTimer(keys.reconnect);
     fx.stopAudio();
-    startStream(model, fx);
+    startStream(model, fx); // also (re)spawns Discord Rich Presence for the new station
     fetchFeed(model, fx);
     fetchThemes(model, fx);
     fetchSchedule(model, fx);
@@ -1721,6 +1860,7 @@ fn tuneOut(model: *Model, fx: *Effects) void {
     model.retry = 0;
     model.latency_ms = -1;
     model.probe_fails = 0;
+    updateDiscordPresence(model, fx);
 }
 
 // Start the onboarding health-check against a candidate url/name.
@@ -1877,6 +2017,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 if (l.current) |c| model.listeners = c;
             }
             refreshTrayStatus(model);
+            updateDiscordPresence(model, fx);
             if (np.llmTokens) |tok| model.llm_tokens = tok;
             // Optional-mount flags. When they move the effective format —
             // the operator turned the picked mount off (or back on), or the
@@ -2378,6 +2519,29 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 saveSettings(model, fx);
             }
         },
+        .discord_line => |line| {
+            if (line.key != model.discord_spawn_key) return; // stale helper from before a respawn
+            if (std.mem.eql(u8, line.line, "READY")) {
+                model.discord_connected = true;
+                model.discord_retry_count = 0;
+            }
+        },
+        .discord_exited => |exit| {
+            // Both filters are needed: the key check drops events from a
+            // superseded helper whose natural exit was already in flight
+            // when the respawn flipped keys (reason .exited, not
+            // .cancelled) — without it, that stale exit would clear the
+            // signature and the retry would kill the healthy new helper.
+            if (exit.key != model.discord_spawn_key) return;
+            if (exit.reason == .cancelled) return; // cancelled without respawn (disable / tune-out)
+            model.discord_connected = false;
+            model.discord_last_payload = ""; // forces the retry below to actually respawn
+            if (!model.discord_enabled) return;
+            scheduleDiscordRetry(model, fx);
+        },
+        .tick_discord_retry => |t| {
+            if (t.outcome == .fired and model.discord_enabled) updateDiscordPresence(model, fx);
+        },
 
         // -------------------------------------------------------- navigation
         .pick_tab => |tab| {
@@ -2404,6 +2568,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .open_sleep => model.sheet = .sleep,
         .open_themes => model.sheet = .themes,
         .open_format => model.sheet = .format,
+        .open_discord => model.sheet = .discord,
         .close_sheet => model.sheet = .none,
         .toggle_mini => model.mini_open = !model.mini_open,
         .expand_mini => model.mini_open = false,
@@ -2568,6 +2733,11 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (model.transport == .playing and model.effectiveFormat() != before)
                 startStream(model, fx);
             model.sheet = .panel; // back to the panel with the new value showing
+        },
+        .toggle_discord => {
+            model.discord_enabled = !model.discord_enabled;
+            updateDiscordPresence(model, fx);
+            saveSettings(model, fx);
         },
 
         // -------------------------------------------------------- onboarding
@@ -3020,6 +3190,146 @@ test "settings round-trip the stream format; junk ids keep the floor" {
     var m2: Model = .{};
     applySettingsJson(&m2, "{\"streamFormat\":\"wav\"}");
     try testing.expectEqual(StreamFormat.mp3, m2.format_pref);
+}
+
+test "discord settings round-trip through applySettingsJson" {
+    var m: Model = .{};
+    applySettingsJson(&m, "{\"discordEnabled\":true}");
+    try testing.expect(m.discord_enabled);
+}
+
+test "enabling Discord Rich Presence while playing spawns the helper" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.discord_configured = true;
+    m.transport = .playing;
+    m.self_exe_path = "/usr/local/bin/subwave-desktop";
+    m.title = "Night Drive";
+    m.artist = "The Midnight";
+    update(&m, .toggle_discord, &fx);
+    try testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+    const req = fx.pendingSpawnAt(0).?;
+    try testing.expectEqualStrings(m.self_exe_path, req.argv[0]);
+    try testing.expectEqualStrings("--discord-rpc-helper", req.argv[1]);
+    try testing.expect(std.mem.indexOf(u8, req.stdin, "Night Drive") != null);
+}
+
+test "an unchanged now-playing poll does not respawn the helper" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.discord_configured = true;
+    m.transport = .playing;
+    m.self_exe_path = "/usr/local/bin/subwave-desktop";
+    m.title = "Night Drive";
+    m.artist = "The Midnight";
+    update(&m, .toggle_discord, &fx);
+    const key_after_enable = m.discord_spawn_key;
+    update(&m, .{ .got_np = .{ .key = keys.fetch_np, .outcome = .ok, .status = 200, .body = "{\"nowPlaying\":{\"title\":\"Night Drive\",\"artist\":\"The Midnight\"}}" } }, &fx);
+    try testing.expectEqual(key_after_enable, m.discord_spawn_key);
+    try testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+}
+
+test "a track change respawns the helper with the new payload" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.discord_configured = true;
+    m.transport = .playing;
+    m.self_exe_path = "/usr/local/bin/subwave-desktop";
+    m.title = "Night Drive";
+    m.artist = "The Midnight";
+    update(&m, .toggle_discord, &fx);
+    update(&m, .{ .got_np = .{ .key = keys.fetch_np, .outcome = .ok, .status = 200, .body = "{\"nowPlaying\":{\"title\":\"Neon\",\"artist\":\"Purple Sky\"}}" } }, &fx);
+    try testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+    const req = fx.pendingSpawnAt(0).?;
+    try testing.expect(std.mem.indexOf(u8, req.stdin, "Neon") != null);
+}
+
+test "track elapsed is anchored to when the track actually changed, not the raw stream position" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.discord_configured = true;
+    m.transport = .playing;
+    m.self_exe_path = "/usr/local/bin/subwave-desktop";
+    m.title = "Night Drive";
+    m.artist = "The Midnight";
+    m.elapsed_ms = 200_000; // continuous stream position, unrelated to this track's own length
+    update(&m, .toggle_discord, &fx);
+    const req1 = fx.pendingSpawnAt(0).?;
+    try testing.expect(std.mem.indexOf(u8, req1.stdin, "\"elapsed_ms\":0") != null);
+
+    // Stream position keeps climbing but the track hasn't changed — no
+    // respawn (the signature doesn't include elapsed_ms), so nothing new
+    // is sent, but if it were, it must not use the raw climbing position.
+    m.elapsed_ms = 210_000;
+    update(&m, .{ .got_np = .{ .key = keys.fetch_np, .outcome = .ok, .status = 200, .body = "{\"nowPlaying\":{\"title\":\"Night Drive\",\"artist\":\"The Midnight\"}}" } }, &fx);
+    try testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+
+    // A real track change re-anchors at whatever the stream position is now.
+    m.elapsed_ms = 215_000;
+    update(&m, .{ .got_np = .{ .key = keys.fetch_np, .outcome = .ok, .status = 200, .body = "{\"nowPlaying\":{\"title\":\"Neon\",\"artist\":\"Purple Sky\"}}" } }, &fx);
+    const req2 = fx.pendingSpawnAt(0).?;
+    try testing.expect(std.mem.indexOf(u8, req2.stdin, "\"elapsed_ms\":0") != null);
+}
+
+test "tuning out cancels the helper without respawning" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.discord_configured = true;
+    m.transport = .playing;
+    m.self_exe_path = "/usr/local/bin/subwave-desktop";
+    update(&m, .toggle_discord, &fx);
+    try testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+    update(&m, .tune_out, &fx);
+    try testing.expectEqual(@as(usize, 0), fx.pendingSpawnCount());
+    try testing.expect(!m.discord_connected);
+}
+
+test "a READY line marks connected; a non-cancelled exit schedules a retry" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.discord_configured = true;
+    m.transport = .playing;
+    m.self_exe_path = "/usr/local/bin/subwave-desktop";
+    update(&m, .toggle_discord, &fx);
+    update(&m, .{ .discord_line = .{ .key = m.discord_spawn_key, .line = "READY" } }, &fx);
+    try testing.expect(m.discord_connected);
+    update(&m, .{ .discord_exited = .{ .key = m.discord_spawn_key, .reason = .signaled } }, &fx);
+    try testing.expect(!m.discord_connected);
+    try testing.expectEqual(@as(u6, 1), m.discord_retry_count);
+}
+
+test "a stale exit from a superseded helper does not disturb the current one" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.discord_configured = true;
+    m.transport = .playing;
+    m.self_exe_path = "/usr/local/bin/subwave-desktop";
+    m.title = "Night Drive";
+    update(&m, .toggle_discord, &fx);
+    update(&m, .{ .discord_line = .{ .key = m.discord_spawn_key, .line = "READY" } }, &fx);
+    // A pre-respawn helper's natural exit can already be in flight when the
+    // keys flip, so it arrives carrying the other key and a non-cancelled
+    // reason. It must not clear the signature or schedule a retry — that
+    // would kill the healthy current helper on the next retry tick.
+    const stale_key = if (m.discord_spawn_key == keys.discord_rpc_a) keys.discord_rpc_b else keys.discord_rpc_a;
+    update(&m, .{ .discord_exited = .{ .key = stale_key, .reason = .signaled } }, &fx);
+    try testing.expect(m.discord_connected);
+    try testing.expectEqual(@as(u6, 0), m.discord_retry_count);
+    try testing.expect(m.discord_last_payload.len > 0);
 }
 
 test "switching stations resets the format pick to the floor" {
