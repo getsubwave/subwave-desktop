@@ -6,7 +6,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-pub const version = "0.5.0";
+pub const version = "0.6.0";
 
 pub const release_api_url = "https://api.github.com/repos/getsubwave/subwave-desktop/releases/latest";
 pub const release_page_url = "https://github.com/getsubwave/subwave-desktop/releases/latest";
@@ -54,11 +54,11 @@ test "isNewer: newer on any component, with or without the v" {
     try testing.expect(isNewer("v99.0.0"));
     try testing.expect(isNewer("99.0.0"));
     try testing.expect(isNewer("v0.99.0"));
-    try testing.expect(isNewer("v0.5.1"));
+    try testing.expect(isNewer("v0.6.1"));
 }
 
 test "isNewer: equal and older stay quiet" {
-    try testing.expect(!isNewer("v0.5.0"));
+    try testing.expect(!isNewer("v0.6.0"));
     try testing.expect(!isNewer("v0.4.9"));
     try testing.expect(!isNewer("v0.0.1"));
 }
