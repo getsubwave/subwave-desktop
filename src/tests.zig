@@ -10,6 +10,7 @@ comptime {
     _ = @import("color.zig");
     _ = @import("spectrum.zig");
     _ = @import("api.zig");
+    _ = @import("update.zig");
     _ = @import("model.zig");
     _ = @import("stream_format.zig");
     _ = @import("discord_rpc.zig");
@@ -138,6 +139,20 @@ test "player fragments build and lay out (every panel + sheets)" {
         defer arena6.deinit();
         try buildAndLayout(arena6.allocator(), player_sheets_markup, &model, 980, 660);
     }
+    // Update notice: panel SERVICE row + top-bar dot with a known newer tag.
+    model.update_tag = "v9.9.9";
+    model.sheet = .panel;
+    {
+        var arena7 = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena7.deinit();
+        try buildAndLayout(arena7.allocator(), player_sheets_markup, &model, 980, 660);
+    }
+    {
+        var arena8 = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena8.deinit();
+        try buildAndLayout(arena8.allocator(), player_top_markup, &model, 980, 660);
+    }
+    model.update_tag = "";
 }
 
 // The dial strip carries full words (SHOWS / TIMELINE / LIVE / BOOTH /

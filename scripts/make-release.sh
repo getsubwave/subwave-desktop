@@ -59,6 +59,12 @@ ok "on main"
 git diff --quiet && git diff --cached --quiet || fail "uncommitted changes to tracked files; commit or stash them"
 ok "working tree clean"
 
+# The runtime shows src/update.zig's version (app.zon is unreachable from
+# src/); a release cut while they disagree would misreport itself forever.
+src_version="$(sed -n 's/.*pub const version = "\([^"]*\)".*/\1/p' src/update.zig | head -1)"
+[ "$src_version" = "$version" ] || fail "src/update.zig says $src_version but app.zon says $version — keep them in lockstep"
+ok "src/update.zig version matches app.zon"
+
 git fetch -q origin main
 local_sha="$(git rev-parse HEAD)"
 remote_sha="$(git rev-parse origin/main)"

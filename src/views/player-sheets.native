@@ -64,6 +64,19 @@
             <icon name="chevron-right" width="14" height="14" foreground="text_muted"/>
           </row>
         </row>
+        <if test="{update_available}">
+          <use template="section-label" title="SERVICE"/>
+          <row on-press="open_release" main="space_between" cross="center" padding="10" label="Update available">
+            <row gap="10" cross="center">
+              <icon name="download" width="16" height="16" foreground="accent"/>
+              <text>Update available</text>
+            </row>
+            <row gap="6" cross="center">
+              <text size="sm" foreground="accent">{update_value}</text>
+              <icon name="chevron-right" width="14" height="14" foreground="text_muted"/>
+            </row>
+          </row>
+        </if>
         <use template="section-label" title="SHORTCUTS"/>
         <card padding="12">
           <grid columns="2" gap="10">
@@ -76,7 +89,7 @@
             <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">BACK TO LIVE</text><badge>Esc</badge></row>
           </grid>
         </card>
-        <text size="sm" foreground="text_muted" text-alignment="center">MODEL SW-D1 · MADE FOR THE INTERNET</text>
+        <text size="sm" foreground="text_muted" text-alignment="center">MODEL SW-D1 · V{app_version} · MADE FOR THE INTERNET</text>
       </column>
     </sheet>
   </if>
