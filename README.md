@@ -12,6 +12,9 @@ repo from the main `subwave` monorepo; it tracks the same station HTTP API.
   **Listener-selectable format:** MP3 is the universal floor; AAC / Opus / FLAC
   mounts appear in the back panel's SIGNAL row when the station advertises
   them *and* the platform can decode them (see Codecs below).
+- **Update notice** — a daily GitHub Releases poll; a newer version lights a
+  SERVICE row in the back panel (and a dot by the settings button) that opens
+  the release page in the browser. No auto-install.
 - **Now playing** — 5 s poll of `/api/now-playing` + `/api/state` +
   `/api/session`: title, artist, album, year, genre, BPM, key, moods, energy,
   LLM-token ticker, DJ, active show, listeners, elapsed, and the masthead
