@@ -335,19 +335,17 @@ pub const Model = struct {
     // model.elapsed_ms is the raw audio-decoder stream position -- it never
     // resets at track boundaries, since this is one continuous Icecast byte
     // stream with no per-track structure at the decode level (title/artist
-    // come from a wholly separate now-playing poll). These three anchor it
-    // ourselves: snapshot elapsed_ms the moment the title/artist actually
-    // change, then always report the delta since that anchor as "how far
-    // into this track" rather than the ever-climbing raw position. See
-    // updateDiscordPresence.
-    // Sized to match title_buf/artist_buf exactly: a smaller snapshot would
-    // truncate, the identity check in updateDiscordPresence would then never
-    // match a long title, and the anchor would reset on every poll.
-    discord_track_title_buf: [512]u8 = undefined,
-    discord_track_title: []const u8 = "",
-    discord_track_artist_buf: [256]u8 = undefined,
-    discord_track_artist: []const u8 = "",
-    discord_track_anchor_ms: i64 = 0,
+    // come from a wholly separate now-playing poll). track_elapsed_ms is the
+    // user-facing "how far into this track" value everything shows instead
+    // (stage head, mini player, tray, Discord): wall-clock time since the
+    // station-reported track start when the poll carries one (matching the
+    // web player, so tuning in mid-track lands at the true position), else
+    // the decoder delta since the title/artist last changed. Only
+    // refreshTrackElapsed writes it — on every position event and
+    // now-playing poll.
+    track_started_at_s: i64 = 0, // nowPlaying.timestamp, 0 = not sent
+    track_anchor_ms: i64 = 0, // elapsed_ms snapshot at the last track change
+    track_elapsed_ms: i64 = 0,
 
     // recents (persisted) + discover (community directory)
     recents_name_store: [max_recents][48]u8 = undefined,
@@ -575,9 +573,9 @@ pub const Model = struct {
         return if (self.muted) "Unmute" else "Mute";
     }
 
-    // Player-elapsed as m:ss, rolling to h:mm:ss past the hour.
+    // Track-elapsed as m:ss, rolling to h:mm:ss past the hour (long mixes).
     pub fn elapsed_str(self: *const Model, arena: std.mem.Allocator) []const u8 {
-        return fmtSecs(arena, @max(0, @divTrunc(self.elapsed_ms, 1000)));
+        return fmtSecs(arena, @max(0, @divTrunc(self.track_elapsed_ms, 1000)));
     }
 
     // Transient state banner (priority: failure > buffering > offline > idle).
@@ -1192,8 +1190,8 @@ pub const Model = struct {
         // discord rich presence (bound via getters, not the raw fields)
         "discord_connected",  "discord_retry_count",
         "discord_spawn_key",  "discord_last_payload", "discord_last_payload_buf",
-        "discord_track_title_buf", "discord_track_title", "discord_track_artist_buf",
-        "discord_track_artist", "discord_track_anchor_ms",
+        // per-track elapsed plumbing (surfaced via elapsed_str/np_head)
+        "track_started_at_s", "track_anchor_ms",     "track_elapsed_ms",
     };
 };
 
@@ -1625,15 +1623,6 @@ fn updateDiscordPresence(model: *Model, fx: *Effects) void {
     // a failed executablePath at startup would put the exit handler's
     // retry loop into a permanent spawn("")-and-fail cycle.
     if (model.self_exe_path.len == 0) return cancelDiscordPresence(model, fx);
-    // Re-anchor the moment the track identity changes (see the field docs
-    // on discord_track_anchor_ms) — this is the one place that snapshot
-    // can happen, since every real presence update flows through here.
-    if (!std.mem.eql(u8, model.title, model.discord_track_title) or !std.mem.eql(u8, model.artist, model.discord_track_artist)) {
-        setStr(&model.discord_track_title_buf, &model.discord_track_title, model.title);
-        setStr(&model.discord_track_artist_buf, &model.discord_track_artist, model.artist);
-        model.discord_track_anchor_ms = model.elapsed_ms;
-    }
-    const track_elapsed_ms = @max(0, model.elapsed_ms - model.discord_track_anchor_ms);
     var cover_url_buf: [256]u8 = undefined;
     const cover_url = if (model.cover_sid.len > 0) api.coverUrl(&cover_url_buf, model.base, model.cover_sid) catch "" else "";
     const req: discord_rpc.ActivityRequest = .{
@@ -1642,7 +1631,7 @@ fn updateDiscordPresence(model: *Model, fx: *Effects) void {
         .url = model.base,
         .cover_url = cover_url,
         .duration_s = model.track_duration_s,
-        .elapsed_ms = track_elapsed_ms,
+        .elapsed_ms = model.track_elapsed_ms,
     };
     var sig_buf: [discord_rpc.activity_request_max]u8 = undefined;
     // elapsed_ms excluded from the signature on purpose — see
@@ -1804,6 +1793,9 @@ fn retune(model: *Model, fx: *Effects) void {
     model.probe_inflight = false;
     model.track_year = 0;
     model.track_duration_s = 0;
+    model.track_started_at_s = 0;
+    model.track_anchor_ms = 0;
+    model.track_elapsed_ms = 0;
     model.track_bpm = 0;
     model.musical_key = "";
     model.moods = "";
@@ -1851,6 +1843,18 @@ fn retune(model: *Model, fx: *Effects) void {
     saveSettings(model, fx);
 }
 
+// The one writer of track_elapsed_ms — see the field docs. The wall clock
+// arrives as a parameter so tests can pin it.
+fn refreshTrackElapsed(model: *Model, now_wall_ms: i64) void {
+    var e: i64 = if (model.track_started_at_s > 0)
+        now_wall_ms - model.track_started_at_s * 1000
+    else
+        model.elapsed_ms - model.track_anchor_ms;
+    if (e < 0) e = 0; // clock skew / a play session younger than the anchor
+    if (model.track_duration_s > 0) e = @min(e, model.track_duration_s * 1000);
+    model.track_elapsed_ms = e;
+}
+
 // "Title — Artist" + "0:52 · on air · 2 listening" — the tray's two
 // disabled now-playing rows.
 fn refreshTrayStatus(model: *Model) void {
@@ -1863,7 +1867,7 @@ fn refreshTrayStatus(model: *Model) void {
     } else {
         model.tray_track = model.title;
     }
-    const secs: u64 = @intCast(@max(0, @divTrunc(model.elapsed_ms, 1000)));
+    const secs: u64 = @intCast(@max(0, @divTrunc(model.track_elapsed_ms, 1000)));
     if (std.fmt.bufPrint(&model.tray_status_buf, "{d}:{d:0>2} · {s} · {d} listening", .{
         secs / 60,
         secs % 60,
@@ -2018,12 +2022,24 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             defer parsed.deinit();
             const np = parsed.value;
             if (np.nowPlaying) |t| {
-                if (t.title) |v| setStr(&model.title_buf, &model.title, v);
-                if (t.artist) |v| setStr(&model.artist_buf, &model.artist, v);
+                // Track identity flip = the anchor moment for the fallback
+                // per-track clock (see the track_elapsed_ms field docs).
+                var track_changed = false;
+                if (t.title) |v| {
+                    if (!std.mem.eql(u8, v, model.title)) track_changed = true;
+                    setStr(&model.title_buf, &model.title, v);
+                }
+                if (t.artist) |v| {
+                    if (!std.mem.eql(u8, v, model.artist)) track_changed = true;
+                    setStr(&model.artist_buf, &model.artist, v);
+                }
                 if (t.album) |v| setStr(&model.album_buf, &model.album, v);
                 if (t.genre) |v| setStr(&model.genre_buf, &model.genre, v);
                 model.track_year = t.year orelse 0;
                 model.track_duration_s = if (t.duration) |d| @intFromFloat(@max(0, d)) else 0;
+                model.track_started_at_s = t.timestamp orelse 0;
+                if (track_changed) model.track_anchor_ms = model.elapsed_ms;
+                refreshTrackElapsed(model, native_sdk.nowMs());
                 model.track_bpm = if (t.bpm) |b| @intFromFloat(@round(b)) else 0;
                 if (t.musicalKey) |v| setStr(&model.key_buf, &model.musical_key, v) else model.musical_key = "";
                 if (t.energy) |v| setStr(&model.energy_buf, &model.energy, v) else model.energy = "";
@@ -2518,6 +2534,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     model.buffering = e.buffering;
                     model.stream_failed = false;
                     model.retry = 0;
+                    refreshTrackElapsed(model, native_sdk.nowMs());
                     refreshTrayStatus(model);
                 },
                 .spectrum => {
@@ -2948,12 +2965,59 @@ test "elapsed_str rolls to h:mm:ss past the hour" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     var m: Model = .{};
-    m.elapsed_ms = 754_000; // 12:34
+    m.track_elapsed_ms = 754_000; // 12:34
     try testing.expectEqualStrings("12:34", m.elapsed_str(arena));
-    m.elapsed_ms = 5_025_000; // 1:23:45
+    m.track_elapsed_ms = 5_025_000; // 1:23:45
     try testing.expectEqualStrings("1:23:45", m.elapsed_str(arena));
-    m.elapsed_ms = 9_000; // 0:09
+    m.track_elapsed_ms = 9_000; // 0:09
     try testing.expectEqualStrings("0:09", m.elapsed_str(arena));
+}
+
+test "np_head counts into the current track, not the whole session" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.transport = .playing;
+    m.elapsed_ms = 200_000; // raw session position: 3:20 into the stream
+
+    // A track lands with no start timestamp — elapsed anchors to the change.
+    update(&m, .{ .got_np = .{ .key = keys.fetch_np, .outcome = .ok, .status = 200, .body = "{\"nowPlaying\":{\"title\":\"Night Drive\",\"artist\":\"The Midnight\",\"duration\":137}}" } }, &fx);
+    try testing.expectEqualStrings("NOW PLAYING — 0:00 / 2:17", m.np_head(arena));
+
+    // The decoder position advances 10s → 0:10, and the tray line follows.
+    update(&m, .{ .audio_event = .{ .key = keys.audio, .kind = .position, .position_ms = 210_000 } }, &fx);
+    try testing.expectEqualStrings("NOW PLAYING — 0:10 / 2:17", m.np_head(arena));
+    try testing.expect(std.mem.startsWith(u8, m.tray_status, "0:10 ·"));
+
+    // A new track resets the counter even though the stream position climbs.
+    update(&m, .{ .audio_event = .{ .key = keys.audio, .kind = .position, .position_ms = 215_000 } }, &fx);
+    update(&m, .{ .got_np = .{ .key = keys.fetch_np, .outcome = .ok, .status = 200, .body = "{\"nowPlaying\":{\"title\":\"Neon\",\"artist\":\"Purple Sky\",\"duration\":240}}" } }, &fx);
+    try testing.expectEqualStrings("NOW PLAYING — 0:00 / 4:00", m.np_head(arena));
+}
+
+test "a server track-start timestamp anchors elapsed to the broadcast position" {
+    var m: Model = .{};
+    m.track_started_at_s = 1_000;
+    m.track_duration_s = 137;
+    refreshTrackElapsed(&m, 1_101_000); // wall clock 101s after the start
+    try testing.expectEqual(@as(i64, 101_000), m.track_elapsed_ms);
+    refreshTrackElapsed(&m, 999_000); // clock skew before the start clamps to 0
+    try testing.expectEqual(@as(i64, 0), m.track_elapsed_ms);
+    refreshTrackElapsed(&m, 1_400_000); // running long pegs at the duration
+    try testing.expectEqual(@as(i64, 137_000), m.track_elapsed_ms);
+}
+
+test "now-playing timestamp lands in the model as the track start" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    update(&m, .{ .got_np = .{ .key = keys.fetch_np, .outcome = .ok, .status = 200, .body = "{\"nowPlaying\":{\"title\":\"Inspiring Chill\",\"artist\":\"Sergey Gulevich\",\"timestamp\":1785497431,\"duration\":137}}" } }, &fx);
+    try testing.expectEqual(@as(i64, 1_785_497_431), m.track_started_at_s);
 }
 
 test "initials take the artist's first two letters, with a fallback" {
