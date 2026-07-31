@@ -17,6 +17,7 @@ pub const Track = struct {
     subsonic_id: ?[]const u8 = null,
     genre: ?[]const u8 = null,
     duration: ?f64 = null, // seconds; may be int or float in JSON
+    timestamp: ?i64 = null, // unix seconds the track started airing
     year: ?i64 = null,
     bpm: ?f64 = null, // library analysis may emit fractional BPM
     musicalKey: ?[]const u8 = null,
