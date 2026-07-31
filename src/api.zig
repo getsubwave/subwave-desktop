@@ -50,6 +50,27 @@ pub fn beacon(buf: []u8, base: []const u8) ![]const u8 {
 pub fn like(buf: []u8, base: []const u8) ![]const u8 {
     return build(buf, base, "/api/like");
 }
+// POST {password} — the private-station gate. Fails CLOSED whenever either
+// privacy lock is on; the fail-open /listener-auth Icecast callback must
+// never be used for validation (see the web's lib/stationAuth.ts).
+pub fn stationAuth(buf: []u8, base: []const u8) ![]const u8 {
+    return build(buf, base, "/api/station-auth");
+}
+
+// Append the station password to a stream URL as the `auth=` query param
+// Icecast's URL auth forwards to the controller. Percent-encodes everything
+// outside the RFC 3986 unreserved set so passwords with spaces/&/unicode
+// survive the query string.
+pub fn withStreamAuth(buf: []u8, url: []const u8, token: []const u8) ![]const u8 {
+    var w = std.Io.Writer.fixed(buf);
+    const sep: u8 = if (std.mem.indexOfScalar(u8, url, '?') != null) '&' else '?';
+    try w.print("{s}{c}auth=", .{ url, sep });
+    for (token) |ch| {
+        const unreserved = std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '.' or ch == '_' or ch == '~';
+        if (unreserved) try w.writeByte(ch) else try w.print("%{X:0>2}", .{ch});
+    }
+    return w.buffered();
+}
 
 // Community stations directory — published by the featured station's web
 // origin (mirrors app/src/lib/directory.ts), independent of the tuned base.
@@ -92,4 +113,18 @@ test "url builders join base and path" {
     try testing.expectEqualStrings("https://x.test/stream.opus", try streamMount(&buf, "https://x.test/", "/stream.opus"));
     try testing.expectEqualStrings("https://x.test/api/cover/ab12", try coverUrl(&buf, "https://x.test", "ab12"));
     try testing.expectEqualStrings("https://x.test/api/like", try like(&buf, "https://x.test/"));
+    try testing.expectEqualStrings("https://x.test/api/station-auth", try stationAuth(&buf, "https://x.test/"));
+}
+
+test "withStreamAuth appends a percent-encoded auth token" {
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings(
+        "https://x.test/stream.mp3?auth=hunter2",
+        try withStreamAuth(&buf, "https://x.test/stream.mp3", "hunter2"),
+    );
+    // Existing query → &, and reserved bytes get escaped (space, &, é).
+    try testing.expectEqualStrings(
+        "https://x.test/stream.mp3?t=1&auth=a%20b%26c%C3%A9",
+        try withStreamAuth(&buf, "https://x.test/stream.mp3?t=1", "a b&cé"),
+    );
 }

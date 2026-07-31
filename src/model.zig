@@ -45,6 +45,7 @@ pub const keys = struct {
     pub const fetch_ob_dj: u64 = 35;
     pub const fetch_like: u64 = 36;
     pub const post_like: u64 = 37;
+    pub const post_station_auth: u64 = 38;
     pub const save_settings: u64 = 30;
     pub const save_debounce: u64 = 31;
     pub const discord_rpc_a: u64 = 40;
@@ -90,6 +91,10 @@ pub const BoothFilter = enum { all, dj, tracks };
 
 /// Request-slip lifecycle (mirrors the design's idle → pending → done card).
 pub const ReqPhase = enum { idle, pending, done, failed };
+
+/// Private-station gate lifecycle (mirrors the web StationGate's
+/// checking/prompt/ok phases; .idle = no privacy lock engaged).
+pub const AuthGate = enum { idle, checking, prompt, ok };
 
 /// One onboarding health-check step.
 pub const StepState = enum { wait, run, ok, fail };
@@ -171,7 +176,8 @@ pub const Model = struct {
     // before run; stream_url_buf holds the stable URL fed to the audio effect.
     base_buf: [256]u8 = undefined,
     base: []const u8 = api.default_base,
-    stream_url_buf: [256]u8 = undefined,
+    // Sized for base + mount + a fully percent-encoded station password.
+    stream_url_buf: [768]u8 = undefined,
     settings_path_buf: [768]u8 = undefined,
     settings_path: []const u8 = "",
     self_exe_path_buf: [768]u8 = undefined,
@@ -312,12 +318,30 @@ pub const Model = struct {
     theme_descs: [max_themes][]const u8 = [_][]const u8{""} ** max_themes,
     theme_count: usize = 0,
 
+    // Private-station gate (#478, mirrors web StationGate). The flags ride
+    // /api/state; the shared password is validated against POST
+    // /api/station-auth (which fails closed) and rides the stream URL as
+    // ?auth= once accepted. `station_pw` is only ever a password the station
+    // confirmed (or the persisted one, re-validated when a lock is seen);
+    // `auth_try` is the candidate in flight so a 200 knows what to keep.
+    privacy_private: bool = false,
+    privacy_listener_auth: bool = false,
+    auth_gate: AuthGate = .idle,
+    station_pw_buf: [128]u8 = undefined,
+    station_pw: []const u8 = "",
+    pw_buffer: canvas.TextBuffer(128) = .{},
+    auth_try_buf: [128]u8 = undefined,
+    auth_try: []const u8 = "",
+    auth_from_store: bool = false,
+    auth_body_buf: [416]u8 = undefined, // POST body must outlive the frame
+    auth_status: []const u8 = "", // static literals; "" = no error to show
+
     // station switcher (TEA text field for the address; shared by the
     // onboarding host field and the sidebar's add-a-station field — the two
     // are never on screen together) + settings scratch.
     station_buffer: canvas.TextBuffer(200) = .{},
     station_status: []const u8 = "",
-    settings_json_buf: [2048]u8 = undefined,
+    settings_json_buf: [3072]u8 = undefined,
     save_inflight: bool = false,
     save_dirty: bool = false,
 
@@ -449,6 +473,23 @@ pub const Model = struct {
     }
     pub fn station_text(self: *const Model) []const u8 {
         return self.station_buffer.text();
+    }
+    pub fn pw_text(self: *const Model) []const u8 {
+        return self.pw_buffer.text();
+    }
+
+    /// A privacy lock is engaged and no validated password is on hand — the
+    /// lock screen replaces the player (both lock kinds; the web only fully
+    /// replaces it for privatePlayer, but one full gate is simpler and errs
+    /// on the private side).
+    pub fn station_locked(self: *const Model) bool {
+        return (self.privacy_private or self.privacy_listener_auth) and self.auth_gate != .ok;
+    }
+    pub fn auth_checking(self: *const Model) bool {
+        return self.auth_gate == .checking;
+    }
+    pub fn has_auth_status(self: *const Model) bool {
+        return self.auth_status.len > 0;
     }
 
     pub fn play_label(self: *const Model) []const u8 {
@@ -1159,6 +1200,10 @@ pub const Model = struct {
         // stream-format state (bound via format_rows/format_value)
         "format_pref",        "stream_flags_known",  "stream_opus",
         "stream_flac",        "stream_aac",          "stationEnables",      "effectiveFormat",
+        // private-station gate internals (bound via pw_text/auth_checking/…)
+        "privacy_private",    "privacy_listener_auth", "auth_gate",         "station_pw",
+        "station_pw_buf",     "pw_buffer",           "auth_try",            "auth_try_buf",
+        "auth_from_store",    "auth_body_buf",       "station_locked",
         // station / settings / theme-override state
         "base",               "base_buf",            "stream_url_buf",      "settings_path",
         "settings_path_buf",  "settings_json_buf",   "station_buffer",      "theme_override",
@@ -1277,6 +1322,11 @@ pub const Msg = union(enum) {
     submit_req,
     reset_request,
 
+    // private-station gate
+    pw_edit: canvas.TextInputEvent,
+    submit_pw,
+    got_station_auth: native_sdk.EffectResponse,
+
     // stations
     station_edit: canvas.TextInputEvent,
     tune_station, // from the sidebar address field
@@ -1322,6 +1372,7 @@ pub const Msg = union(enum) {
         "discord_line",  "discord_exited", "tick_discord_retry",
         "show_player",   "quit_app",       "app_activated", "app_deactivated",
         "got_update",    "tick_update",    "opener_exited",
+        "got_station_auth",
     };
 };
 
@@ -1399,8 +1450,16 @@ fn startStream(model: *Model, fx: *Effects) void {
     // mid-listen a second time.
     fx.cancelTimer(keys.reconnect);
     // Stream URL lives in a stable model buffer (the audio effect streams from
-    // it continuously; a stack buffer could dangle).
-    const url = api.streamMount(&model.stream_url_buf, model.base, model.effectiveFormat().mount()) catch return;
+    // it continuously; a stack buffer could dangle). A stored station password
+    // rides along as ?auth= whenever present — Icecast ignores the query when
+    // listener auth is off (mirrors the web's withStreamAuth).
+    var mount_buf: [320]u8 = undefined;
+    const url = if (model.station_pw.len == 0)
+        api.streamMount(&model.stream_url_buf, model.base, model.effectiveFormat().mount()) catch return
+    else blk: {
+        const bare = api.streamMount(&mount_buf, model.base, model.effectiveFormat().mount()) catch return;
+        break :blk api.withStreamAuth(&model.stream_url_buf, bare, model.station_pw) catch return;
+    };
     fx.playAudio(.{
         .key = keys.audio,
         .path = "",
@@ -1530,6 +1589,11 @@ pub fn applySettingsJson(model: *Model, bytes: []const u8) void {
     if (s.stationName) |n| {
         if (n.len > 0) setStr(&model.station_name_buf, &model.station_name, n);
     }
+    // Re-validated against /station-auth the first time a state poll reports
+    // a privacy lock — a rotated password clears itself then.
+    if (s.stationPassword) |p| {
+        if (p.len > 0) setStr(&model.station_pw_buf, &model.station_pw, p);
+    }
     if (s.recents) |list| {
         model.recents_count = 0;
         for (list) |r| {
@@ -1556,12 +1620,16 @@ fn saveSettings(model: *Model, fx: *Effects) void {
     }
     var w = std.Io.Writer.fixed(&model.settings_json_buf);
     var esc: [256]u8 = undefined;
-    w.print("{{\"volume\":{d:.2},\"themeOverride\":\"{s}\",\"streamFormat\":\"{s}\",\"station\":\"{s}\",\"stationName\":\"{s}\",\"discordEnabled\":{s},\"recents\":[", .{
+    // The password gets its own escape buffer: worst case every byte doubles,
+    // and a truncated secret would silently fail to unlock on the next run.
+    var pw_esc: [256]u8 = undefined;
+    w.print("{{\"volume\":{d:.2},\"themeOverride\":\"{s}\",\"streamFormat\":\"{s}\",\"station\":\"{s}\",\"stationName\":\"{s}\",\"stationPassword\":\"{s}\",\"discordEnabled\":{s},\"recents\":[", .{
         model.volume,
         jsonEscape(esc[0..64], model.theme_override),
         model.format_pref.id(),
         model.base,
         jsonEscape(esc[64..128], model.station_name),
+        jsonEscape(&pw_esc, model.station_pw),
         if (model.discord_enabled) "true" else "false",
     }) catch return;
     for (model.recents[0..model.recents_count], 0..) |r, i| {
@@ -1595,6 +1663,41 @@ fn scheduleReconnect(model: *Model, fx: *Effects) void {
     const delay: u32 = @min(@as(u32, 500) * (@as(u32, 1) << shift), 60_000);
     model.retry +|= 1;
     fx.startTimer(.{ .key = keys.reconnect, .interval_ms = delay, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick_reconnect) });
+}
+
+// Ask the station whether `candidate` opens the privacy locks (POST
+// /api/station-auth — fails closed; see api.stationAuth). The body lives in a
+// model buffer because fetch bodies must outlive the frame (like
+// like_body_buf); the URL is copied by the effect.
+fn postStationAuth(model: *Model, fx: *Effects, candidate: []const u8, from_store: bool) void {
+    var b: [256]u8 = undefined;
+    const url = api.stationAuth(&b, model.base) catch return;
+    setStr(&model.auth_try_buf, &model.auth_try, candidate);
+    model.auth_from_store = from_store;
+    model.auth_gate = .checking;
+    model.auth_status = "";
+    var w = std.Io.Writer.fixed(&model.auth_body_buf);
+    var esc: [256]u8 = undefined;
+    w.print("{{\"password\":\"{s}\"}}", .{jsonEscape(&esc, model.auth_try)}) catch return;
+    fx.fetch(.{
+        .key = keys.post_station_auth,
+        .method = .POST,
+        .url = url,
+        .headers = &.{.{ .name = "content-type", .value = "application/json" }},
+        .body = w.buffered(),
+        .timeout_ms = 10_000,
+        .on_response = Effects.responseMsg(.got_station_auth),
+    });
+}
+
+// A privacy lock engaged with no validated password: drop to the gate. The
+// gate owns the whole window — one player surface at a time (PR #19), and an
+// unauthenticated stream would just 401-loop against Icecast.
+fn lockStation(model: *Model, fx: *Effects) void {
+    model.auth_gate = .prompt;
+    model.sheet = .none;
+    model.mini_open = false;
+    if (model.transport != .stopped) tuneOut(model, fx);
 }
 
 // Ask the station for the current airing's liked-state + count. A station
@@ -1817,6 +1920,17 @@ fn retune(model: *Model, fx: *Effects) void {
     model.stream_opus = false;
     model.stream_flac = false;
     model.stream_aac = false;
+    // The station password is per station too — and unlike the web's
+    // per-origin localStorage, one settings file serves every station, so the
+    // old station's secret must never be POSTed to the new one. The first
+    // /api/state poll re-gates if the new station is private.
+    model.station_pw = "";
+    model.pw_buffer.clear();
+    model.privacy_private = false;
+    model.privacy_listener_auth = false;
+    model.auth_gate = .idle;
+    model.auth_status = "";
+    fx.cancel(keys.post_station_auth);
     // Cancel everything still in flight for the OLD station so a late
     // response can't repopulate the fresh state.
     fx.cancel(keys.fetch_np);
@@ -1947,6 +2061,13 @@ pub fn boot(model: *Model, fx: *Effects) void {
 
 // ---------------------------------------------------------------- update
 pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
+    // While the privacy gate is up, transport/mini/like verbs are dead —
+    // the gate owns the window, and an unauthenticated stream would just
+    // 401-loop against Icecast. (Keyboard fallbacks land here too.)
+    if (model.station_locked()) switch (msg) {
+        .toggle_play, .tune_toggle, .toggle_mute, .press_like, .toggle_mini, .expand_mini, .sleep_cycle => return,
+        else => {},
+    };
     switch (msg) {
         .tick_feed => |t| {
             if (t.outcome == .fired) fetchFeed(model, fx);
@@ -2140,6 +2261,22 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                         fetchThemes(model, fx);
                     }
                 }
+            }
+            // Private-station flags (#478) — booleans only, never the
+            // password. Transitions only fire from .idle so a poll can't
+            // restart an in-flight check or re-prompt over a typed password.
+            const priv = parsed.value.privacy orelse json.Privacy{};
+            model.privacy_private = priv.privatePlayer orelse false;
+            model.privacy_listener_auth = priv.listenerAuth orelse false;
+            if (!model.privacy_private and !model.privacy_listener_auth) {
+                // Operator unlocked (or the station never was locked).
+                model.auth_gate = .idle;
+                model.auth_status = "";
+            } else if (model.auth_gate == .idle) {
+                if (model.station_pw.len > 0)
+                    postStationAuth(model, fx, model.station_pw, true)
+                else
+                    lockStation(model, fx);
             }
             // Timeline ledger: UP NEXT + PLAYED.
             if (parsed.value.upcoming) |list| {
@@ -2714,6 +2851,53 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         // --------------------------------------------------- booth / schedule
         .set_booth_filter => |f| model.booth_filter = f,
         .pick_day => |d| model.day_sel = std.math.clamp(d, 0, 6),
+
+        // ------------------------------------------------ private-station gate
+        .pw_edit => |edit| {
+            model.pw_buffer.apply(edit);
+            model.auth_status = "";
+        },
+        .submit_pw => {
+            if (model.auth_gate == .checking) return;
+            const pw = std.mem.trim(u8, model.pw_buffer.text(), " \t\r\n");
+            if (pw.len == 0) return;
+            postStationAuth(model, fx, pw, false);
+        },
+        .got_station_auth => |r| {
+            // A verdict for a check the gate has moved past (station switch,
+            // operator unlocking mid-flight) changes nothing.
+            if (model.auth_gate != .checking) return;
+            if (r.outcome == .ok and r.status == 200) {
+                setStr(&model.station_pw_buf, &model.station_pw, model.auth_try);
+                model.auth_gate = .ok;
+                model.auth_status = "";
+                model.pw_buffer.clear();
+                saveSettings(model, fx);
+                // Unlocking IS tuning in — the stream URL now carries ?auth=.
+                // A stream that never stopped (stored password confirmed) is
+                // already playing with the token and stays untouched.
+                if (model.transport != .playing) {
+                    model.retry = 0;
+                    startStream(model, fx);
+                }
+                return;
+            }
+            const stale = model.auth_from_store;
+            lockStation(model, fx);
+            if (stale) {
+                // Operator rotated the password: forget it, prompt silently —
+                // the listener never typed anything to be wrong about.
+                model.station_pw = "";
+                saveSettings(model, fx);
+                return;
+            }
+            model.auth_status = if (r.outcome != .ok)
+                "Couldn't reach the station."
+            else if (r.status == 429)
+                "Too many attempts — wait a few minutes and try again."
+            else
+                "That password was not accepted.";
+        },
 
         // ---------------------------------------------------------- stations
         .station_edit => |edit| {
@@ -3376,6 +3560,86 @@ test "settings round-trip the stream format; junk ids keep the floor" {
     var m2: Model = .{};
     applySettingsJson(&m2, "{\"streamFormat\":\"wav\"}");
     try testing.expectEqual(StreamFormat.mp3, m2.format_pref);
+}
+
+test "private station: flags gate the player and a good password unlocks" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.phase = .player;
+    m.transport = .playing;
+    @memset(&m.stream_url_buf, 0); // deterministic bytes for the URL asserts
+    update(&m, .{ .got_state = .{ .key = keys.fetch_state, .outcome = .ok, .status = 200, .body = "{\"privacy\":{\"privatePlayer\":true,\"listenerAuth\":true}}" } }, &fx);
+    try testing.expect(m.privacy_private);
+    try testing.expect(m.privacy_listener_auth);
+    try testing.expect(m.station_locked());
+    try testing.expectEqual(AuthGate.prompt, m.auth_gate);
+    // The gate tunes out (an unauthenticated stream would 401-loop) and
+    // transport verbs are dead while it stands.
+    try testing.expectEqual(Transport.stopped, m.transport);
+    update(&m, .toggle_play, &fx);
+    try testing.expectEqual(Transport.stopped, m.transport);
+    // Type + submit → checking; 200 stores the password and tunes in with
+    // the percent-encoded token riding the stream URL.
+    m.pw_buffer.set("hunter 2");
+    update(&m, .submit_pw, &fx);
+    try testing.expectEqual(AuthGate.checking, m.auth_gate);
+    update(&m, .{ .got_station_auth = .{ .key = keys.post_station_auth, .outcome = .ok, .status = 200 } }, &fx);
+    try testing.expect(!m.station_locked());
+    try testing.expectEqualStrings("hunter 2", m.station_pw);
+    try testing.expectEqual(Transport.playing, m.transport);
+    try testing.expect(std.mem.indexOf(u8, &m.stream_url_buf, "?auth=hunter%202") != null);
+    try testing.expectEqualStrings("", m.pw_text());
+}
+
+test "private station: a rotated stored password re-prompts silently, a typed one shows the error" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.phase = .player;
+    applySettingsJson(&m, "{\"stationPassword\":\"old-secret\"}");
+    try testing.expectEqualStrings("old-secret", m.station_pw);
+    // A lock appears → the stored password is re-validated, not prompted.
+    update(&m, .{ .got_state = .{ .key = keys.fetch_state, .outcome = .ok, .status = 200, .body = "{\"privacy\":{\"privatePlayer\":true}}" } }, &fx);
+    try testing.expectEqual(AuthGate.checking, m.auth_gate);
+    // 401 = rotation: forget it, prompt with no error to be wrong about.
+    update(&m, .{ .got_station_auth = .{ .key = keys.post_station_auth, .outcome = .ok, .status = 401 } }, &fx);
+    try testing.expectEqual(AuthGate.prompt, m.auth_gate);
+    try testing.expectEqualStrings("", m.station_pw);
+    try testing.expectEqualStrings("", m.auth_status);
+    // A typed wrong password does get the error line (and 429 its own).
+    m.pw_buffer.set("nope");
+    update(&m, .submit_pw, &fx);
+    update(&m, .{ .got_station_auth = .{ .key = keys.post_station_auth, .outcome = .ok, .status = 401 } }, &fx);
+    try testing.expectEqualStrings("That password was not accepted.", m.auth_status);
+    update(&m, .submit_pw, &fx);
+    update(&m, .{ .got_station_auth = .{ .key = keys.post_station_auth, .outcome = .ok, .status = 429 } }, &fx);
+    try testing.expect(std.mem.startsWith(u8, m.auth_status, "Too many attempts"));
+    // Operator turns privacy off → the gate stands down on the next poll.
+    update(&m, .{ .got_state = .{ .key = keys.fetch_state, .outcome = .ok, .status = 200, .body = "{\"privacy\":{\"privatePlayer\":false}}" } }, &fx);
+    try testing.expect(!m.station_locked());
+    try testing.expectEqual(AuthGate.idle, m.auth_gate);
+}
+
+test "private station: switching stations forgets the password" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.phase = .player;
+    applySettingsJson(&m, "{\"stationPassword\":\"secret\"}");
+    m.auth_gate = .ok;
+    m.privacy_private = true;
+    @memset(&m.stream_url_buf, 0); // deterministic bytes for the URL asserts
+    update(&m, .{ .pick_recent = "https://other.example" }, &fx);
+    try testing.expectEqualStrings("", m.station_pw);
+    try testing.expectEqual(AuthGate.idle, m.auth_gate);
+    try testing.expect(!m.privacy_private);
+    // The new station's stream URL carries no stale ?auth= token.
+    try testing.expect(std.mem.startsWith(u8, &m.stream_url_buf, "https://other.example/stream.mp3"));
+    try testing.expect(!std.mem.startsWith(u8, &m.stream_url_buf, "https://other.example/stream.mp3?"));
 }
 
 test "discord settings round-trip through applySettingsJson" {

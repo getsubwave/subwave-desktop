@@ -23,6 +23,7 @@ const Msg = main.Msg;
 const AppMarkup = canvas.MarkupView(Model, Msg);
 
 const onboarding_markup = @embedFile("views/onboarding.native");
+const lock_markup = @embedFile("views/lock.native");
 const mini_markup = @embedFile("views/mini.native");
 const player_top_markup = @embedFile("views/player-top.native");
 const player_sidebar_markup = @embedFile("views/player-sidebar.native");
@@ -234,6 +235,37 @@ test "onboarding view builds in entry and check phases" {
     model.ob_steps = .{ .ok, .ok, .ok, .ok };
     model.ob_done = true;
     try buildAndLayout(arena3.allocator(), onboarding_markup, &model, 980, 660);
+}
+
+test "lock view builds in prompt, error, and checking states" {
+    var model: Model = .{};
+    model.phase = .player;
+    model.privacy_private = true;
+    model.auth_gate = .prompt;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    try buildAndLayout(arena_state.allocator(), lock_markup, &model, 980, 660);
+    // Wrong-password error line present.
+    model.auth_status = "That password was not accepted.";
+    var arena2 = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena2.deinit();
+    try buildAndLayout(arena2.allocator(), lock_markup, &model, 980, 660);
+    // Stored-password re-validation spinner.
+    model.auth_status = "";
+    model.auth_gate = .checking;
+    var arena3 = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena3.deinit();
+    try buildAndLayout(arena3.allocator(), lock_markup, &model, 980, 660);
+    // And through the composed root: a locked player renders the gate.
+    const views = @import("views.zig");
+    model.auth_gate = .prompt;
+    var arena4 = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena4.deinit();
+    var ui = AppUi.init(arena4.allocator());
+    const tree = try ui.finalize(views.rootView(&ui, &model));
+    var nodes: [1024]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(tree.root, native_sdk.geometry.RectF.init(0, 0, 980, 660), &nodes);
+    try testing.expect(layout.nodes.len > 0);
 }
 
 test "mini view builds and lays out" {

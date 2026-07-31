@@ -90,10 +90,18 @@ pub const QueueEntry = struct {
     t: ?[]const u8 = null, // ISO timestamp on history entries
 };
 
+// Private-station flags riding /api/state — booleans only, never the
+// password. Old stations omit the object entirely (→ both false).
+pub const Privacy = struct {
+    privatePlayer: ?bool = null,
+    listenerAuth: ?bool = null,
+};
+
 pub const StationState = struct {
     theme: ?Theme = null,
     upcoming: ?[]QueueEntry = null,
     history: ?[]QueueEntry = null,
+    privacy: ?Privacy = null,
 };
 
 // /api/dj — station identity for the masthead + onboarding booth step.
@@ -240,6 +248,9 @@ pub const Settings = struct {
     streamFormat: ?[]const u8 = null,
     station: ?[]const u8 = null,
     stationName: ?[]const u8 = null,
+    // Shared station password for private stations (plaintext, like the web
+    // player's localStorage token); "" / absent = none stored.
+    stationPassword: ?[]const u8 = null,
     recents: ?[]SettingsRecent = null,
     discordEnabled: ?bool = null,
 };

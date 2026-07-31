@@ -18,6 +18,7 @@ const Msg = model_mod.Msg;
 const Ui = canvas.Ui(Msg);
 
 const Onboarding = canvas.CompiledMarkupView(Model, Msg, @embedFile("views/onboarding.native"));
+const Lock = canvas.CompiledMarkupView(Model, Msg, @embedFile("views/lock.native"));
 const Mini = canvas.CompiledMarkupView(Model, Msg, @embedFile("views/mini.native"));
 const PlayerTop = canvas.CompiledMarkupView(Model, Msg, @embedFile("views/player-top.native"));
 const PlayerSidebar = canvas.CompiledMarkupView(Model, Msg, @embedFile("views/player-sidebar.native"));
@@ -26,11 +27,15 @@ const PlayerPanel = canvas.CompiledMarkupView(Model, Msg, @embedFile("views/play
 const PlayerDeck = canvas.CompiledMarkupView(Model, Msg, @embedFile("views/player-deck.native"));
 const PlayerSheets = canvas.CompiledMarkupView(Model, Msg, @embedFile("views/player-sheets.native"));
 
-// Main-window root: setup until a station is tuned, then the player.
+// Main-window root: setup until a station is tuned, then the player — unless
+// a privacy lock is engaged without a validated password, in which case the
+// gate replaces the player outright (mirrors web StationGate's privatePlayer
+// mode; one full gate covers listenerAuth too — see docs/superpowers/specs/
+// 2026-07-31-private-station-design.md).
 pub fn rootView(ui: *Ui, model: *const Model) Ui.Node {
     return switch (model.phase) {
         .onboarding => Onboarding.build(ui, model),
-        .player => playerView(ui, model),
+        .player => if (model.station_locked()) Lock.build(ui, model) else playerView(ui, model),
     };
 }
 

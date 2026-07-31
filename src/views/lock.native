@@ -1,0 +1,43 @@
+<!-- Private-station gate (#478) — mirrors the web player's StationGate.
+     Replaces the whole player while a privacy lock is engaged and the
+     password has not been validated against POST /api/station-auth; the
+     stored password re-validates silently first (auth_checking), so this
+     screen only asks when the station really wants an answer. -->
+
+<column grow="1">
+  <!-- Window chrome strip (drag region under the hidden titlebar) -->
+  <row cross="center" gap="12" height="52" padding="8" window-drag="true">
+    <spacer width="{chrome_leading}"/>
+    <text size="sm" foreground="text_muted">SUB/WAVE — MEMBERS ONLY</text>
+    <spacer grow="1"/>
+  </row>
+  <separator/>
+
+  <column grow="1" main="center" cross="center" padding="32">
+    <column gap="12" width="440">
+      <row gap="10" cross="center">
+        <icon name="app:logo" width="22" height="22" foreground="accent"/>
+        <text size="sm"><span weight="bold">{station_name}</span></text>
+      </row>
+      <text size="sm" foreground="text_muted">MEMBERS ONLY</text>
+      <text size="heading">This station is private.</text>
+      <text size="sm" foreground="text_muted" wrap="true">Ask the operator for the station password to tune in.</text>
+
+      <search-field text="{pw_text}" placeholder="station password" on-input="pw_edit" on-submit="submit_pw"/>
+
+      <if test="{has_auth_status}">
+        <text size="sm" foreground="destructive" wrap="true">{auth_status}</text>
+      </if>
+
+      <if test="{auth_checking}">
+        <row gap="8" cross="center">
+          <spinner/>
+          <text size="sm" foreground="text_muted">Checking…</text>
+        </row>
+      </if>
+      <else>
+        <button variant="primary" on-press="submit_pw">Tune in</button>
+      </else>
+    </column>
+  </column>
+</column>

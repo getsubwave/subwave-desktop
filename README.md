@@ -56,6 +56,12 @@ repo from the main `subwave` monorepo; it tracks the same station HTTP API.
   current track, Esc back to LIVE, Cmd/Ctrl+K stations, Cmd/Ctrl+Shift+M mini
   player, 1–5 dial stops (app-level fallback; never steals typing from the
   text fields).
+- **Private stations** — when `/api/state` reports a privacy lock
+  (`privatePlayer` / `listenerAuth`), a members-only gate replaces the player
+  until the shared station password validates against `POST /api/station-auth`
+  (fails closed); once accepted it persists in settings.json and rides the
+  stream URL as `?auth=` for Icecast listener auth. Switching stations forgets
+  it. Mirrors the web player's StationGate.
 - **Settings persistence** — volume / theme override / stream format / station
   (+ name) / recents survive restarts (`settings.json` in the OS per-app
   config dir), saved debounced + serialized via `fx.writeFile`.
