@@ -271,6 +271,12 @@ pub const Model = struct {
     stream_opus: bool = false,
     stream_flac: bool = false,
     stream_aac: bool = false,
+    // The station's PRIMARY mount and its bitrate, as advertised alongside
+    // those flags. The bitrate describes that mount and no other, so the deck
+    // chip only prints it while the listener is actually tuned to it —
+    // labelling an Opus stream "192k" would be inventing a measurement.
+    stream_primary: ?StreamFormat = null,
+    stream_bitrate: u32 = 0, // 0 = unknown
 
     // signal probe (timed GET /api/health while playing)
     latency_ms: i64 = -1, // -1 = no reading yet
@@ -1115,34 +1121,39 @@ pub const Model = struct {
         label: []const u8 = "",
         detail: []const u8 = "",
         on: bool = false,
+        available: bool = false,
     };
-    /// The formats the listener can pick right now: platform-decodable AND
-    /// advertised by the station. Always contains at least MP3.
+    /// Every format THIS platform can decode, whether or not the station
+    /// serves it — an unavailable row states why in its detail line instead of
+    /// vanishing, so a station down to the MP3 floor reads as a fact rather
+    /// than a missing feature. Formats the platform cannot decode stay out
+    /// entirely: there is nothing a listener on macOS can do about FLAC, so
+    /// listing it would only be noise. Always contains at least MP3.
     pub fn format_rows(self: *const Model, arena: std.mem.Allocator) []const FormatRow {
         var out: std.ArrayList(FormatRow) = .empty;
         const effective = self.effectiveFormat();
         for (StreamFormat.all) |f| {
-            if (!stream_format.platformSupports(f) or !self.stationEnables(f)) continue;
+            if (!stream_format.platformSupports(f)) continue;
+            const available = self.stationEnables(f);
             out.append(arena, .{
                 .id = f.id(),
                 .label = f.label(),
-                .detail = f.detail(),
-                .on = f == effective,
+                .detail = if (available) f.detail() else "not served by this station",
+                .on = available and f == effective,
+                .available = available,
             }) catch break;
         }
         return out.items;
     }
-    /// The back panel's SIGNAL row hides while the MP3 floor is the only
-    /// pick (mirrors the mobile app's format drawer).
-    pub fn has_format_choice(self: *const Model) bool {
-        for (StreamFormat.all) |f| {
-            if (f == .mp3) continue;
-            if (stream_format.platformSupports(f) and self.stationEnables(f)) return true;
-        }
-        return false;
-    }
-    pub fn format_value(self: *const Model) []const u8 {
-        return self.effectiveFormat().label();
+    /// The back panel's SIGNAL row and the transport deck's chip, e.g.
+    /// "MP3 192k". The bitrate rides along only while the station's primary
+    /// mount IS the format being played — see stream_primary.
+    pub fn format_value(self: *const Model, arena: std.mem.Allocator) []const u8 {
+        const effective = self.effectiveFormat();
+        const label = effective.label();
+        const primary = self.stream_primary orelse return label;
+        if (primary != effective or self.stream_bitrate == 0) return label;
+        return std.fmt.allocPrint(arena, "{s} {d}k", .{ label, self.stream_bitrate }) catch label;
     }
 
     // The chart-bound spectrum series.
@@ -1200,6 +1211,7 @@ pub const Model = struct {
         // stream-format state (bound via format_rows/format_value)
         "format_pref",        "stream_flags_known",  "stream_opus",
         "stream_flac",        "stream_aac",          "stationEnables",      "effectiveFormat",
+        "stream_primary",     "stream_bitrate",
         // private-station gate internals (bound via pw_text/auth_checking/…)
         "privacy_private",    "privacy_listener_auth", "auth_gate",         "station_pw",
         "station_pw_buf",     "pw_buffer",           "auth_try",            "auth_try_buf",
@@ -1920,6 +1932,8 @@ fn retune(model: *Model, fx: *Effects) void {
     model.stream_opus = false;
     model.stream_flac = false;
     model.stream_aac = false;
+    model.stream_primary = null;
+    model.stream_bitrate = 0;
     // The station password is per station too — and unlike the web's
     // per-origin localStorage, one settings file serves every station, so the
     // old station's secret must never be POSTed to the new one. The first
@@ -2235,6 +2249,15 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 model.stream_opus = sf.opusEnabled orelse false;
                 model.stream_flac = sf.flacEnabled orelse false;
                 model.stream_aac = sf.aacEnabled orelse false;
+                // The primary mount's shape, for the deck chip's readout. An
+                // unrecognised format id leaves the pair unset rather than
+                // pinning the bitrate to the wrong mount.
+                model.stream_primary = if (sf.format) |id| stream_format.fromId(id) else null;
+                model.stream_bitrate = if (model.stream_primary != null and sf.bitrate != null and
+                    sf.bitrate.? > 0 and sf.bitrate.? < 10_000)
+                    @intCast(sf.bitrate.?)
+                else
+                    0;
                 if (model.transport == .playing and model.effectiveFormat() != before)
                     startStream(model, fx);
             }
@@ -3011,6 +3034,12 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .pick_format => |id| {
             const fmt = stream_format.fromId(id) orelse return;
+            // The sheet lists mounts this station doesn't serve so it can say
+            // so; pressing one is inert. Absorbing it here keeps the markup
+            // free of a second, press-less row variant, and keeps a dead value
+            // out of format_pref (where it would persist and then silently
+            // resolve back to the floor).
+            if (!stream_format.platformSupports(fmt) or !model.stationEnables(fmt)) return;
             const before = model.effectiveFormat();
             model.format_pref = fmt;
             saveSettings(model, fx);
@@ -3508,7 +3537,7 @@ test "effective format: platform + station gates fall back to the MP3 floor" {
     try testing.expectEqual(expect_opus, m.effectiveFormat());
 }
 
-test "format picker: hidden on the floor, a pick retunes in place and persists" {
+test "format picker: every decodable mount is listed, a pick retunes in place" {
     var fx = Effects.init(testing.allocator);
     defer fx.deinit();
     fx.executor = .fake;
@@ -3516,25 +3545,91 @@ test "format picker: hidden on the floor, a pick retunes in place and persists" 
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     var m: Model = .{};
-    // Only the MP3 floor confirmed → no SIGNAL row, one option listed.
-    try testing.expect(!m.has_format_choice());
-    try testing.expectEqual(@as(usize, 1), m.format_rows(arena).len);
+    // The row count is a PLATFORM fact, not a station one: the sheet always
+    // names everything this host can decode so a station down to the floor
+    // reads as a fact rather than a missing feature. Station flags move the
+    // `available` bits inside that fixed list.
+    var decodable: usize = 0;
+    for (StreamFormat.all) |f| {
+        if (stream_format.platformSupports(f)) decodable += 1;
+    }
+    try testing.expectEqual(decodable, m.format_rows(arena).len);
     m.stream_flags_known = true;
+    for (m.format_rows(arena)) |r| {
+        try testing.expectEqual(std.mem.eql(u8, r.id, "mp3"), r.available);
+        if (!r.available) try testing.expectEqualStrings("not served by this station", r.detail);
+    }
     m.stream_aac = true;
-    try testing.expect(m.has_format_choice());
-    try testing.expectEqual(@as(usize, 2), m.format_rows(arena).len);
+    var available: usize = 0;
+    for (m.format_rows(arena)) |r| {
+        if (r.available) available += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), available);
     // Picking AAC mid-listen rebuilds the stream URL on the new mount and
     // lands back on the panel.
     m.transport = .playing;
     m.sheet = .format;
     update(&m, .{ .pick_format = "aac" }, &fx);
     try testing.expectEqual(StreamFormat.aac, m.format_pref);
-    try testing.expectEqualStrings("AAC", m.format_value());
+    try testing.expectEqualStrings("AAC", m.format_value(arena));
     try testing.expectEqual(Sheet.panel, m.sheet);
     try testing.expect(std.mem.startsWith(u8, &m.stream_url_buf, "https://www.getsubwave.com/stream.aac"));
     // Junk ids are ignored.
     update(&m, .{ .pick_format = "wav" }, &fx);
     try testing.expectEqual(StreamFormat.aac, m.format_pref);
+}
+
+test "format picker: pressing a mount the station doesn't serve is inert" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.stream_flags_known = true;
+    m.stream_aac = true;
+    m.format_pref = .aac;
+    // FLAC is listed (on hosts that demux Ogg) purely to say it isn't served.
+    // The press must not park a dead value in format_pref, where it would
+    // persist to settings.json and then quietly resolve back to the floor.
+    update(&m, .{ .pick_format = "flac" }, &fx);
+    try testing.expectEqual(StreamFormat.aac, m.format_pref);
+}
+
+test "format chip: the bitrate only rides along on the station's own mount" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var m: Model = .{};
+    // Nothing advertised yet → the bare label.
+    try testing.expectEqualStrings("MP3", m.format_value(arena));
+    m.stream_primary = .mp3;
+    m.stream_bitrate = 192;
+    try testing.expectEqualStrings("MP3 192k", m.format_value(arena));
+    // Tuned to a different mount than the one that bitrate describes: the
+    // number belongs to the station's primary mount and nothing measured this
+    // one, so it must not be borrowed.
+    m.stream_flags_known = true;
+    m.stream_aac = true;
+    m.format_pref = .aac;
+    try testing.expectEqualStrings("AAC", m.format_value(arena));
+}
+
+test "got_np reads the primary mount's shape for the chip" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var m: Model = .{};
+    update(&m, .{ .got_np = .{ .key = keys.fetch_np, .outcome = .ok, .status = 200, .body = "{\"stream\":{\"mount\":\"/stream.mp3\",\"format\":\"mp3\",\"bitrate\":192}}" } }, &fx);
+    try testing.expectEqual(StreamFormat.mp3, m.stream_primary.?);
+    try testing.expectEqualStrings("MP3 192k", m.format_value(arena));
+    // A format id this build doesn't know leaves the pair unset rather than
+    // pinning a bitrate to the wrong mount.
+    update(&m, .{ .got_np = .{ .key = keys.fetch_np, .outcome = .ok, .status = 200, .body = "{\"stream\":{\"format\":\"wav\",\"bitrate\":320}}" } }, &fx);
+    try testing.expectEqual(@as(?StreamFormat, null), m.stream_primary);
+    try testing.expectEqual(@as(u32, 0), m.stream_bitrate);
+    try testing.expectEqualStrings("MP3", m.format_value(arena));
 }
 
 test "got_np stream flags retune a playing stream off a dead mount" {

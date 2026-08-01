@@ -39,20 +39,17 @@
             <icon name="chevron-right" width="14" height="14" foreground="text_muted"/>
           </row>
         </row>
-        <!-- Hidden while the MP3 floor is the only pick this station+platform offers -->
-        <if test="{has_format_choice}">
-          <use template="section-label" title="SIGNAL"/>
-          <row on-press="open_format" main="space_between" cross="center" padding="10" label="Stream format">
-            <row gap="10" cross="center">
-              <icon name="music" width="16" height="16" foreground="text_muted"/>
-              <text>Stream format</text>
-            </row>
-            <row gap="6" cross="center">
-              <text size="sm" foreground="text_muted">{format_value}</text>
-              <icon name="chevron-right" width="14" height="14" foreground="text_muted"/>
-            </row>
+        <use template="section-label" title="SIGNAL"/>
+        <row on-press="open_format" main="space_between" cross="center" padding="10" label="Stream format">
+          <row gap="10" cross="center">
+            <icon name="music" width="16" height="16" foreground="text_muted"/>
+            <text>Stream format</text>
           </row>
-        </if>
+          <row gap="6" cross="center">
+            <text size="sm" foreground="text_muted">{format_value}</text>
+            <icon name="chevron-right" width="14" height="14" foreground="text_muted"/>
+          </row>
+        </row>
         <use template="section-label" title="INTEGRATIONS"/>
         <row on-press="open_discord" main="space_between" cross="center" padding="10" label="Discord Rich Presence">
           <row gap="10" cross="center">
@@ -189,6 +186,9 @@
         </row>
         <text size="sm" foreground="text_muted" wrap="true">The MP3 floor always plays; the station's optional mounts trade data for fidelity.</text>
         <column gap="0">
+          <!-- Every mount this platform can decode is listed, including the
+               ones the station doesn't serve — those say so on their detail
+               line and their press is absorbed in update(). -->
           <for each="format_rows" key="id" as="f">
             <row on-press="pick_format:{f.id}" main="space_between" cross="center" padding="10" label="{f.label}">
               <column gap="1">
