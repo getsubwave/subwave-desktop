@@ -4,21 +4,14 @@
 //! src/ (outside the module path), so this constant is the runtime authority;
 //! scripts/make-release.sh refuses to cut a release when the two drift.
 const std = @import("std");
-const builtin = @import("builtin");
+const links = @import("links.zig");
 
 pub const version = "0.7.0";
 
 pub const release_api_url = "https://api.github.com/repos/getsubwave/subwave-desktop/releases/latest";
-pub const release_page_url = "https://github.com/getsubwave/subwave-desktop/releases/latest";
-
-/// Default-browser opener, comptime-resolved per OS. The URL is baked in:
-/// the static releases/latest page always shows the newest build, so the
-/// Model never stores a per-release URL.
-pub const opener_argv: []const []const u8 = switch (builtin.os.tag) {
-    .macos => &.{ "open", release_page_url },
-    .windows => &.{ "cmd", "/C", "start", "", release_page_url },
-    else => &.{ "xdg-open", release_page_url },
-};
+/// The static releases/latest page always shows the newest build, so the
+/// Model never stores a per-release URL — see `links.zig` for the opener.
+pub const release_page_url = links.release_page;
 
 const Semver = struct { major: u32, minor: u32, patch: u32 };
 

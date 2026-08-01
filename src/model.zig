@@ -14,6 +14,7 @@ const stream_format = @import("stream_format.zig");
 const discord_rpc = @import("discord_rpc.zig");
 // `update` is the reducer below, so the self-update module needs an alias.
 const updater = @import("update.zig");
+const links = @import("links.zig");
 pub const StreamFormat = stream_format.StreamFormat;
 
 // Default listening volume on tune-in. (Decode/position/spectrum report
@@ -54,6 +55,7 @@ pub const keys = struct {
     pub const fetch_update: u64 = 43;
     pub const update_timer: u64 = 44;
     pub const open_release_spawn: u64 = 45;
+    pub const open_support_spawn: u64 = 46;
 
     // Cover art loads through `fx.loadImage`, where the ImageId IS the effect
     // key — so the id counter has to start clear of every key above or a cover
@@ -1301,6 +1303,7 @@ pub const Msg = union(enum) {
     open_format,
     open_discord,
     open_release, // update notice row -> release page in the browser
+    open_support, // back panel -> the ko-fi tip page in the browser
     close_sheet,
     toggle_mini,
     expand_mini,
@@ -1534,6 +1537,16 @@ fn checkForUpdate(fx: *Effects) void {
         .timeout_ms = 10_000,
         .on_response = Effects.responseMsg(.got_update),
     });
+}
+
+// Hand a comptime-baked URL to the desktop's browser. `opener_inflight` is one
+// guard across every link, not one per link: a double-press (or a press on a
+// second link while the first opener is still up) must not stack processes,
+// and the opener exits the moment the browser has the URL.
+fn openLink(model: *Model, fx: *Effects, key: u64, argv: []const []const u8) void {
+    if (model.opener_inflight) return;
+    model.opener_inflight = true;
+    fx.spawn(.{ .key = key, .argv = argv, .on_exit = Effects.exitMsg(.opener_exited) });
 }
 
 fn fetchSchedule(model: *Model, fx: *Effects) void {
@@ -2089,15 +2102,8 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 if (updater.isNewer(tag)) setStr(&model.update_tag_buf, &model.update_tag, tag) else model.update_tag = "";
             }
         },
-        .open_release => {
-            if (model.opener_inflight) return;
-            model.opener_inflight = true;
-            fx.spawn(.{
-                .key = keys.open_release_spawn,
-                .argv = updater.opener_argv,
-                .on_exit = Effects.exitMsg(.opener_exited),
-            });
-        },
+        .open_release => openLink(model, fx, keys.open_release_spawn, links.open_release_argv),
+        .open_support => openLink(model, fx, keys.open_support_spawn, links.open_support_argv),
         .opener_exited => model.opener_inflight = false,
         .tick_signal => |t| {
             if (t.outcome != .fired) return;
@@ -3830,5 +3836,23 @@ test "open_release spawns the opener once until it exits" {
     try testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
     // Exit clears the guard.
     update(&m, .{ .opener_exited = .{ .key = keys.open_release_spawn, .reason = .exited } }, &fx);
+    try testing.expect(!m.opener_inflight);
+}
+
+test "open_support opens ko-fi behind the same one-opener guard" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    update(&m, .open_support, &fx);
+    try testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+    try testing.expect(m.opener_inflight);
+    // It is the ko-fi page that got handed to the browser, not the release page.
+    const req = fx.pendingSpawnAt(0).?;
+    try testing.expectEqualStrings(links.support, req.argv[req.argv.len - 1]);
+    // The guard spans links: a release press while ko-fi's opener lives is a no-op.
+    update(&m, .open_release, &fx);
+    try testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+    update(&m, .{ .opener_exited = .{ .key = keys.open_support_spawn, .reason = .exited } }, &fx);
     try testing.expect(!m.opener_inflight);
 }
