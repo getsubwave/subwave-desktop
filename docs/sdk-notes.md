@@ -80,10 +80,25 @@ with zero app edits and 75/75 tests still green:
 | CLI `bin/` | byte-identical |
 | `minimum_zig_version` | 0.16.0, unchanged |
 
-Nothing removed, nothing renamed. Still **no** audio output-device API (see
-`sdk-audio-device-request.md`) and still no OS media-controls surface — no
-MPRIS, MPNowPlayingInfoCenter or SystemMediaTransportControls anywhere in the
-tree.
+Nothing removed, nothing renamed. Still **no** audio output-device API and
+still no OS media-controls surface — no MPRIS, MPNowPlayingInfoCenter or
+SystemMediaTransportControls anywhere in the tree.
+
+## No audio output-device selection (checked 0.6.0 and 0.7.1)
+
+The platform seam's whole audio surface is `audio_load` / `audio_load_url` /
+`play` / `pause` / `stop` / `seek` / `set_volume`. There is no device
+enumeration and no output-device property, so the app cannot offer a "play
+through these speakers" picker — the single player follows the system default
+wherever the host puts it.
+
+Written up as an upstream request in
+[`sdk-audio-device-request.md`](sdk-audio-device-request.md), which carries the
+per-platform implementation notes (GStreamer `GstDeviceMonitor`,
+`AVPlayer.audioOutputDeviceUniqueID`, `IMFMediaEngineEx`). Deliberately **not**
+patched locally: three more host patches to carry across every SDK upgrade is
+a bad trade against one HiDPI patch, and two of the three platforms already
+route per-app audio at the OS level (the README says how).
 
 ## close_policy: declared per target, not per manifest
 
