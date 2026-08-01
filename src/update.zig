@@ -43,17 +43,33 @@ pub fn isNewer(tag: []const u8) bool {
 
 const testing = std.testing;
 
+// The interesting cases for isNewer sit right next to whatever `version`
+// happens to be, so derive them from it rather than writing the neighbours in
+// by hand. Literal neighbours silently stop testing what they name at the next
+// bump: "v0.7.1" was the one-patch-newer case until 0.8.0 made it older, which
+// failed CI, and "v0.7.0" was the equal case until the same bump quietly turned
+// it into a second older case.
+const current = parseTag(version).?;
+fn verTag(comptime major: u32, comptime minor: u32, comptime patch: u32) []const u8 {
+    return std.fmt.comptimePrint("v{d}.{d}.{d}", .{ major, minor, patch });
+}
+
 test "isNewer: newer on any component, with or without the v" {
     try testing.expect(isNewer("v99.0.0"));
     try testing.expect(isNewer("99.0.0"));
-    try testing.expect(isNewer("v0.99.0"));
-    try testing.expect(isNewer("v0.7.1"));
+    try testing.expect(isNewer(verTag(current.major + 1, current.minor, current.patch)));
+    try testing.expect(isNewer(verTag(current.major, current.minor + 1, current.patch)));
+    try testing.expect(isNewer(verTag(current.major, current.minor, current.patch + 1)));
+    // No leading v, one patch up — the bare-tag path past the neighbour math.
+    try testing.expect(isNewer(verTag(current.major, current.minor, current.patch + 1)[1..]));
 }
 
 test "isNewer: equal and older stay quiet" {
-    try testing.expect(!isNewer("v0.7.0"));
-    try testing.expect(!isNewer("v0.4.9"));
+    try testing.expect(!isNewer(version));
+    try testing.expect(!isNewer(verTag(current.major, current.minor, current.patch)));
     try testing.expect(!isNewer("v0.0.1"));
+    if (current.minor > 0) try testing.expect(!isNewer(verTag(current.major, current.minor - 1, 9)));
+    if (current.patch > 0) try testing.expect(!isNewer(verTag(current.major, current.minor, current.patch - 1)));
 }
 
 test "isNewer: junk and prerelease tags never arm" {
