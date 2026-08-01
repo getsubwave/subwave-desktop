@@ -8,7 +8,7 @@ native test   # verify
 ```
 
 The unified diff lives at `patches/native-sdk-local.patch`, generated against
-the pristine 0.6.0 npm tarball. Symptom of a lost patch: pixelated text on a
+the pristine 0.7.1 npm tarball. Symptom of a lost patch: pixelated text on a
 fractional-scale Linux display.
 
 ## Two version pins, and they must agree
@@ -64,6 +64,41 @@ workarounds they replaced are still visible in the git log:
 
 [native#148]: https://github.com/vercel-labs/native/issues/148
 [native#149]: https://github.com/vercel-labs/native/issues/149
+
+## What 0.7.1 changed (upgraded 2026-08-01)
+
+Additive across every surface this app touches, which is why the upgrade landed
+with zero app edits and 75/75 tests still green:
+
+| Surface | 0.6.0 → 0.7.1 |
+| --- | --- |
+| `Effects` `pub fn` list | identical |
+| `PlatformFeature` enum, `*_fn` platform services | identical |
+| Markup vocabulary | additions only: a `<code>` widget plus `language`, `line-numbers`, `editable`, `on-input` |
+| `DesignTokens` | seven new `syntax_*` slots for that widget; `theme.zig` writes only color slots, so defaults apply |
+| `app.zon` manifest | four new optional window fields (`transparent`, `always_on_top`, `click_through`, `activate_on_show`); `close_policy` unchanged |
+| CLI `bin/` | byte-identical |
+| `minimum_zig_version` | 0.16.0, unchanged |
+
+Nothing removed, nothing renamed. Still **no** audio output-device API and
+still no OS media-controls surface — no MPRIS, MPNowPlayingInfoCenter or
+SystemMediaTransportControls anywhere in the tree.
+
+## No audio output-device selection (checked 0.6.0 and 0.7.1)
+
+The platform seam's whole audio surface is `audio_load` / `audio_load_url` /
+`play` / `pause` / `stop` / `seek` / `set_volume`. There is no device
+enumeration and no output-device property, so the app cannot offer a "play
+through these speakers" picker — the single player follows the system default
+wherever the host puts it.
+
+Written up as an upstream request in
+[`sdk-audio-device-request.md`](sdk-audio-device-request.md), which carries the
+per-platform implementation notes (GStreamer `GstDeviceMonitor`,
+`AVPlayer.audioOutputDeviceUniqueID`, `IMFMediaEngineEx`). Deliberately **not**
+patched locally: three more host patches to carry across every SDK upgrade is
+a bad trade against one HiDPI patch, and two of the three platforms already
+route per-app audio at the OS level (the README says how).
 
 ## close_policy: declared per target, not per manifest
 
@@ -124,10 +159,11 @@ surface at 1.6667 yields an 1889px buffer for 1888px of screen) and maps buffer
 pixels 1:1 to device pixels when it matches, letting the surplus edge column
 fall outside the clip.
 
-0.6.0 still reads the integer API at every one of those sites (it added
-`gdk_surface_get_scale_factor` calls, which is the *integer* GDK entry point,
-not the fractional `gdk_surface_get_scale`), so the patch still applies — with
-zero fuzz. **Re-apply after every `npm i -g @native-sdk/cli` upgrade**, or drop
+0.6.0 and 0.7.1 both still read the integer API at every one of those sites
+(0.6.0 added `gdk_surface_get_scale_factor` calls, which is the *integer* GDK
+entry point, not the fractional `gdk_surface_get_scale`; 0.7.1 changed none of
+them), so the patch still applies — with zero fuzz. **Re-apply after every
+`npm i -g @native-sdk/cli` upgrade**, or drop
 it once [vercel-labs/native#156](https://github.com/vercel-labs/native/issues/156)
 ships. Integer scales (100%/200%) are unaffected, which is why it can look fine
 on a second machine.

@@ -99,7 +99,7 @@ ones appear.
 
 ## Build & run
 
-Requires **Zig 0.16.0** and `@native-sdk/cli` **0.6.0+**
+Requires **Zig 0.16.0** and `@native-sdk/cli` **0.7.1+**
 (`npm i -g @native-sdk/cli`) — **plus one local SDK patch**. After every SDK
 install/upgrade:
 
@@ -157,8 +157,8 @@ ever attempted.
 
 The station always serves the `/stream.mp3` floor; operators can enable
 **AAC / Opus / FLAC** mounts, advertised via the `stream` flags on
-`/api/now-playing`. The picker offers a mount only when the station advertises
-it **and** the host engine can decode it (`stream_format.zig`):
+`/api/now-playing`. The picker lists every mount the host engine can decode and
+lets you tune the ones the station also advertises (`stream_format.zig`):
 
 | Codec over Icecast | macOS (AVPlayer) | Windows (Media Foundation) | Linux (GStreamer `playbin`) |
 |---|---|---|---|
@@ -177,7 +177,22 @@ default, so its builds shipped with no AAC and a hidden format picker. Nothing
 caught it because cross-compiling the Windows binary never ran the test suite
 for the target; building on a Windows runner did, immediately.
 
-**OS media integration.** The SDK (re-checked at 0.6.0) has no system
+The picker itself lives on the transport deck: the SIGNAL row's chip reads the
+live format and bitrate (`♪ MP3 192k`) and opens the sheet in one press. The
+sheet names every mount this platform can decode, so mounts the station doesn't
+serve are listed saying exactly that rather than quietly absent. The same row
+is also in the back panel under SIGNAL.
+
+**Playing through a different output device.** Not offered in-app: the SDK's
+audio surface (re-checked at 0.7.1) is load/play/pause/stop/seek/volume, with
+no device enumeration or output-device property on any host, so there is
+nothing honest to build a picker on. Route it at the OS instead —
+`pavucontrol` or any PipeWire patchbay on Linux, Settings → System → Sound →
+Volume mixer on Windows. macOS has no per-app routing without a third-party
+virtual audio driver. The API request is written up in
+[`docs/sdk-audio-device-request.md`](docs/sdk-audio-device-request.md).
+
+**OS media integration.** The SDK (re-checked at 0.7.1) has no system
 now-playing or media-key surface — no `MPNowPlayingInfoCenter`/
 `MPRemoteCommandCenter` on macOS, no MPRIS on Linux — so hardware play/pause
 keys and the OS Now Playing widget can't be wired up yet (SDK feature request).
