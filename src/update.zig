@@ -6,7 +6,7 @@
 const std = @import("std");
 const links = @import("links.zig");
 
-pub const version = "0.7.0";
+pub const version = "0.8.0";
 
 pub const release_api_url = "https://api.github.com/repos/getsubwave/subwave-desktop/releases/latest";
 /// The static releases/latest page always shows the newest build, so the
