@@ -68,8 +68,9 @@ repo from the main `subwave` monorepo; it tracks the same station HTTP API.
 - **Discord Rich Presence** — opt-in; shows the current track/artist (title
   clickable through to the station, cover art included) on your Discord
   profile while the SDK's `fx.spawn` drives a small self-relaunched helper
-  (`--discord-rpc-helper`) that owns the local Discord IPC socket. Requires
-  a client ID in `discord.zon` (see below) — ships disabled otherwise.
+  (`--discord-rpc-helper`) that owns the local Discord IPC socket. Configure
+  it from the Discord sheet by pasting your own application ID (see below) —
+  no rebuild needed; `discord.zon` can bake in a build-time default.
 
 ## Layout
 
@@ -99,12 +100,18 @@ ones appear.
 ## Build & run
 
 Requires **Zig 0.16.0** and `@native-sdk/cli` **0.7.1+**
-(`npm i -g @native-sdk/cli`) — nothing else. There are no local SDK patches:
-0.6.0 absorbed the comptime quota fix and close-button-hides-window, and 0.7.1
-absorbed the last one, fractional-HiDPI text rendering on Linux
-([vercel-labs/native#156](https://github.com/vercel-labs/native/issues/156)).
-`docs/sdk-notes.md` keeps the history and the diagnosis notes. Run `native test`
-after an upgrade.
+(`npm i -g @native-sdk/cli`) — **plus one local SDK patch**. After every SDK
+install/upgrade:
+
+```bash
+./scripts/apply-sdk-patches.sh && native test
+```
+
+The remaining patch fixes fractional-HiDPI text rendering on Linux
+([vercel-labs/native#156](https://github.com/vercel-labs/native/issues/156));
+it is documented in `docs/sdk-notes.md`. Symptom of a missing patch: pixelated
+text on a fractional-scale display. (0.6.0 absorbed the two older patches — the
+comptime quota fix and close-button-hides-window.)
 
 ```bash
 native build && ./zig-out/bin/subwave-desktop   # release build + run
@@ -124,9 +131,17 @@ native automate wait && native automate screenshot main-canvas
 
 ### Discord Rich Presence setup (optional)
 
-Discord Rich Presence needs an application client ID. Create one at
+Discord Rich Presence needs an application client ID (a public identifier,
+not a secret). Create one at
 [discord.com/developers/applications](https://discord.com/developers/applications),
-then fill it into `src/discord.zon`:
+then paste its Application ID into the app: panel → INTEGRATIONS → Discord
+Rich Presence → CLIENT ID. Saving a valid ID turns the presence on
+immediately and persists in settings.json; the status line under the toggle
+reports the outcome ("Connected", "Discord isn't running", "Discord rejected
+the client ID").
+
+A build can also bake in a default ID via `src/discord.zon` (a listener-entered
+ID always wins over it):
 
 ```zig
 .{
@@ -134,16 +149,16 @@ then fill it into `src/discord.zon`:
 }
 ```
 
-Leave it empty (the checked-in default) to ship without the feature — the
-settings sheet shows it as unconfigured rather than hiding it, and no
-Discord IPC connection is ever attempted.
+With neither a pasted ID nor a `discord.zon` one, the sheet still offers the
+CLIENT ID field but the toggle stays hidden, and no Discord IPC connection is
+ever attempted.
 
 ## Codecs & the format picker
 
 The station always serves the `/stream.mp3` floor; operators can enable
 **AAC / Opus / FLAC** mounts, advertised via the `stream` flags on
-`/api/now-playing`. The picker offers a mount only when the station advertises
-it **and** the host engine can decode it (`stream_format.zig`):
+`/api/now-playing`. The picker lists every mount the host engine can decode and
+lets you tune the ones the station also advertises (`stream_format.zig`):
 
 | Codec over Icecast | macOS (AVPlayer) | Windows (Media Foundation) | Linux (GStreamer `playbin`) |
 |---|---|---|---|
@@ -161,6 +176,21 @@ Windows was absent from this table until 0.2.0 and fell through to an MP3-only
 default, so its builds shipped with no AAC and a hidden format picker. Nothing
 caught it because cross-compiling the Windows binary never ran the test suite
 for the target; building on a Windows runner did, immediately.
+
+The picker itself lives on the transport deck: the SIGNAL row's chip reads the
+live format and bitrate (`♪ MP3 192k`) and opens the sheet in one press. The
+sheet names every mount this platform can decode, so mounts the station doesn't
+serve are listed saying exactly that rather than quietly absent. The same row
+is also in the back panel under SIGNAL.
+
+**Playing through a different output device.** Not offered in-app: the SDK's
+audio surface (re-checked at 0.7.1) is load/play/pause/stop/seek/volume, with
+no device enumeration or output-device property on any host, so there is
+nothing honest to build a picker on. Route it at the OS instead —
+`pavucontrol` or any PipeWire patchbay on Linux, Settings → System → Sound →
+Volume mixer on Windows. macOS has no per-app routing without a third-party
+virtual audio driver. The API request is written up in
+[`docs/sdk-audio-device-request.md`](docs/sdk-audio-device-request.md).
 
 **OS media integration.** The SDK (re-checked at 0.7.1) has no system
 now-playing or media-key surface — no `MPNowPlayingInfoCenter`/
@@ -202,9 +232,9 @@ one per CPU flavor):
 | `release-windows.yml` | `windows-latest` | `-windows-x64.zip` | built and launched on real Windows |
 | `release-linux.yml` | `ubuntu-24.04` | `-linux-x64.tar.gz` | needs glibc 2.39+ and GTK4 |
 
-Each one installs the SDK version pinned in
-`.github/actions/setup-native/action.yml`, and refuses to run if the tag
-disagrees with `.version` in `app.zon`. The
+Each one applies the local SDK patch before building
+(`scripts/apply-sdk-patches.sh`), so a release cannot ship without it, and
+each refuses to run if the tag disagrees with `.version` in `app.zon`. The
 macOS and Windows legs additionally run `scripts/set-close-policy.sh hide`
 before testing, which is how those builds get the menu-bar close semantics that
 `app.zon` cannot declare for all three targets at once. Shared

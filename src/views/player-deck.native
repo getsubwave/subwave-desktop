@@ -16,7 +16,16 @@
           <text size="sm" foreground="text_muted">SIGNAL ·</text>
           <text size="sm"><span weight="bold">{upper(signal_label)}</span></text>
         </row>
-        <text size="sm" foreground="text_muted">{signal_readout}</text>
+        <row gap="12" cross="center">
+          <!-- The format picker's one-press entry point. It reads as a
+               readout ("MP3 192k") and doubles as the way in, which is the
+               only reason the sheet is discoverable at all. -->
+          <row on-press="open_format" gap="5" cross="center" label="Stream format">
+            <icon name="music" width="13" height="13" foreground="text_muted"/>
+            <text size="sm">{format_value}</text>
+          </row>
+          <text size="sm" foreground="text_muted">{signal_readout}</text>
+        </row>
       </row>
       <progress value="{signal_frac}" label="Signal"/>
     </column>

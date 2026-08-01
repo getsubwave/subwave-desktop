@@ -293,8 +293,17 @@ fn runDiscordSession(io: std.Io, alloc: std.mem.Allocator, stdout: std.Io.File, 
     };
     const req = parsed.value;
 
+    // The listener-entered ID rides the request; the build-time discord.zon
+    // constant is only the fallback (a belt-and-braces one — the model never
+    // spawns this helper without an effective ID).
+    const effective_client_id = if (req.client_id.len > 0) req.client_id else discord_rpc.client_id;
+    if (effective_client_id.len == 0) {
+        stdout.writeStreamingAll(io, "ERROR: no client id\n") catch {};
+        return;
+    }
+
     var frame_buf: [2560]u8 = undefined;
-    const handshake = discord_rpc.encodeHandshakeFrame(&frame_buf, discord_rpc.client_id) catch {
+    const handshake = discord_rpc.encodeHandshakeFrame(&frame_buf, effective_client_id) catch {
         stdout.writeStreamingAll(io, "ERROR: handshake encode failed\n") catch {};
         return;
     };
@@ -307,8 +316,11 @@ fn runDiscordSession(io: std.Io, alloc: std.mem.Allocator, stdout: std.Io.File, 
     writer.interface.flush() catch {};
 
     // The READY dispatch (opcode 1, a JSON event) — read and discard the
-    // header + body; a successful read this far means Discord accepted
-    // the handshake.
+    // header + body. The opcode matters: an unknown/invalid client ID is
+    // answered with an opcode-2 CLOSE frame, not READY, and treating that
+    // as accepted would report a presence that never renders. This is the
+    // signal the sheet's status line turns into "Discord rejected the
+    // client ID".
     var read_buf: [4096]u8 = undefined;
     var reader = conn.reader(io, &read_buf);
     var header: [8]u8 = undefined;
@@ -316,8 +328,13 @@ fn runDiscordSession(io: std.Io, alloc: std.mem.Allocator, stdout: std.Io.File, 
         stdout.writeStreamingAll(io, "ERROR: no handshake response\n") catch {};
         return;
     };
+    const ready_opcode = std.mem.readInt(u32, header[0..4], .little);
     const ready_len = std.mem.readInt(u32, header[4..8], .little);
     reader.interface.discardAll(ready_len) catch {};
+    if (ready_opcode != 1) {
+        stdout.writeStreamingAll(io, "ERROR: client id rejected\n") catch {};
+        return;
+    }
 
     // Convert elapsed_ms to an absolute epoch-ms start (and end, if
     // duration is known) using this process's real clock, right before

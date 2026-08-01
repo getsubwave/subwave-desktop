@@ -1,0 +1,139 @@
+--- a/src/platform/linux/gtk_host.c
++++ b/src/platform/linux/gtk_host.c
+@@ -1000,6 +1000,41 @@
+     g_free(preedit);
+ }
+ 
++/* The density to rasterize at. Both gtk_widget_get_scale_factor() and
++ * gdk_surface_get_scale_factor() return an INTEGER, rounded up: on a
++ * fractional-scale compositor (Wayland wp_fractional_scale — e.g. a 4K
++ * panel at 1.6667) they report 2, so the runtime rasterizes a buffer 20%
++ * wider than the surface that then has to be resampled down at present
++ * time. That resample lands on CAIRO_FILTER_NEAREST (the exactness test
++ * below agrees with the same wrong integer), which drops ~1 pixel column
++ * in 6 outright instead of averaging and shreds glyph antialiasing —
++ * solid shapes survive, text turns to mush. gdk_surface_get_scale()
++ * (GTK 4.12+) reports the true fractional scale; the macOS host reads
++ * backingScaleFactor and the Windows host GetDpiForWindow()/96.0, both
++ * fractional, which is why the artifact was Linux-only. Older GTK has no
++ * fractional API at all, so the integer value remains the fallback. */
++static double native_sdk_surface_device_scale(GdkSurface *surface) {
++    if (!surface) return 1.0;
++#if GTK_CHECK_VERSION(4, 12, 0)
++    const double fractional = gdk_surface_get_scale(surface);
++    if (fractional > 0.0) return fractional;
++#endif
++    const int integer_scale = gdk_surface_get_scale_factor(surface);
++    return integer_scale > 0 ? (double)integer_scale : 1.0;
++}
++
++/* Same density, resolved from a widget via its native surface. Falls back
++ * to the widget's integer scale factor while the widget is unrealized (no
++ * surface yet). */
++static double native_sdk_widget_device_scale(GtkWidget *widget) {
++    if (!widget) return 1.0;
++    GtkNative *native = gtk_widget_get_native(widget);
++    GdkSurface *surface = native ? gtk_native_get_surface(native) : NULL;
++    if (surface) return native_sdk_surface_device_scale(surface);
++    const int integer_scale = gtk_widget_get_scale_factor(widget);
++    return integer_scale > 0 ? (double)integer_scale : 1.0;
++}
++
+ static double native_sdk_gpu_surface_width(native_sdk_gtk_native_view_t *view) {
+     int width = view->widget ? gtk_widget_get_width(view->widget) : 0;
+     if (width > 0) return (double)width;
+@@ -1057,7 +1092,7 @@
+     const double width = native_sdk_gpu_surface_width(view);
+     const double height = native_sdk_gpu_surface_height(view);
+     if (width <= 0 || height <= 0) return;
+-    const double scale = (double)gtk_widget_get_scale_factor(view->widget);
++    const double scale = native_sdk_widget_device_scale(view->widget);
+     if (native_sdk_gpu_surface_sync_geometry(view, width, height, scale)) {
+         gtk_widget_queue_draw(view->widget);
+     }
+@@ -1097,7 +1132,7 @@
+ 
+     const double width = native_sdk_gpu_surface_width(view);
+     const double height = native_sdk_gpu_surface_height(view);
+-    const double scale = (double)gtk_widget_get_scale_factor(view->widget);
++    const double scale = native_sdk_widget_device_scale(view->widget);
+     if (width <= 0 || height <= 0) return;
+ 
+     (void)native_sdk_gpu_surface_sync_geometry(view, width, height, scale);
+@@ -1207,7 +1242,7 @@
+     const double logical_width = native_sdk_gpu_surface_width(view);
+     const double logical_height = native_sdk_gpu_surface_height(view);
+     if (logical_width <= 0 || logical_height <= 0) return;
+-    const double scale = (double)gtk_widget_get_scale_factor(view->widget);
++    const double scale = native_sdk_widget_device_scale(view->widget);
+     if (native_sdk_gpu_surface_sync_geometry(view, logical_width, logical_height, scale)) {
+         gtk_widget_queue_draw(view->widget);
+     }
+@@ -1222,18 +1257,29 @@
+         return;
+     }
+     cairo_save(cr);
+-    /* The buffer is rendered at logical-size x scale-factor. Declare that
+-     * density as the surface's device scale so cairo maps one buffer pixel
+-     * to one device pixel; when the buffer matches the widget's current
+-     * scale exactly (the steady state), use nearest filtering for a
+-     * resample-free blit. Mid-resize frames where the buffer is stale
+-     * stretch with bilinear filtering until the next presented frame. */
++    /* The buffer is rendered at ceil(logical-size x device-scale), so at a
++     * fractional scale its pixel dimensions overshoot logical*scale by up
++     * to one pixel (1133 x 1.6667 = 1888.4 -> a 1889px buffer for an
++     * 1888px surface). Comparing buf/logical against the scale therefore
++     * can NOT be an equality test: declare the widget's own density as the
++     * surface device scale so cairo maps one buffer pixel to one device
++     * pixel 1:1 and the surplus edge column/row simply falls outside the
++     * clip. Mid-resize frames, where the buffer is stale at a genuinely
++     * different size, fall back to stretching it with bilinear filtering
++     * until the next presented frame lands. */
+     if (width > 0 && height > 0) {
+-        const double device_scale_x = (double)view->gpu_buf_width / (double)width;
+-        const double device_scale_y = (double)view->gpu_buf_height / (double)height;
+-        cairo_surface_set_device_scale(surface, device_scale_x, device_scale_y);
+-        const double widget_scale = (double)gtk_widget_get_scale_factor(GTK_WIDGET(area));
+-        const int exact = device_scale_x == widget_scale && device_scale_y == widget_scale;
++        const double widget_scale = native_sdk_widget_device_scale(GTK_WIDGET(area));
++        const double expected_width = ceil((double)width * widget_scale);
++        const double expected_height = ceil((double)height * widget_scale);
++        const int exact = widget_scale > 0.0 &&
++            fabs((double)view->gpu_buf_width - expected_width) < 0.5 &&
++            fabs((double)view->gpu_buf_height - expected_height) < 0.5;
++        if (exact) {
++            cairo_surface_set_device_scale(surface, widget_scale, widget_scale);
++        } else {
++            cairo_surface_set_device_scale(surface, (double)view->gpu_buf_width / (double)width,
++                                                    (double)view->gpu_buf_height / (double)height);
++        }
+         cairo_set_source_surface(cr, surface, 0, 0);
+         cairo_pattern_set_filter(cairo_get_source(cr), exact ? CAIRO_FILTER_NEAREST : CAIRO_FILTER_BILINEAR);
+     } else {
+@@ -2508,7 +2554,7 @@
+     int w = 0, h = 0;
+     native_sdk_window_content_size(win, &w, &h);
+     GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(win->gtk_window));
+-    double scale = surface ? gdk_surface_get_scale_factor(surface) : 1.0;
++    double scale = native_sdk_surface_device_scale(surface);
+     int focused = gtk_window_is_active(win->gtk_window) ? 1 : 0;
+     native_sdk_emit(host, (native_sdk_gtk_event_t){
+         .kind = NATIVE_SDK_GTK_EVENT_WINDOW_FRAME,
+@@ -2530,7 +2576,7 @@
+     int w = 0, h = 0;
+     native_sdk_window_content_size(win, &w, &h);
+     GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(win->gtk_window));
+-    double scale = surface ? gdk_surface_get_scale_factor(surface) : 1.0;
++    double scale = native_sdk_surface_device_scale(surface);
+     native_sdk_emit(host, (native_sdk_gtk_event_t){
+         .kind = NATIVE_SDK_GTK_EVENT_RESIZE,
+         .window_id = win->id,
+@@ -2675,7 +2721,7 @@
+         const double w = (double)gtk_widget_get_width(GTK_WIDGET(win->gtk_window));
+         const double h = (double)gtk_widget_get_height(GTK_WIDGET(win->gtk_window));
+         GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(win->gtk_window));
+-        const double scale = surface ? gdk_surface_get_scale_factor(surface) : 1.0;
++        const double scale = native_sdk_surface_device_scale(surface);
+         if (w > 0 && h > 0 && (w != win->emitted_width || h != win->emitted_height || scale != win->emitted_scale)) {
+             win->emitted_width = w;
+             win->emitted_height = h;

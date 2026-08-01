@@ -17,9 +17,23 @@ const std = @import("std");
 const discord_config = @import("discord.zon");
 
 /// Empty by default (the checked-in discord.zon placeholder) — see
-/// README.md "Discord Rich Presence" for how a builder fills this in.
+/// README.md "Discord Rich Presence" for how a builder fills this in. This
+/// is only the build-time *default*: a listener-entered ID from the Discord
+/// sheet (model.discord_client_id, persisted in settings.json) takes
+/// precedence, travelling to the helper inside the ActivityRequest.
 pub const client_id: []const u8 = discord_config.client_id;
 pub const configured_at_build: bool = client_id.len > 0;
+
+/// A Discord application ID is a snowflake: 17-20 ASCII digits. Gate for
+/// both the sheet's input field and the settings.json apply path (a
+/// hand-edited invalid ID is ignored rather than half-working).
+pub fn isValidClientId(s: []const u8) bool {
+    if (s.len < 17 or s.len > 20) return false;
+    for (s) |c| {
+        if (c < '0' or c > '9') return false;
+    }
+    return true;
+}
 
 /// The socket's home varies by platform; the base-dir fallback chain here
 /// is the one every third-party Discord RPC client uses. `subdir` ("" for
@@ -183,15 +197,22 @@ pub fn buildActivityJson(buf: []u8, details: []const u8, state: []const u8, url:
 ///
 /// A size cap for one buildActivityRequestJson output, sized to cover the
 /// actual worst case: four escaped fields at up to 256 bytes each (the esc
-/// buffers' cap) plus the JSON scaffolding and two i64s (~120 bytes) is
-/// ~1150; 1280 leaves headroom. model.zig sizes its buffers (the persisted
+/// buffers' cap), the client_id at up to 32 escaped bytes (~48 with its
+/// scaffolding), plus the JSON scaffolding and two i64s (~120 bytes) is
+/// ~1200; 1344 leaves headroom. model.zig sizes its buffers (the persisted
 /// signature field and its two scratch buffers) off this one constant
 /// rather than picking three separate numbers that would all just need to
 /// agree anyway. main.zig's stdin read limit and encodeActivityFrame's
 /// body buffer (both 2048) must stay comfortably larger than this.
-pub const activity_request_max = 1280;
+pub const activity_request_max = 1344;
 
 pub const ActivityRequest = struct {
+    /// The Discord application ID to handshake with. Empty = fall back to
+    /// the build-time `client_id` constant (the helper's safety net; the
+    /// model always sends its effective ID). Deliberately part of the
+    /// request/signature string: editing the ID in the sheet must respawn
+    /// the helper under the new identity.
+    client_id: []const u8 = "",
     details: []const u8 = "",
     state: []const u8 = "",
     url: []const u8 = "",
@@ -202,9 +223,14 @@ pub const ActivityRequest = struct {
 
 pub fn buildActivityRequestJson(buf: []u8, req: ActivityRequest, include_elapsed: bool) ![]const u8 {
     var esc: [4][256]u8 = undefined; // matches buildActivityJson's cap — see the note there
+    var id_esc: [32]u8 = undefined; // a real snowflake is <= 20 digits
 
     var w = std.Io.Writer.fixed(buf);
-    try w.print("{{\"details\":\"{s}\",\"state\":\"{s}\",\"url\":\"{s}\",\"cover_url\":\"{s}\",\"duration_s\":{d}", .{
+    try w.print("{{", .{});
+    // Omitted (not emitted empty) when unset so the build-time-ID flow's
+    // wire format — and the exact-string tests that pin it — stay unchanged.
+    if (req.client_id.len > 0) try w.print("\"client_id\":\"{s}\",", .{jsonEscape(&id_esc, req.client_id)});
+    try w.print("\"details\":\"{s}\",\"state\":\"{s}\",\"url\":\"{s}\",\"cover_url\":\"{s}\",\"duration_s\":{d}", .{
         jsonEscape(&esc[0], req.details),
         jsonEscape(&esc[1], req.state),
         jsonEscape(&esc[2], req.url),
@@ -277,6 +303,7 @@ test "activity_request_max covers worst-case field lengths" {
     var buf: [activity_request_max]u8 = undefined;
     const long = "x" ** 300; // past the escape cap in every field at once
     _ = try buildActivityRequestJson(&buf, .{
+        .client_id = long,
         .details = long,
         .state = long,
         .url = long,
@@ -284,6 +311,25 @@ test "activity_request_max covers worst-case field lengths" {
         .duration_s = std.math.maxInt(i64),
         .elapsed_ms = std.math.minInt(i64),
     }, true);
+}
+
+test "isValidClientId accepts 17-20 digit snowflakes only" {
+    try testing.expect(isValidClientId("12345678901234567")); // 17
+    try testing.expect(isValidClientId("12345678901234567890")); // 20
+    try testing.expect(!isValidClientId("1234567890123456")); // 16
+    try testing.expect(!isValidClientId("123456789012345678901")); // 21
+    try testing.expect(!isValidClientId("12345678901234567x"));
+    try testing.expect(!isValidClientId(""));
+    try testing.expect(!isValidClientId("123456789012345 78"));
+}
+
+test "buildActivityRequestJson carries client_id only when set" {
+    var buf: [512]u8 = undefined;
+    const with_id = try buildActivityRequestJson(&buf, .{ .client_id = "123456789012345678", .details = "Night Drive" }, false);
+    try testing.expect(std.mem.startsWith(u8, with_id, "{\"client_id\":\"123456789012345678\","));
+
+    const without = try buildActivityRequestJson(&buf, .{ .details = "Night Drive" }, false);
+    try testing.expect(std.mem.indexOf(u8, without, "client_id") == null);
 }
 
 test "buildActivityJson always sends instance and created_at, and includes details_url only when a URL is given" {

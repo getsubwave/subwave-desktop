@@ -11,6 +11,7 @@ comptime {
     _ = @import("spectrum.zig");
     _ = @import("api.zig");
     _ = @import("update.zig");
+    _ = @import("links.zig");
     _ = @import("model.zig");
     _ = @import("stream_format.zig");
     _ = @import("discord_rpc.zig");
@@ -110,27 +111,32 @@ test "player fragments build and lay out (every panel + sheets)" {
         model.sleep_deadline_ms = 1;
         try buildAndLayout(arena3.allocator(), player_sheets_markup, &model, 980, 660);
     }
-    // Discord sheet: unconfigured default, then configured + off, then configured + enabled.
+    // Discord sheet: unconfigured default, then a saved listener ID + off,
+    // then enabled, then with an input complaint showing.
     model.sheet = .discord;
     {
         var arena4 = std.heap.ArenaAllocator.init(testing.allocator);
         defer arena4.deinit();
         try buildAndLayout(arena4.allocator(), player_sheets_markup, &model, 980, 660);
     }
-    model.discord_configured = true;
+    const test_discord_id = "123456789012345678";
+    @memcpy(model.discord_client_id_buf[0..test_discord_id.len], test_discord_id);
+    model.discord_client_id = model.discord_client_id_buf[0..test_discord_id.len];
     {
         var arena4b = std.heap.ArenaAllocator.init(testing.allocator);
         defer arena4b.deinit();
         try buildAndLayout(arena4b.allocator(), player_sheets_markup, &model, 980, 660);
     }
     model.discord_enabled = true;
+    model.discord_id_status = "That doesn't look like an application ID (17-20 digits)";
     {
         var arena5 = std.heap.ArenaAllocator.init(testing.allocator);
         defer arena5.deinit();
         try buildAndLayout(arena5.allocator(), player_sheets_markup, &model, 980, 660);
     }
-    model.discord_configured = false;
+    model.discord_client_id = "";
     model.discord_enabled = false;
+    model.discord_id_status = "";
     // Format sheet with a real choice on offer (station serves AAC).
     model.sheet = .format;
     model.stream_flags_known = true;

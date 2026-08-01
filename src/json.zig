@@ -59,12 +59,17 @@ pub const Context = struct {
     dominantMood: ?[]const u8 = null,
 };
 
-// Optional-mount flags on /now-playing — which extra stream formats the
-// station serves (MP3 is the always-on floor and carries no flag).
+// The station's stream description on /now-playing: which extra mounts it
+// serves (MP3 is the always-on floor and carries no flag), plus the shape of
+// its PRIMARY mount. `format`/`bitrate` describe that one mount only — the one
+// named in `mount` — so a listener tuned to a different format must not be
+// shown this bitrate. See Model.stream_primary.
 pub const StreamInfo = struct {
     opusEnabled: ?bool = null,
     flacEnabled: ?bool = null,
     aacEnabled: ?bool = null,
+    format: ?[]const u8 = null,
+    bitrate: ?i64 = null,
 };
 
 pub const NowPlaying = struct {
@@ -253,6 +258,9 @@ pub const Settings = struct {
     stationPassword: ?[]const u8 = null,
     recents: ?[]SettingsRecent = null,
     discordEnabled: ?bool = null,
+    // Listener-entered Discord application ID (public identifier, not a
+    // secret); ""/absent = use the build-time discord.zon default, if any.
+    discordClientId: ?[]const u8 = null,
 };
 
 // Parse `body` into T, tolerating unknown/extra fields. Caller owns the result

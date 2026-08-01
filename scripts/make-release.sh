@@ -76,9 +76,16 @@ if gh release view "$tag" >/dev/null 2>&1; then
 fi
 ok "$tag does not exist yet"
 
-# (There is no local-SDK-patch check here any more: 0.7.1 took the last patch
-# upstream, so a stock `npm i -g @native-sdk/cli` is the whole toolchain. If a
-# patch ever comes back, docs/sdk-notes.md says what to re-add.)
+# --- the SDK patches must be present ------------------------------------
+# CI installs the SDK fresh and applies them itself, so this is about the
+# machine you are standing at telling you the truth about its own state.
+if ./scripts/apply-sdk-patches.sh >/dev/null 2>&1; then
+    ok "local SDK patches applied"
+else
+    echo "  warn local SDK is not fully patched (CI applies them itself, so this"
+    echo "       does not affect the release; run ./scripts/apply-sdk-patches.sh"
+    echo "       if you intend to build locally)"
+fi
 
 # --- CI must already be green on this commit ----------------------------
 if $skip_ci_check; then

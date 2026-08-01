@@ -37,13 +37,21 @@ no longer needs a Mac.
   decide about) anything pending in `src/`, `app.zon`, or `scripts/` before
   publishing. Leave `.claude/`, `design-reference/`, and `dist/` alone; they're
   local by design.
-- **The CI SDK pin must match what you build against**, and a mismatch is a
-  release-stopper: `native-sdk-version` in `.github/actions/setup-native` is
-  what CI installs, and `native --version` is what you tested. On the 0.6.0
-  upgrade the pin was left at 0.5.3 and every leg died several steps later on
-  markup the older SDK could not parse. (There are no local SDK patches to
-  re-apply any more — 0.7.1 took the last one upstream. `docs/sdk-notes.md`
-  has the history.)
+- `./scripts/apply-sdk-patches.sh` — the installed `@native-sdk/cli` loses the
+  local patch on EVERY npm upgrade, silently. The script is idempotent and
+  the release script also runs it, but checking first gives a clearer error.
+  As of SDK 0.6.0 there is exactly ONE patch left, the Linux fractional-HiDPI
+  fix (vercel-labs/native#156); its symptom is pixelated text on a
+  fractional-scale Linux display, and integer scales look fine, so it hides on
+  a second machine. Details: `docs/sdk-notes.md`.
+- **Two SDK version pins must agree**, and a mismatch is a release-stopper:
+  `native-sdk-version` in `.github/actions/setup-native` (what CI installs)
+  and `patch_sdk_version` in `scripts/apply-sdk-patches.sh` (what the patch
+  was generated against). The patch script reads the installed package's
+  version and refuses to run on anything else. On the 0.6.0 upgrade the CI pin
+  was left at 0.5.3 and every leg died several steps later on markup the older
+  SDK could not parse — that gate exists so the next one fails at setup with
+  both versions named.
 - If the SDK version changed since the last release (`native --version` vs
   `docs/sdk-notes.md`), run `native test` early and check the upstream issues —
   a fix may have shipped that lets a patch retire. This is not theoretical:

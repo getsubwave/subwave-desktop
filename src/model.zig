@@ -14,6 +14,7 @@ const stream_format = @import("stream_format.zig");
 const discord_rpc = @import("discord_rpc.zig");
 // `update` is the reducer below, so the self-update module needs an alias.
 const updater = @import("update.zig");
+const links = @import("links.zig");
 pub const StreamFormat = stream_format.StreamFormat;
 
 // Default listening volume on tune-in. (Decode/position/spectrum report
@@ -54,7 +55,8 @@ pub const keys = struct {
     pub const fetch_update: u64 = 43;
     pub const update_timer: u64 = 44;
     pub const open_release_spawn: u64 = 45;
-    pub const copy_clipboard: u64 = 46;
+    pub const open_support_spawn: u64 = 46;
+    pub const copy_clipboard: u64 = 47;
 
     // Cover art loads through `fx.loadImage`, where the ImageId IS the effect
     // key — so the id counter has to start clear of every key above or a cover
@@ -272,6 +274,12 @@ pub const Model = struct {
     stream_opus: bool = false,
     stream_flac: bool = false,
     stream_aac: bool = false,
+    // The station's PRIMARY mount and its bitrate, as advertised alongside
+    // those flags. The bitrate describes that mount and no other, so the deck
+    // chip only prints it while the listener is actually tuned to it —
+    // labelling an Opus stream "192k" would be inventing a measurement.
+    stream_primary: ?StreamFormat = null,
+    stream_bitrate: u32 = 0, // 0 = unknown
 
     // signal probe (timed GET /api/health while playing)
     latency_ms: i64 = -1, // -1 = no reading yet
@@ -348,7 +356,15 @@ pub const Model = struct {
 
     // Discord Rich Presence (opt-in; see discord_rpc.zig / discord.zon).
     discord_enabled: bool = false,
-    discord_configured: bool = discord_rpc.configured_at_build,
+    // Listener-entered Discord application ID (Discord sheet, persisted in
+    // settings.json); "" = fall back to the build-time discord.zon default.
+    // Whether the feature is configured at all is the derived
+    // discord_configured() getter, not a stored flag.
+    discord_id_buffer: canvas.TextBuffer(24) = .{},
+    discord_client_id_buf: [24]u8 = undefined,
+    discord_client_id: []const u8 = "",
+    discord_id_status: []const u8 = "", // static literals; "" = nothing to show
+    discord_error: []const u8 = "", // static literals mapped from helper ERROR lines
     discord_connected: bool = false,
     discord_retry_count: u6 = 0,
     discord_spawn_key: u64 = keys.discord_rpc_a,
@@ -760,14 +776,33 @@ pub const Model = struct {
     }
 
     // ---------------------------------------------------------------- discord
+    /// The ID the helper actually handshakes with: the listener-entered one
+    /// wins, the build-time discord.zon constant is the default.
+    pub fn effectiveDiscordClientId(self: *const Model) []const u8 {
+        return if (self.discord_client_id.len > 0) self.discord_client_id else discord_rpc.client_id;
+    }
+    pub fn discord_configured(self: *const Model) bool {
+        return self.effectiveDiscordClientId().len > 0;
+    }
+    pub fn has_own_discord_id(self: *const Model) bool {
+        return self.discord_client_id.len > 0;
+    }
+    pub fn discord_id_text(self: *const Model) []const u8 {
+        return self.discord_id_buffer.text();
+    }
+    pub fn has_discord_id_status(self: *const Model) bool {
+        return self.discord_id_status.len > 0;
+    }
+
     pub fn discord_row_value(self: *const Model) []const u8 {
-        if (!self.discord_configured) return "Not configured";
+        if (!self.discord_configured()) return "Not configured";
         return if (self.discord_enabled) "On" else "Off";
     }
 
     pub fn discord_status_line(self: *const Model) []const u8 {
         if (!self.discord_enabled) return "";
         if (self.discord_connected) return "Connected";
+        if (self.discord_error.len > 0) return self.discord_error;
         return "Waiting for Discord…";
     }
 
@@ -1121,34 +1156,39 @@ pub const Model = struct {
         label: []const u8 = "",
         detail: []const u8 = "",
         on: bool = false,
+        available: bool = false,
     };
-    /// The formats the listener can pick right now: platform-decodable AND
-    /// advertised by the station. Always contains at least MP3.
+    /// Every format THIS platform can decode, whether or not the station
+    /// serves it — an unavailable row states why in its detail line instead of
+    /// vanishing, so a station down to the MP3 floor reads as a fact rather
+    /// than a missing feature. Formats the platform cannot decode stay out
+    /// entirely: there is nothing a listener on macOS can do about FLAC, so
+    /// listing it would only be noise. Always contains at least MP3.
     pub fn format_rows(self: *const Model, arena: std.mem.Allocator) []const FormatRow {
         var out: std.ArrayList(FormatRow) = .empty;
         const effective = self.effectiveFormat();
         for (StreamFormat.all) |f| {
-            if (!stream_format.platformSupports(f) or !self.stationEnables(f)) continue;
+            if (!stream_format.platformSupports(f)) continue;
+            const available = self.stationEnables(f);
             out.append(arena, .{
                 .id = f.id(),
                 .label = f.label(),
-                .detail = f.detail(),
-                .on = f == effective,
+                .detail = if (available) f.detail() else "not served by this station",
+                .on = available and f == effective,
+                .available = available,
             }) catch break;
         }
         return out.items;
     }
-    /// The back panel's SIGNAL row hides while the MP3 floor is the only
-    /// pick (mirrors the mobile app's format drawer).
-    pub fn has_format_choice(self: *const Model) bool {
-        for (StreamFormat.all) |f| {
-            if (f == .mp3) continue;
-            if (stream_format.platformSupports(f) and self.stationEnables(f)) return true;
-        }
-        return false;
-    }
-    pub fn format_value(self: *const Model) []const u8 {
-        return self.effectiveFormat().label();
+    /// The back panel's SIGNAL row and the transport deck's chip, e.g.
+    /// "MP3 192k". The bitrate rides along only while the station's primary
+    /// mount IS the format being played — see stream_primary.
+    pub fn format_value(self: *const Model, arena: std.mem.Allocator) []const u8 {
+        const effective = self.effectiveFormat();
+        const label = effective.label();
+        const primary = self.stream_primary orelse return label;
+        if (primary != effective or self.stream_bitrate == 0) return label;
+        return std.fmt.allocPrint(arena, "{s} {d}k", .{ label, self.stream_bitrate }) catch label;
     }
 
     // The chart-bound spectrum series.
@@ -1206,6 +1246,7 @@ pub const Model = struct {
         // stream-format state (bound via format_rows/format_value)
         "format_pref",        "stream_flags_known",  "stream_opus",
         "stream_flac",        "stream_aac",          "stationEnables",      "effectiveFormat",
+        "stream_primary",     "stream_bitrate",
         // private-station gate internals (bound via pw_text/auth_checking/…)
         "privacy_private",    "privacy_listener_auth", "auth_gate",         "station_pw",
         "station_pw_buf",     "pw_buffer",           "auth_try",            "auth_try_buf",
@@ -1241,6 +1282,8 @@ pub const Model = struct {
         // discord rich presence (bound via getters, not the raw fields)
         "discord_connected",  "discord_retry_count",
         "discord_spawn_key",  "discord_last_payload", "discord_last_payload_buf",
+        "discord_id_buffer",  "discord_client_id_buf", "discord_error",
+        "effectiveDiscordClientId",
         // per-track elapsed plumbing (surfaced via elapsed_str/np_head)
         "track_started_at_s", "track_anchor_ms",     "track_elapsed_ms",
     };
@@ -1307,6 +1350,7 @@ pub const Msg = union(enum) {
     open_format,
     open_discord,
     open_release, // update notice row -> release page in the browser
+    open_support, // back panel -> the ko-fi tip page in the browser
     close_sheet,
     toggle_mini,
     expand_mini,
@@ -1348,6 +1392,9 @@ pub const Msg = union(enum) {
     pick_theme: []const u8, // payload = theme id
     pick_format: []const u8, // payload = format id ("mp3" | "aac" | "opus" | "flac")
     toggle_discord,
+    discord_id_edit: canvas.TextInputEvent,
+    submit_discord_id,
+    clear_discord_id,
 
     // listener like (stage heart / mini heart / L key)
     press_like,
@@ -1547,6 +1594,16 @@ fn checkForUpdate(fx: *Effects) void {
     });
 }
 
+// Hand a comptime-baked URL to the desktop's browser. `opener_inflight` is one
+// guard across every link, not one per link: a double-press (or a press on a
+// second link while the first opener is still up) must not stack processes,
+// and the opener exits the moment the browser has the URL.
+fn openLink(model: *Model, fx: *Effects, key: u64, argv: []const []const u8) void {
+    if (model.opener_inflight) return;
+    model.opener_inflight = true;
+    fx.spawn(.{ .key = key, .argv = argv, .on_exit = Effects.exitMsg(.opener_exited) });
+}
+
 fn fetchSchedule(model: *Model, fx: *Effects) void {
     var b: [256]u8 = undefined;
     if (api.schedule(&b, model.base)) |u| fx.fetch(.{ .key = keys.fetch_schedule, .url = u, .on_response = Effects.responseMsg(.got_schedule) }) else |_| {}
@@ -1618,6 +1675,11 @@ pub fn applySettingsJson(model: *Model, bytes: []const u8) void {
         }
     }
     if (s.discordEnabled) |v| model.discord_enabled = v;
+    if (s.discordClientId) |id| {
+        // Same gate as the sheet's input — a hand-edited invalid ID is
+        // dropped rather than left to fail the handshake forever.
+        if (discord_rpc.isValidClientId(id)) setStr(&model.discord_client_id_buf, &model.discord_client_id, id);
+    }
 }
 
 // Persist the current settings (async via fx.writeFile). While a write is in
@@ -1634,7 +1696,9 @@ fn saveSettings(model: *Model, fx: *Effects) void {
     // The password gets its own escape buffer: worst case every byte doubles,
     // and a truncated secret would silently fail to unlock on the next run.
     var pw_esc: [256]u8 = undefined;
-    w.print("{{\"volume\":{d:.2},\"themeOverride\":\"{s}\",\"streamFormat\":\"{s}\",\"station\":\"{s}\",\"stationName\":\"{s}\",\"stationPassword\":\"{s}\",\"discordEnabled\":{s},\"recents\":[", .{
+    // discord_client_id needs no escape pass: it only ever holds an
+    // isValidClientId-vetted string (pure ASCII digits).
+    w.print("{{\"volume\":{d:.2},\"themeOverride\":\"{s}\",\"streamFormat\":\"{s}\",\"station\":\"{s}\",\"stationName\":\"{s}\",\"stationPassword\":\"{s}\",\"discordEnabled\":{s},\"discordClientId\":\"{s}\",\"recents\":[", .{
         model.volume,
         jsonEscape(esc[0..64], model.theme_override),
         model.format_pref.id(),
@@ -1642,6 +1706,7 @@ fn saveSettings(model: *Model, fx: *Effects) void {
         jsonEscape(esc[64..128], model.station_name),
         jsonEscape(&pw_esc, model.station_pw),
         if (model.discord_enabled) "true" else "false",
+        model.discord_client_id,
     }) catch return;
     for (model.recents[0..model.recents_count], 0..) |r, i| {
         if (i > 0) w.print(",", .{}) catch return;
@@ -1731,7 +1796,7 @@ fn likeCount(v: ?i64) u32 {
 // there is nothing to show. All state transitions are driven by the spawn's
 // on_line/on_exit results (see the .discord_line/.discord_exited arms).
 fn updateDiscordPresence(model: *Model, fx: *Effects) void {
-    if (!model.discord_configured or !model.discord_enabled) return cancelDiscordPresence(model, fx);
+    if (!model.discord_configured() or !model.discord_enabled) return cancelDiscordPresence(model, fx);
     if (model.transport != .playing and model.transport != .paused) return cancelDiscordPresence(model, fx);
     // No resolved own-binary path means nothing to spawn — without this,
     // a failed executablePath at startup would put the exit handler's
@@ -1740,6 +1805,7 @@ fn updateDiscordPresence(model: *Model, fx: *Effects) void {
     var cover_url_buf: [256]u8 = undefined;
     const cover_url = if (model.cover_sid.len > 0) api.coverUrl(&cover_url_buf, model.base, model.cover_sid) catch "" else "";
     const req: discord_rpc.ActivityRequest = .{
+        .client_id = model.effectiveDiscordClientId(),
         .details = model.title,
         .state = model.artist,
         .url = model.base,
@@ -1760,6 +1826,16 @@ fn cancelDiscordPresence(model: *Model, fx: *Effects) void {
     fx.cancel(model.discord_spawn_key);
     model.discord_last_payload = "";
     model.discord_connected = false;
+}
+
+// Helper ERROR lines → the static literals discord_status_line shows. Only
+// the two actionable reasons get their own message; everything else (bad
+// payload, encode/write failures) is an internal detail the listener can't
+// act on beyond "it didn't work".
+fn mapDiscordError(reason: []const u8) []const u8 {
+    if (std.mem.eql(u8, reason, "Discord not running")) return "Discord isn't running";
+    if (std.mem.eql(u8, reason, "client id rejected")) return "Discord rejected the client ID";
+    return "Connection to Discord failed";
 }
 
 fn respawnDiscordHelper(model: *Model, fx: *Effects, signature: []const u8, req: discord_rpc.ActivityRequest) void {
@@ -1931,6 +2007,8 @@ fn retune(model: *Model, fx: *Effects) void {
     model.stream_opus = false;
     model.stream_flac = false;
     model.stream_aac = false;
+    model.stream_primary = null;
+    model.stream_bitrate = 0;
     // The station password is per station too — and unlike the web's
     // per-origin localStorage, one settings file serves every station, so the
     // old station's secret must never be POSTed to the new one. The first
@@ -2100,15 +2178,8 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 if (updater.isNewer(tag)) setStr(&model.update_tag_buf, &model.update_tag, tag) else model.update_tag = "";
             }
         },
-        .open_release => {
-            if (model.opener_inflight) return;
-            model.opener_inflight = true;
-            fx.spawn(.{
-                .key = keys.open_release_spawn,
-                .argv = updater.opener_argv,
-                .on_exit = Effects.exitMsg(.opener_exited),
-            });
-        },
+        .open_release => openLink(model, fx, keys.open_release_spawn, links.open_release_argv),
+        .open_support => openLink(model, fx, keys.open_support_spawn, links.open_support_argv),
         .opener_exited => model.opener_inflight = false,
         .tick_signal => |t| {
             if (t.outcome != .fired) return;
@@ -2246,6 +2317,15 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 model.stream_opus = sf.opusEnabled orelse false;
                 model.stream_flac = sf.flacEnabled orelse false;
                 model.stream_aac = sf.aacEnabled orelse false;
+                // The primary mount's shape, for the deck chip's readout. An
+                // unrecognised format id leaves the pair unset rather than
+                // pinning the bitrate to the wrong mount.
+                model.stream_primary = if (sf.format) |id| stream_format.fromId(id) else null;
+                model.stream_bitrate = if (model.stream_primary != null and sf.bitrate != null and
+                    sf.bitrate.? > 0 and sf.bitrate.? < 10_000)
+                    @intCast(sf.bitrate.?)
+                else
+                    0;
                 if (model.transport == .playing and model.effectiveFormat() != before)
                     startStream(model, fx);
             }
@@ -2758,6 +2838,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (std.mem.eql(u8, line.line, "READY")) {
                 model.discord_connected = true;
                 model.discord_retry_count = 0;
+                model.discord_error = "";
+            } else if (std.mem.startsWith(u8, line.line, "ERROR: ")) {
+                model.discord_error = mapDiscordError(line.line["ERROR: ".len..]);
             }
         },
         .discord_exited => |exit| {
@@ -3037,6 +3120,12 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .pick_format => |id| {
             const fmt = stream_format.fromId(id) orelse return;
+            // The sheet lists mounts this station doesn't serve so it can say
+            // so; pressing one is inert. Absorbing it here keeps the markup
+            // free of a second, press-less row variant, and keeps a dead value
+            // out of format_pref (where it would persist and then silently
+            // resolve back to the floor).
+            if (!stream_format.platformSupports(fmt) or !model.stationEnables(fmt)) return;
             const before = model.effectiveFormat();
             model.format_pref = fmt;
             saveSettings(model, fx);
@@ -3048,6 +3137,37 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .toggle_discord => {
             model.discord_enabled = !model.discord_enabled;
+            model.discord_error = ""; // a fresh attempt starts with a clean slate
+            updateDiscordPresence(model, fx);
+            saveSettings(model, fx);
+        },
+        .discord_id_edit => |edit| {
+            model.discord_id_buffer.apply(edit);
+            model.discord_id_status = ""; // typing clears the complaint
+        },
+        .submit_discord_id => {
+            const raw = std.mem.trim(u8, model.discord_id_buffer.text(), " \t\r\n");
+            if (raw.len == 0) return;
+            if (!discord_rpc.isValidClientId(raw)) {
+                model.discord_id_status = "That doesn't look like an application ID (17-20 digits)";
+                return;
+            }
+            setStr(&model.discord_client_id_buf, &model.discord_client_id, raw);
+            model.discord_id_buffer.clear();
+            model.discord_id_status = "";
+            model.discord_error = "";
+            // Pasting an ID is an unambiguous "turn it on" — don't make the
+            // listener find the toggle as a second step.
+            model.discord_enabled = true;
+            updateDiscordPresence(model, fx);
+            saveSettings(model, fx);
+        },
+        .clear_discord_id => {
+            model.discord_client_id = "";
+            model.discord_id_status = "";
+            model.discord_error = "";
+            // Falls back to the build-time default if one exists; otherwise
+            // discord_configured() goes false and the presence cancels.
             updateDiscordPresence(model, fx);
             saveSettings(model, fx);
         },
@@ -3569,7 +3689,7 @@ test "effective format: platform + station gates fall back to the MP3 floor" {
     try testing.expectEqual(expect_opus, m.effectiveFormat());
 }
 
-test "format picker: hidden on the floor, a pick retunes in place and persists" {
+test "format picker: every decodable mount is listed, a pick retunes in place" {
     var fx = Effects.init(testing.allocator);
     defer fx.deinit();
     fx.executor = .fake;
@@ -3577,25 +3697,91 @@ test "format picker: hidden on the floor, a pick retunes in place and persists" 
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     var m: Model = .{};
-    // Only the MP3 floor confirmed → no SIGNAL row, one option listed.
-    try testing.expect(!m.has_format_choice());
-    try testing.expectEqual(@as(usize, 1), m.format_rows(arena).len);
+    // The row count is a PLATFORM fact, not a station one: the sheet always
+    // names everything this host can decode so a station down to the floor
+    // reads as a fact rather than a missing feature. Station flags move the
+    // `available` bits inside that fixed list.
+    var decodable: usize = 0;
+    for (StreamFormat.all) |f| {
+        if (stream_format.platformSupports(f)) decodable += 1;
+    }
+    try testing.expectEqual(decodable, m.format_rows(arena).len);
     m.stream_flags_known = true;
+    for (m.format_rows(arena)) |r| {
+        try testing.expectEqual(std.mem.eql(u8, r.id, "mp3"), r.available);
+        if (!r.available) try testing.expectEqualStrings("not served by this station", r.detail);
+    }
     m.stream_aac = true;
-    try testing.expect(m.has_format_choice());
-    try testing.expectEqual(@as(usize, 2), m.format_rows(arena).len);
+    var available: usize = 0;
+    for (m.format_rows(arena)) |r| {
+        if (r.available) available += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), available);
     // Picking AAC mid-listen rebuilds the stream URL on the new mount and
     // lands back on the panel.
     m.transport = .playing;
     m.sheet = .format;
     update(&m, .{ .pick_format = "aac" }, &fx);
     try testing.expectEqual(StreamFormat.aac, m.format_pref);
-    try testing.expectEqualStrings("AAC", m.format_value());
+    try testing.expectEqualStrings("AAC", m.format_value(arena));
     try testing.expectEqual(Sheet.panel, m.sheet);
     try testing.expect(std.mem.startsWith(u8, &m.stream_url_buf, "https://www.getsubwave.com/stream.aac"));
     // Junk ids are ignored.
     update(&m, .{ .pick_format = "wav" }, &fx);
     try testing.expectEqual(StreamFormat.aac, m.format_pref);
+}
+
+test "format picker: pressing a mount the station doesn't serve is inert" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.stream_flags_known = true;
+    m.stream_aac = true;
+    m.format_pref = .aac;
+    // FLAC is listed (on hosts that demux Ogg) purely to say it isn't served.
+    // The press must not park a dead value in format_pref, where it would
+    // persist to settings.json and then quietly resolve back to the floor.
+    update(&m, .{ .pick_format = "flac" }, &fx);
+    try testing.expectEqual(StreamFormat.aac, m.format_pref);
+}
+
+test "format chip: the bitrate only rides along on the station's own mount" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var m: Model = .{};
+    // Nothing advertised yet → the bare label.
+    try testing.expectEqualStrings("MP3", m.format_value(arena));
+    m.stream_primary = .mp3;
+    m.stream_bitrate = 192;
+    try testing.expectEqualStrings("MP3 192k", m.format_value(arena));
+    // Tuned to a different mount than the one that bitrate describes: the
+    // number belongs to the station's primary mount and nothing measured this
+    // one, so it must not be borrowed.
+    m.stream_flags_known = true;
+    m.stream_aac = true;
+    m.format_pref = .aac;
+    try testing.expectEqualStrings("AAC", m.format_value(arena));
+}
+
+test "got_np reads the primary mount's shape for the chip" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var m: Model = .{};
+    update(&m, .{ .got_np = .{ .key = keys.fetch_np, .outcome = .ok, .status = 200, .body = "{\"stream\":{\"mount\":\"/stream.mp3\",\"format\":\"mp3\",\"bitrate\":192}}" } }, &fx);
+    try testing.expectEqual(StreamFormat.mp3, m.stream_primary.?);
+    try testing.expectEqualStrings("MP3 192k", m.format_value(arena));
+    // A format id this build doesn't know leaves the pair unset rather than
+    // pinning a bitrate to the wrong mount.
+    update(&m, .{ .got_np = .{ .key = keys.fetch_np, .outcome = .ok, .status = 200, .body = "{\"stream\":{\"format\":\"wav\",\"bitrate\":320}}" } }, &fx);
+    try testing.expectEqual(@as(?StreamFormat, null), m.stream_primary);
+    try testing.expectEqual(@as(u32, 0), m.stream_bitrate);
+    try testing.expectEqualStrings("MP3", m.format_value(arena));
 }
 
 test "got_np stream flags retune a playing stream off a dead mount" {
@@ -3703,10 +3889,125 @@ test "private station: switching stations forgets the password" {
     try testing.expect(!std.mem.startsWith(u8, &m.stream_url_buf, "https://other.example/stream.mp3?"));
 }
 
+// Configure Discord the way a listener would end up configured: a stored,
+// validated client ID (the discord.zon build default is "" in this repo).
+fn testSetDiscordId(m: *Model) void {
+    setStr(&m.discord_client_id_buf, &m.discord_client_id, "123456789012345678");
+}
+
 test "discord settings round-trip through applySettingsJson" {
     var m: Model = .{};
-    applySettingsJson(&m, "{\"discordEnabled\":true}");
+    applySettingsJson(&m, "{\"discordEnabled\":true,\"discordClientId\":\"123456789012345678\"}");
     try testing.expect(m.discord_enabled);
+    try testing.expectEqualStrings("123456789012345678", m.discord_client_id);
+    try testing.expect(m.discord_configured());
+}
+
+test "an invalid discordClientId in settings.json is dropped" {
+    var m: Model = .{};
+    applySettingsJson(&m, "{\"discordClientId\":\"not-a-snowflake\"}");
+    try testing.expectEqualStrings("", m.discord_client_id);
+    try testing.expect(!m.discord_configured());
+}
+
+test "submitting a valid client ID stores it, enables the feature, and spawns" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.transport = .playing;
+    m.self_exe_path = "/usr/local/bin/subwave-desktop";
+    m.title = "Night Drive";
+    update(&m, .{ .discord_id_edit = .{ .insert_text = " 123456789012345678 " } }, &fx);
+    update(&m, .submit_discord_id, &fx);
+    try testing.expectEqualStrings("123456789012345678", m.discord_client_id);
+    try testing.expect(m.discord_enabled);
+    try testing.expectEqualStrings("", m.discord_id_text()); // field cleared for next time
+    try testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+    // The ID rides the helper's stdin payload.
+    const req = fx.pendingSpawnAt(0).?;
+    try testing.expect(std.mem.indexOf(u8, req.stdin, "\"client_id\":\"123456789012345678\"") != null);
+}
+
+test "submitting a malformed client ID complains and changes nothing" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.transport = .playing;
+    m.self_exe_path = "/usr/local/bin/subwave-desktop";
+    update(&m, .{ .discord_id_edit = .{ .insert_text = "12345" } }, &fx);
+    update(&m, .submit_discord_id, &fx);
+    try testing.expect(m.has_discord_id_status());
+    try testing.expect(!m.discord_enabled);
+    try testing.expectEqualStrings("", m.discord_client_id);
+    try testing.expectEqual(@as(usize, 0), fx.pendingSpawnCount());
+    // Typing again clears the complaint.
+    update(&m, .{ .discord_id_edit = .{ .insert_text = "6" } }, &fx);
+    try testing.expect(!m.has_discord_id_status());
+}
+
+test "changing the client ID respawns the helper under the new identity" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.transport = .playing;
+    m.self_exe_path = "/usr/local/bin/subwave-desktop";
+    testSetDiscordId(&m);
+    update(&m, .toggle_discord, &fx);
+    const first_key = m.discord_spawn_key;
+    update(&m, .{ .discord_id_edit = .{ .insert_text = "987654321098765432" } }, &fx);
+    update(&m, .submit_discord_id, &fx);
+    try testing.expect(m.discord_spawn_key != first_key);
+    const req = fx.pendingSpawnAt(0).?;
+    try testing.expect(std.mem.indexOf(u8, req.stdin, "\"client_id\":\"987654321098765432\"") != null);
+}
+
+test "clearing the client ID cancels the presence when no build default exists" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.transport = .playing;
+    m.self_exe_path = "/usr/local/bin/subwave-desktop";
+    testSetDiscordId(&m);
+    update(&m, .toggle_discord, &fx);
+    try testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+    update(&m, .clear_discord_id, &fx);
+    try testing.expect(!m.discord_configured()); // discord.zon default is "" here
+    try testing.expectEqual(@as(usize, 0), fx.pendingSpawnCount());
+}
+
+test "helper ERROR lines surface through the status line and READY clears them" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.transport = .playing;
+    m.self_exe_path = "/usr/local/bin/subwave-desktop";
+    testSetDiscordId(&m);
+    update(&m, .toggle_discord, &fx);
+    update(&m, .{ .discord_line = .{ .key = m.discord_spawn_key, .line = "ERROR: client id rejected" } }, &fx);
+    try testing.expectEqualStrings("Discord rejected the client ID", m.discord_status_line());
+    update(&m, .{ .discord_line = .{ .key = m.discord_spawn_key, .line = "ERROR: Discord not running" } }, &fx);
+    try testing.expectEqualStrings("Discord isn't running", m.discord_status_line());
+    update(&m, .{ .discord_line = .{ .key = m.discord_spawn_key, .line = "ERROR: activity write failed" } }, &fx);
+    try testing.expectEqualStrings("Connection to Discord failed", m.discord_status_line());
+    update(&m, .{ .discord_line = .{ .key = m.discord_spawn_key, .line = "READY" } }, &fx);
+    try testing.expectEqualStrings("Connected", m.discord_status_line());
+}
+
+test "saveSettings persists the client ID" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.settings_path = "/tmp/settings.json";
+    testSetDiscordId(&m);
+    saveSettings(&m, &fx);
+    const written = fx.pendingFileAt(0).?;
+    try testing.expect(std.mem.indexOf(u8, written.bytes, "\"discordClientId\":\"123456789012345678\"") != null);
 }
 
 test "enabling Discord Rich Presence while playing spawns the helper" {
@@ -3714,7 +4015,7 @@ test "enabling Discord Rich Presence while playing spawns the helper" {
     defer fx.deinit();
     fx.executor = .fake;
     var m: Model = .{};
-    m.discord_configured = true;
+    testSetDiscordId(&m);
     m.transport = .playing;
     m.self_exe_path = "/usr/local/bin/subwave-desktop";
     m.title = "Night Drive";
@@ -3732,7 +4033,7 @@ test "an unchanged now-playing poll does not respawn the helper" {
     defer fx.deinit();
     fx.executor = .fake;
     var m: Model = .{};
-    m.discord_configured = true;
+    testSetDiscordId(&m);
     m.transport = .playing;
     m.self_exe_path = "/usr/local/bin/subwave-desktop";
     m.title = "Night Drive";
@@ -3749,7 +4050,7 @@ test "a track change respawns the helper with the new payload" {
     defer fx.deinit();
     fx.executor = .fake;
     var m: Model = .{};
-    m.discord_configured = true;
+    testSetDiscordId(&m);
     m.transport = .playing;
     m.self_exe_path = "/usr/local/bin/subwave-desktop";
     m.title = "Night Drive";
@@ -3766,7 +4067,7 @@ test "track elapsed is anchored to when the track actually changed, not the raw 
     defer fx.deinit();
     fx.executor = .fake;
     var m: Model = .{};
-    m.discord_configured = true;
+    testSetDiscordId(&m);
     m.transport = .playing;
     m.self_exe_path = "/usr/local/bin/subwave-desktop";
     m.title = "Night Drive";
@@ -3795,7 +4096,7 @@ test "tuning out cancels the helper without respawning" {
     defer fx.deinit();
     fx.executor = .fake;
     var m: Model = .{};
-    m.discord_configured = true;
+    testSetDiscordId(&m);
     m.transport = .playing;
     m.self_exe_path = "/usr/local/bin/subwave-desktop";
     update(&m, .toggle_discord, &fx);
@@ -3810,7 +4111,7 @@ test "a READY line marks connected; a non-cancelled exit schedules a retry" {
     defer fx.deinit();
     fx.executor = .fake;
     var m: Model = .{};
-    m.discord_configured = true;
+    testSetDiscordId(&m);
     m.transport = .playing;
     m.self_exe_path = "/usr/local/bin/subwave-desktop";
     update(&m, .toggle_discord, &fx);
@@ -3826,7 +4127,7 @@ test "a stale exit from a superseded helper does not disturb the current one" {
     defer fx.deinit();
     fx.executor = .fake;
     var m: Model = .{};
-    m.discord_configured = true;
+    testSetDiscordId(&m);
     m.transport = .playing;
     m.self_exe_path = "/usr/local/bin/subwave-desktop";
     m.title = "Night Drive";
@@ -3891,5 +4192,23 @@ test "open_release spawns the opener once until it exits" {
     try testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
     // Exit clears the guard.
     update(&m, .{ .opener_exited = .{ .key = keys.open_release_spawn, .reason = .exited } }, &fx);
+    try testing.expect(!m.opener_inflight);
+}
+
+test "open_support opens ko-fi behind the same one-opener guard" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    update(&m, .open_support, &fx);
+    try testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+    try testing.expect(m.opener_inflight);
+    // It is the ko-fi page that got handed to the browser, not the release page.
+    const req = fx.pendingSpawnAt(0).?;
+    try testing.expectEqualStrings(links.support, req.argv[req.argv.len - 1]);
+    // The guard spans links: a release press while ko-fi's opener lives is a no-op.
+    update(&m, .open_release, &fx);
+    try testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+    update(&m, .{ .opener_exited = .{ .key = keys.open_support_spawn, .reason = .exited } }, &fx);
     try testing.expect(!m.opener_inflight);
 }
