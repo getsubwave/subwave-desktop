@@ -11,6 +11,7 @@ comptime {
     _ = @import("spectrum.zig");
     _ = @import("api.zig");
     _ = @import("update.zig");
+    _ = @import("links.zig");
     _ = @import("model.zig");
     _ = @import("stream_format.zig");
     _ = @import("discord_rpc.zig");

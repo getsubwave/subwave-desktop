@@ -74,6 +74,17 @@
             </row>
           </row>
         </if>
+        <use template="section-label" title="SUPPORT"/>
+        <row on-press="open_support" main="space_between" cross="center" padding="10" label="Buy me a coffee on Ko-fi">
+          <row gap="10" cross="center">
+            <icon name="app:heart" width="16" height="16" foreground="text_muted"/>
+            <text>Buy me a coffee</text>
+          </row>
+          <row gap="6" cross="center">
+            <text size="sm" foreground="text_muted">ko-fi.com/pklair</text>
+            <icon name="external-link" width="14" height="14" foreground="text_muted"/>
+          </row>
+        </row>
         <use template="section-label" title="SHORTCUTS"/>
         <card padding="12">
           <grid columns="2" gap="10">
