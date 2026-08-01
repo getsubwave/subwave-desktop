@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A native desktop player (macOS + Linux + Windows) for the SUB/WAVE internet radio station, built on the **Vercel Native SDK**: declarative `.native` markup + Zig logic, rendered by the SDK's own engine — no browser, no WebView. Requires **Zig 0.16.0** and a global `@native-sdk/cli` **0.6.0+** (`npm i -g @native-sdk/cli`).
+A native desktop player (macOS + Linux + Windows) for the SUB/WAVE internet radio station, built on the **Vercel Native SDK**: declarative `.native` markup + Zig logic, rendered by the SDK's own engine — no browser, no WebView. Requires **Zig 0.16.0** and a global `@native-sdk/cli` **0.7.1+** (`npm i -g @native-sdk/cli`).
 
 ## Commands
 
@@ -27,15 +27,11 @@ native automate wait && native automate screenshot main-canvas
 
 Point the app at a dev station with `SUBWAVE_STATION_URL=http://localhost:<port>` (overrides the persisted station).
 
-## CRITICAL: local SDK patch
+## SDK upgrades
 
-The globally installed `@native-sdk/cli` carries **one required local patch** (`patches/native-sdk-local.patch`, documented in `docs/sdk-notes.md`):
+**There are no local SDK patches** — a stock `npm i -g @native-sdk/cli` is the whole toolchain. All three the repo used to carry are upstream: 0.6.0 took the comptime quota and close-hides-window + reserved tray ids 100/101 (replaced by `app.zon`'s `close_policy` plus `fx.showWindow` / `fx.quitApp`), 0.7.1 took the fractional-HiDPI GTK fix. Do not re-add any of them; `docs/sdk-notes.md` has the history and the diagnosis notes.
 
-- **Fractional HiDPI scale** in `gtk_host.c` — without it the host reports the integer `gtk_widget_get_scale_factor()` instead of the true `gdk_surface_get_scale()`, so on a fractional-scale Linux desktop (e.g. 167%) the canvas is rasterized oversized and nearest-neighbour-resampled down, which shreds glyph antialiasing and makes all text look pixelated. Linux-only; macOS/Windows already read fractional densities.
-
-**After every `npm i -g @native-sdk/cli` upgrade, run `./scripts/apply-sdk-patches.sh` then `native test`.** The script is idempotent and detects partial application.
-
-SDK 0.6.0 absorbed the other two patches (comptime quota; close-hides-window + reserved tray ids 100/101) — do not re-add them. Their replacements are `app.zon`'s `close_policy` plus `fx.showWindow` / `fx.quitApp`; see `docs/sdk-notes.md`.
+After an upgrade: run `native test`, then bump `native-sdk-version` in `.github/actions/setup-native/action.yml` so CI installs what you build against.
 
 **`close_policy` is per-build-target, and `app.zon` cannot scope per platform.** The manifest declares `"quit"` (the only thing Linux compiles — the GTK host has no tray to bring a hidden window back), and `scripts/set-close-policy.sh hide` flips it on the macOS and Windows legs of CI and both release workflows. If you touch that line in `app.zon`, keep the `.close_policy = "…"` shape — the script asserts on it and fails the build rather than silently shipping the wrong close behavior.
 
@@ -58,7 +54,7 @@ Data flow at runtime: timers poll `/api/now-playing`, `/api/state`, `/api/themes
 - **A `/` in a scene window title crashes GTK at app_start on Linux.** Keep the branded "SUB/WAVE" slash out of `app.zon` / `shell_windows` titles; it's fine in `runWithOptions.window_title`.
 - **The SDK cannot resize a live window.** Per-mode window shapes apply at next launch only.
 - **The FFT spectrum feed only emits while a window is visibly on screen** (occlusion gate in the SDK). A flat visualizer from an app launched in the background is not a bug — activate the app first.
-- SDK 0.6.0 still has **no OS media-controls surface** (no MPNowPlayingInfoCenter / MPRemoteCommandCenter / MPRIS / hardware media keys — re-checked at the 0.6.0 upgrade). The tray extra + in-window keyboard transport are the substitutes.
+- The SDK still has **no OS media-controls surface** (no MPNowPlayingInfoCenter / MPRemoteCommandCenter / MPRIS / hardware media keys — re-checked at the 0.7.1 upgrade). The tray extra + in-window keyboard transport are the substitutes.
 - **Cover art loads through `fx.loadImage`, not `fx.fetch` + `registerImageBytes`** — the fetch and the platform decode run on a worker thread, with a content-addressed disk cache under the OS caches dir. Its ImageId **is** the effect key, which is why the counter starts at `keys.cover_image_base` (1000) clear of every other effect key. An id only reaches `model.cover_id` once the runtime reports `.loaded`; anything else leaves the initials disc standing.
 - Stream format is listener-selectable (`stream_format.zig`): MP3 is the always-available floor, AAC additionally decodes on macOS (AVPlayer) and Windows (Media Foundation), and the Ogg-encapsulated Opus/FLAC mounts are Linux-only (neither AVPlayer nor Media Foundation has an Ogg demuxer). Every host asserts its **full** matrix in the `platformSupports` test — Windows fell through the defensive `else` for two releases and shipped MP3-only because cross-compiling never ran the suite for the target. Linux offers Ogg mounts optimistically and `scheduleReconnect` drops a failing non-MP3 pick back to MP3 after 3 retries; the picker only shows mounts the station advertises via the `stream` flags on `/api/now-playing`.
 - `native automate assert` regex does **not** support `|` alternation.

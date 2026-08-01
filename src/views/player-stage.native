@@ -10,6 +10,16 @@
          the explicit fallback while the cover loads (or after it fails). -->
     <panel padding="12" background="surface" border-color="border" radius="lg"
            on-press="open_timeline" label="Open timeline">
+      <!-- Metadata, not flow: right-click on the sleeve. The copy item drops
+           out entirely while nothing is playing, which is how a menu declares
+           itself conditionally (the element takes no attributes and cannot sit
+           behind a structure tag). -->
+      <context-menu>
+        <if test="{has_track}">
+          <menu-item on-press="copy_track">Copy title and artist</menu-item>
+        </if>
+        <menu-item on-press="copy_station">Copy station link</menu-item>
+      </context-menu>
       <if test="{has_cover}">
         <image image="{cover_id}" width="180" height="180" label="Cover art"/>
       </if>
@@ -34,15 +44,18 @@
       <row gap="10" cross="center">
         <text size="sm" foreground="text_muted">{np_head}</text>
         <if test="{like_available}">
-          <row gap="4" cross="center" on-press="press_like" label="{like_hint}">
-            <if test="{like_liked}">
-              <icon name="app:heart-fill" width="13" height="13" foreground="accent"/>
-            </if>
-            <else>
-              <icon name="app:heart" width="13" height="13" foreground="text_muted"/>
-            </else>
-            <text size="sm" foreground="text_muted">{like_count_str}</text>
-          </row>
+          <stack>
+            <row gap="4" cross="center" on-press="press_like" label="{like_hint}">
+              <if test="{like_liked}">
+                <icon name="app:heart-fill" width="13" height="13" foreground="accent"/>
+              </if>
+              <else>
+                <icon name="app:heart" width="13" height="13" foreground="text_muted"/>
+              </else>
+              <text size="sm" foreground="text_muted">{like_count_str}</text>
+            </row>
+            <tooltip anchor="above">{like_hint} · L</tooltip>
+          </stack>
         </if>
         <if test="{has_tokens}">
           <row gap="4" cross="center" label="LLM tokens">

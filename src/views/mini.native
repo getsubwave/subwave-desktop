@@ -23,15 +23,24 @@
       <text size="sm" foreground="text_muted">{np_head}</text>
     </column>
     <if test="{like_available}">
-      <if test="{like_liked}">
-        <button variant="ghost" size="sm" icon="app:heart-fill" label="Liked" on-press="press_like"/>
-      </if>
-      <else>
-        <button variant="ghost" size="sm" icon="app:heart" label="Like this track" on-press="press_like"/>
-      </else>
+      <stack>
+        <if test="{like_liked}">
+          <button variant="ghost" size="sm" icon="app:heart-fill" label="Liked" on-press="press_like"/>
+        </if>
+        <else>
+          <button variant="ghost" size="sm" icon="app:heart" label="Like this track" on-press="press_like"/>
+        </else>
+        <tooltip anchor="below">{like_hint} · L</tooltip>
+      </stack>
     </if>
-    <toggle-button size="sm" selected="{muted}" on-toggle="toggle_mute" icon="volume" label="{mute_label}"/>
-    <button variant="outline" icon="app:power" label="{tune_label}" on-press="tune_toggle"/>
+    <stack>
+      <toggle-button size="sm" selected="{muted}" on-toggle="toggle_mute" icon="volume" label="{mute_label}"/>
+      <tooltip anchor="below">{mute_label} · M</tooltip>
+    </stack>
+    <stack>
+      <button variant="outline" icon="app:power" label="{tune_label}" on-press="tune_toggle"/>
+      <tooltip anchor="below">{tune_label} · Space</tooltip>
+    </stack>
   </row>
   <column padding="8">
     <chart height="20" y-min="0" y-max="1" label="Spectrum">

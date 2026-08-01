@@ -98,19 +98,13 @@ ones appear.
 
 ## Build & run
 
-Requires **Zig 0.16.0** and `@native-sdk/cli` **0.6.0+**
-(`npm i -g @native-sdk/cli`) — **plus one local SDK patch**. After every SDK
-install/upgrade:
-
-```bash
-./scripts/apply-sdk-patches.sh && native test
-```
-
-The remaining patch fixes fractional-HiDPI text rendering on Linux
-([vercel-labs/native#156](https://github.com/vercel-labs/native/issues/156));
-it is documented in `docs/sdk-notes.md`. Symptom of a missing patch: pixelated
-text on a fractional-scale display. (0.6.0 absorbed the two older patches — the
-comptime quota fix and close-button-hides-window.)
+Requires **Zig 0.16.0** and `@native-sdk/cli` **0.7.1+**
+(`npm i -g @native-sdk/cli`) — nothing else. There are no local SDK patches:
+0.6.0 absorbed the comptime quota fix and close-button-hides-window, and 0.7.1
+absorbed the last one, fractional-HiDPI text rendering on Linux
+([vercel-labs/native#156](https://github.com/vercel-labs/native/issues/156)).
+`docs/sdk-notes.md` keeps the history and the diagnosis notes. Run `native test`
+after an upgrade.
 
 ```bash
 native build && ./zig-out/bin/subwave-desktop   # release build + run
@@ -168,7 +162,7 @@ default, so its builds shipped with no AAC and a hidden format picker. Nothing
 caught it because cross-compiling the Windows binary never ran the test suite
 for the target; building on a Windows runner did, immediately.
 
-**OS media integration.** The SDK (re-checked at 0.6.0) has no system
+**OS media integration.** The SDK (re-checked at 0.7.1) has no system
 now-playing or media-key surface — no `MPNowPlayingInfoCenter`/
 `MPRemoteCommandCenter` on macOS, no MPRIS on Linux — so hardware play/pause
 keys and the OS Now Playing widget can't be wired up yet (SDK feature request).
@@ -208,9 +202,9 @@ one per CPU flavor):
 | `release-windows.yml` | `windows-latest` | `-windows-x64.zip` | built and launched on real Windows |
 | `release-linux.yml` | `ubuntu-24.04` | `-linux-x64.tar.gz` | needs glibc 2.39+ and GTK4 |
 
-Each one applies the local SDK patch before building
-(`scripts/apply-sdk-patches.sh`), so a release cannot ship without it, and
-each refuses to run if the tag disagrees with `.version` in `app.zon`. The
+Each one installs the SDK version pinned in
+`.github/actions/setup-native/action.yml`, and refuses to run if the tag
+disagrees with `.version` in `app.zon`. The
 macOS and Windows legs additionally run `scripts/set-close-policy.sh hide`
 before testing, which is how those builds get the menu-bar close semantics that
 `app.zon` cannot declare for all three targets at once. Shared

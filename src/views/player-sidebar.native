@@ -10,7 +10,10 @@
       <column width="320" gap="0">
         <row cross="center" main="space_between" padding="14">
           <text size="heading">Stations</text>
-          <button variant="ghost" size="sm" icon="x" label="Close stations" on-press="toggle_sidebar"/>
+          <stack>
+            <button variant="ghost" size="sm" icon="x" label="Close stations" on-press="toggle_sidebar"/>
+            <tooltip anchor="below">Close stations</tooltip>
+          </stack>
         </row>
         <scroll grow="1">
           <column gap="10" padding="14">
@@ -62,7 +65,10 @@
             <use template="section-label" title="ADD A STATION"/>
             <row gap="8" cross="center">
               <search-field text="{station_text}" placeholder="radio.yourhost.com" on-input="station_edit" on-submit="tune_station" grow="1"/>
-              <button variant="secondary" icon="plus" label="Tune to this station" on-press="tune_station"/>
+              <stack>
+                <button variant="secondary" icon="plus" label="Tune to this station" on-press="tune_station"/>
+                <tooltip anchor="above">Tune to this station</tooltip>
+              </stack>
             </row>
             <if test="{station_status}">
               <text size="sm" foreground="accent">{station_status}</text>

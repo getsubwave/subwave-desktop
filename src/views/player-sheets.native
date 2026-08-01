@@ -1,4 +1,16 @@
-<!-- Player fragment: back panel / sleep / themes sheets (modal surfaces). -->
+<!-- Player fragment: back panel / sleep / themes sheets (modal surfaces).
+
+     Sheet headers are authored, not chrome. `<sheet text="…">` makes the SDK
+     paint the title itself (widget_render_surfaces.emitSheetSurfaceWidgetChrome
+     draws widget.text at an inset), which leaves nowhere to hang a close
+     control and forces every sheet to open with a spacer just to clear the
+     painted glyphs. `label=` carries the accessible name instead and the head
+     templates below own the top bar: title, a back arrow on the leaf sheets,
+     and an X that is the only *visible* way out (Escape works, click-outside
+     does not — the scrim passes the press through to the widget underneath).
+
+     Everything below the head sits in a `<scroll>`: the sheet is a fixed slice
+     of the window, so an unscrolled column silently clips its last rows. -->
 <template name="section-label" args="title">
   <row gap="10" cross="center">
     <text size="sm" foreground="text_muted">{title}</text>
@@ -6,173 +18,208 @@
   </row>
 </template>
 
+<!-- Top bar for the root sheet: title, then the close. -->
+<template name="sheet-head" args="title">
+  <row cross="center" gap="8" padding="10">
+    <text size="heading">{title}</text>
+    <spacer grow="1"/>
+    <stack>
+      <button variant="ghost" size="sm" icon="x" label="Close" on-press="close_sheet"/>
+      <tooltip anchor="above">Close · Esc</tooltip>
+    </stack>
+  </row>
+</template>
+
+<!-- Top bar for a leaf sheet: back to the panel, title, then the close. -->
+<template name="leaf-sheet-head" args="title">
+  <row cross="center" gap="8" padding="10">
+    <stack>
+      <button variant="ghost" size="sm" icon="chevron-left" label="Back panel" on-press="open_panel"/>
+      <tooltip anchor="above">Back panel</tooltip>
+    </stack>
+    <text size="heading">{title}</text>
+    <spacer grow="1"/>
+    <stack>
+      <button variant="ghost" size="sm" icon="x" label="Close" on-press="close_sheet"/>
+      <tooltip anchor="above">Close · Esc</tooltip>
+    </stack>
+  </row>
+</template>
+
 <column>
   <!-- Back panel sheet -->
   <if test="{sheet_panel}">
-    <sheet text="BACK PANEL" on-dismiss="close_sheet">
-      <column gap="12" padding="4">
-        <spacer height="30"/>
-        <use template="section-label" title="TIMER"/>
-        <row on-press="open_sleep" main="space_between" cross="center" padding="10" label="Sleep timer">
-          <row gap="10" cross="center">
-            <icon name="moon" width="16" height="16" foreground="text_muted"/>
-            <text>Sleep timer</text>
-          </row>
-          <row gap="6" cross="center">
-            <if test="{sleep_armed}">
-              <text size="sm" foreground="accent">{sleep_value}</text>
+    <sheet label="BACK PANEL" height="440" on-dismiss="close_sheet">
+      <column gap="0" grow="1">
+        <use template="sheet-head" title="BACK PANEL"/>
+        <separator/>
+        <scroll grow="1">
+          <column gap="12" padding="10">
+            <use template="section-label" title="TIMER"/>
+            <row on-press="open_sleep" main="space_between" cross="center" padding="10" label="Sleep timer">
+              <row gap="10" cross="center">
+                <icon name="moon" width="16" height="16" foreground="text_muted"/>
+                <text>Sleep timer</text>
+              </row>
+              <row gap="6" cross="center">
+                <if test="{sleep_armed}">
+                  <text size="sm" foreground="accent">{sleep_value}</text>
+                </if>
+                <else>
+                  <text size="sm" foreground="text_muted">{sleep_value}</text>
+                </else>
+                <icon name="chevron-right" width="14" height="14" foreground="text_muted"/>
+              </row>
+            </row>
+            <use template="section-label" title="FASCIA"/>
+            <row on-press="open_themes" main="space_between" cross="center" padding="10" label="Theme">
+              <row gap="10" cross="center">
+                <icon name="sun" width="16" height="16" foreground="text_muted"/>
+                <text>Theme</text>
+              </row>
+              <row gap="6" cross="center">
+                <text size="sm" foreground="text_muted">{theme_value}</text>
+                <icon name="chevron-right" width="14" height="14" foreground="text_muted"/>
+              </row>
+            </row>
+            <!-- Hidden while the MP3 floor is the only pick this station+platform offers -->
+            <if test="{has_format_choice}">
+              <use template="section-label" title="SIGNAL"/>
+              <row on-press="open_format" main="space_between" cross="center" padding="10" label="Stream format">
+                <row gap="10" cross="center">
+                  <icon name="music" width="16" height="16" foreground="text_muted"/>
+                  <text>Stream format</text>
+                </row>
+                <row gap="6" cross="center">
+                  <text size="sm" foreground="text_muted">{format_value}</text>
+                  <icon name="chevron-right" width="14" height="14" foreground="text_muted"/>
+                </row>
+              </row>
             </if>
-            <else>
-              <text size="sm" foreground="text_muted">{sleep_value}</text>
-            </else>
-            <icon name="chevron-right" width="14" height="14" foreground="text_muted"/>
-          </row>
-        </row>
-        <use template="section-label" title="FASCIA"/>
-        <row on-press="open_themes" main="space_between" cross="center" padding="10" label="Theme">
-          <row gap="10" cross="center">
-            <icon name="sun" width="16" height="16" foreground="text_muted"/>
-            <text>Theme</text>
-          </row>
-          <row gap="6" cross="center">
-            <text size="sm" foreground="text_muted">{theme_value}</text>
-            <icon name="chevron-right" width="14" height="14" foreground="text_muted"/>
-          </row>
-        </row>
-        <!-- Hidden while the MP3 floor is the only pick this station+platform offers -->
-        <if test="{has_format_choice}">
-          <use template="section-label" title="SIGNAL"/>
-          <row on-press="open_format" main="space_between" cross="center" padding="10" label="Stream format">
-            <row gap="10" cross="center">
-              <icon name="music" width="16" height="16" foreground="text_muted"/>
-              <text>Stream format</text>
+            <use template="section-label" title="INTEGRATIONS"/>
+            <row on-press="open_discord" main="space_between" cross="center" padding="10" label="Discord Rich Presence">
+              <row gap="10" cross="center">
+                <icon name="app:radio" width="16" height="16" foreground="text_muted"/>
+                <text>Discord Rich Presence</text>
+              </row>
+              <row gap="6" cross="center">
+                <text size="sm" foreground="text_muted">{discord_row_value}</text>
+                <icon name="chevron-right" width="14" height="14" foreground="text_muted"/>
+              </row>
             </row>
-            <row gap="6" cross="center">
-              <text size="sm" foreground="text_muted">{format_value}</text>
-              <icon name="chevron-right" width="14" height="14" foreground="text_muted"/>
-            </row>
-          </row>
-        </if>
-        <use template="section-label" title="INTEGRATIONS"/>
-        <row on-press="open_discord" main="space_between" cross="center" padding="10" label="Discord Rich Presence">
-          <row gap="10" cross="center">
-            <icon name="app:radio" width="16" height="16" foreground="text_muted"/>
-            <text>Discord Rich Presence</text>
-          </row>
-          <row gap="6" cross="center">
-            <text size="sm" foreground="text_muted">{discord_row_value}</text>
-            <icon name="chevron-right" width="14" height="14" foreground="text_muted"/>
-          </row>
-        </row>
-        <if test="{update_available}">
-          <use template="section-label" title="SERVICE"/>
-          <row on-press="open_release" main="space_between" cross="center" padding="10" label="Update available">
-            <row gap="10" cross="center">
-              <icon name="download" width="16" height="16" foreground="accent"/>
-              <text>Update available</text>
-            </row>
-            <row gap="6" cross="center">
-              <text size="sm" foreground="accent">{update_value}</text>
-              <icon name="chevron-right" width="14" height="14" foreground="text_muted"/>
-            </row>
-          </row>
-        </if>
-        <use template="section-label" title="SHORTCUTS"/>
-        <card padding="12">
-          <grid columns="2" gap="10">
-            <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">TUNE</text><badge>Space</badge></row>
-            <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">DIAL</text><badge>1–5</badge></row>
-            <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">MUTE</text><badge>M</badge></row>
-            <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">LIKE</text><badge>L</badge></row>
-            <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">VOLUME</text><badge>Up · Down</badge></row>
-            <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">STATIONS</text><badge>Cmd K</badge></row>
-            <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">BACK TO LIVE</text><badge>Esc</badge></row>
-          </grid>
-        </card>
-        <text size="sm" foreground="text_muted" text-alignment="center">MODEL SW-D1 · V{app_version} · MADE FOR THE INTERNET</text>
+            <if test="{update_available}">
+              <use template="section-label" title="SERVICE"/>
+              <row on-press="open_release" main="space_between" cross="center" padding="10" label="Update available">
+                <row gap="10" cross="center">
+                  <icon name="download" width="16" height="16" foreground="accent"/>
+                  <text>Update available</text>
+                </row>
+                <row gap="6" cross="center">
+                  <text size="sm" foreground="accent">{update_value}</text>
+                  <icon name="chevron-right" width="14" height="14" foreground="text_muted"/>
+                </row>
+              </row>
+            </if>
+            <use template="section-label" title="SHORTCUTS"/>
+            <card padding="12">
+              <grid columns="2" gap="10">
+                <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">TUNE</text><badge>Space</badge></row>
+                <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">DIAL</text><badge>1–5</badge></row>
+                <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">MUTE</text><badge>M</badge></row>
+                <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">LIKE</text><badge>L</badge></row>
+                <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">VOLUME</text><badge>Up · Down</badge></row>
+                <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">STATIONS</text><badge>Cmd K</badge></row>
+                <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">BACK TO LIVE</text><badge>Esc</badge></row>
+              </grid>
+            </card>
+            <text size="sm" foreground="text_muted" text-alignment="center">MODEL SW-D1 · V{app_version} · MADE FOR THE INTERNET</text>
+          </column>
+        </scroll>
       </column>
     </sheet>
   </if>
 
   <!-- Sleep timer sheet -->
   <if test="{sheet_sleep}">
-    <sheet text="SLEEP TIMER" on-dismiss="close_sheet">
-      <column gap="10" padding="4">
-        <spacer height="30"/>
-        <row gap="8" cross="center">
-          <button variant="ghost" size="sm" icon="chevron-left" label="Back panel" on-press="open_panel"/>
-          <text size="sm" foreground="text_muted">BACK PANEL</text>
-        </row>
-        <if test="{sleep_armed}">
-          <card padding="12" border-color="accent">
-            <row main="space_between" cross="center" gap="10">
-              <row gap="10" cross="center">
-                <icon name="moon" width="18" height="18" foreground="accent"/>
-                <column gap="2">
-                  <text size="sm" foreground="accent">TUNING OUT IN</text>
-                  <text size="heading">{sleep_countdown}</text>
-                </column>
-              </row>
-              <button variant="outline" size="sm" on-press="cancel_sleep">Cancel</button>
-            </row>
-          </card>
-        </if>
-        <else>
-          <text size="sm" foreground="text_muted" wrap="true">The radio tunes itself out when the timer lapses — drift off without playing all night.</text>
-        </else>
-        <column gap="0">
-          <for each="sleep_options" as="o">
-            <row on-press="sleep_pick:{o.min}" main="space_between" cross="center" padding="12" label="{o.label}">
-              <text>{o.label}</text>
-              <if test="{o.min == sleep_minutes}">
-                <icon name="check" width="15" height="15" foreground="accent"/>
-              </if>
-            </row>
-            <separator/>
-          </for>
-        </column>
+    <sheet label="SLEEP TIMER" height="440" on-dismiss="close_sheet">
+      <column gap="0" grow="1">
+        <use template="leaf-sheet-head" title="SLEEP TIMER"/>
+        <separator/>
+        <scroll grow="1">
+          <column gap="10" padding="10">
+            <if test="{sleep_armed}">
+              <card padding="12" border-color="accent">
+                <row main="space_between" cross="center" gap="10">
+                  <row gap="10" cross="center">
+                    <icon name="moon" width="18" height="18" foreground="accent"/>
+                    <column gap="2">
+                      <text size="sm" foreground="accent">TUNING OUT IN</text>
+                      <text size="heading">{sleep_countdown}</text>
+                    </column>
+                  </row>
+                  <button variant="outline" size="sm" on-press="cancel_sleep">Cancel</button>
+                </row>
+              </card>
+            </if>
+            <else>
+              <text size="sm" foreground="text_muted" wrap="true">The radio tunes itself out when the timer lapses — drift off without playing all night.</text>
+            </else>
+            <column gap="0">
+              <for each="sleep_options" as="o">
+                <row on-press="sleep_pick:{o.min}" main="space_between" cross="center" padding="12" label="{o.label}">
+                  <text>{o.label}</text>
+                  <if test="{o.min == sleep_minutes}">
+                    <icon name="check" width="15" height="15" foreground="accent"/>
+                  </if>
+                </row>
+                <separator/>
+              </for>
+            </column>
+          </column>
+        </scroll>
       </column>
     </sheet>
   </if>
 
   <!-- Themes sheet -->
   <if test="{sheet_themes}">
-    <sheet text="FASCIA / THEME" on-dismiss="close_sheet">
-      <column gap="10" padding="4">
-        <spacer height="30"/>
-        <row gap="8" cross="center">
-          <button variant="ghost" size="sm" icon="chevron-left" label="Back panel" on-press="open_panel"/>
-          <text size="sm" foreground="text_muted">BACK PANEL</text>
-        </row>
-        <row on-press="follow_station" main="space_between" cross="center" padding="10" label="Follow station">
-          <column gap="2">
-            <text>Follow station</text>
-            <text size="sm" foreground="text_muted">Use whatever palette the station broadcasts</text>
-          </column>
-          <if test="{follow_on}">
-            <icon name="check" width="15" height="15" foreground="accent"/>
-          </if>
-        </row>
+    <sheet label="FASCIA / THEME" height="440" on-dismiss="close_sheet">
+      <column gap="0" grow="1">
+        <use template="leaf-sheet-head" title="FASCIA / THEME"/>
         <separator/>
-        <column gap="0">
-          <for each="theme_rows" key="id" as="th">
-            <row on-press="pick_theme:{th.id}" main="space_between" cross="center" gap="12" padding="10" label="{th.name}">
-              <column gap="2" grow="1">
-                <text wrap="false" overflow="ellipsis">{th.name}</text>
-                <if test="{th.has_desc}">
-                  <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{th.desc}</text>
-                </if>
+        <scroll grow="1">
+          <column gap="10" padding="10">
+            <row on-press="follow_station" main="space_between" cross="center" padding="10" label="Follow station">
+              <column gap="2">
+                <text>Follow station</text>
+                <text size="sm" foreground="text_muted">Use whatever palette the station broadcasts</text>
               </column>
-              <if test="{th.on}">
+              <if test="{follow_on}">
                 <icon name="check" width="15" height="15" foreground="accent"/>
               </if>
             </row>
             <separator/>
-          </for>
-          <else>
-            <text foreground="text_muted">No themes broadcast yet.</text>
-          </else>
-        </column>
+            <column gap="0">
+              <for each="theme_rows" key="id" as="th">
+                <row on-press="pick_theme:{th.id}" main="space_between" cross="center" gap="12" padding="10" label="{th.name}">
+                  <column gap="2" grow="1">
+                    <text wrap="false" overflow="ellipsis">{th.name}</text>
+                    <if test="{th.has_desc}">
+                      <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{th.desc}</text>
+                    </if>
+                  </column>
+                  <if test="{th.on}">
+                    <icon name="check" width="15" height="15" foreground="accent"/>
+                  </if>
+                </row>
+                <separator/>
+              </for>
+              <else>
+                <text foreground="text_muted">No themes broadcast yet.</text>
+              </else>
+            </column>
+          </column>
+        </scroll>
       </column>
     </sheet>
   </if>
@@ -180,59 +227,63 @@
 
   <!-- Stream format sheet -->
   <if test="{sheet_format}">
-    <sheet text="SIGNAL / FORMAT" on-dismiss="close_sheet">
-      <column gap="10" padding="4">
-        <spacer height="30"/>
-        <row gap="8" cross="center">
-          <button variant="ghost" size="sm" icon="chevron-left" label="Back panel" on-press="open_panel"/>
-          <text size="sm" foreground="text_muted">BACK PANEL</text>
-        </row>
-        <text size="sm" foreground="text_muted" wrap="true">The MP3 floor always plays; the station's optional mounts trade data for fidelity.</text>
-        <column gap="0">
-          <for each="format_rows" key="id" as="f">
-            <row on-press="pick_format:{f.id}" main="space_between" cross="center" padding="10" label="{f.label}">
-              <column gap="1">
-                <text>{f.label}</text>
-                <text size="sm" foreground="text_muted">{f.detail}</text>
-              </column>
-              <if test="{f.on}">
-                <icon name="check" width="15" height="15" foreground="accent"/>
-              </if>
-            </row>
-            <separator/>
-          </for>
-        </column>
+    <sheet label="SIGNAL / FORMAT" height="440" on-dismiss="close_sheet">
+      <column gap="0" grow="1">
+        <use template="leaf-sheet-head" title="SIGNAL / FORMAT"/>
+        <separator/>
+        <scroll grow="1">
+          <column gap="10" padding="10">
+            <text size="sm" foreground="text_muted" wrap="true">The MP3 floor always plays; the station's optional mounts trade data for fidelity.</text>
+            <column gap="0">
+              <for each="format_rows" key="id" as="f">
+                <row on-press="pick_format:{f.id}" main="space_between" cross="center" padding="10" label="{f.label}">
+                  <column gap="1">
+                    <text>{f.label}</text>
+                    <text size="sm" foreground="text_muted">{f.detail}</text>
+                  </column>
+                  <if test="{f.on}">
+                    <icon name="check" width="15" height="15" foreground="accent"/>
+                  </if>
+                </row>
+                <separator/>
+              </for>
+            </column>
+          </column>
+        </scroll>
       </column>
     </sheet>
   </if>
 
   <!-- Discord Rich Presence sheet -->
   <if test="{sheet_discord}">
-    <sheet text="INTEGRATIONS / DISCORD" on-dismiss="close_sheet">
-      <column gap="10" padding="4">
-        <spacer height="30"/>
-        <row gap="8" cross="center">
-          <button variant="ghost" size="sm" icon="chevron-left" label="Back panel" on-press="open_panel"/>
-          <text size="sm" foreground="text_muted">BACK PANEL</text>
-        </row>
-        <if test="{discord_configured}">
-          <row on-press="toggle_discord" main="space_between" cross="center" padding="10" label="Discord Rich Presence">
-            <column gap="2">
-              <text>Discord Rich Presence</text>
-              <text size="sm" foreground="text_muted">Share what's playing on your Discord profile</text>
-            </column>
-            <if test="{discord_enabled}">
-              <icon name="check" width="15" height="15" foreground="accent"/>
+    <sheet label="INTEGRATIONS / DISCORD" height="440" on-dismiss="close_sheet">
+      <column gap="0" grow="1">
+        <use template="leaf-sheet-head" title="INTEGRATIONS / DISCORD"/>
+        <separator/>
+        <scroll grow="1">
+          <column gap="10" padding="10">
+            <if test="{discord_configured}">
+              <!-- A real boolean, so a real switch. (The theme sheet's "Follow
+                   station" row keeps its check icon on purpose: it CLEARS the
+                   override rather than toggling, so it is the first option in a
+                   radio list, not an on/off.) -->
+              <row main="space_between" cross="center" gap="12" padding="10">
+                <column gap="2" grow="1">
+                  <text>Discord Rich Presence</text>
+                  <text size="sm" foreground="text_muted">Share what's playing on your Discord profile</text>
+                </column>
+                <switch selected="{discord_enabled}" on-toggle="toggle_discord" label="Discord Rich Presence"/>
+              </row>
+              <if test="{discord_enabled}">
+                <separator/>
+                <text size="sm" foreground="text_muted">{discord_status_line}</text>
+              </if>
             </if>
-          </row>
-          <if test="{discord_enabled}">
-            <separator/>
-            <text size="sm" foreground="text_muted">{discord_status_line}</text>
-          </if>
-        </if>
-        <else>
-          <text size="sm" foreground="text_muted" wrap="true">Discord Rich Presence — not configured for this build. Set client_id in discord.zon to enable it.</text>
-        </else>
+            <else>
+              <text size="sm" foreground="text_muted" wrap="true">Discord Rich Presence — not configured for this build. Set client_id in discord.zon to enable it.</text>
+            </else>
+          </column>
+        </scroll>
       </column>
     </sheet>
   </if>

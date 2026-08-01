@@ -1,24 +1,21 @@
-# Shared toolchain setup for the three release workflows: Zig, Node, the
-# Native SDK, and the repo's local SDK patches.
+# Shared toolchain setup for the three release workflows: Zig, Node and the
+# Native SDK.
 #
 # The INSTALL pins live HERE and nowhere else: three copies across three
-# workflow files would be a drift bug waiting to happen.
+# workflow files would be a drift bug waiting to happen. Keep this pin level
+# with the SDK the maintainers run locally — the 0.6.0 upgrade bumped the local
+# toolchain and left this at 0.5.3, and every job died several steps later on
+# markup the older SDK could not parse.
 #
-# One other place names an SDK version, and it is not a copy of this one:
-# scripts/apply-sdk-patches.sh records the version the patch was GENERATED
-# against, and refuses to apply it to anything else (a unified diff carries no
-# version, and `patch` will otherwise land hunks on a different release by
-# offset). The two must agree — bump both together. That mismatch is not
-# hypothetical: the 0.6.0 upgrade bumped the local toolchain and left this pin
-# at 0.5.3, and every job died several steps later on markup the older SDK
-# could not parse.
+# There are no local SDK patches any more: 0.7.1 took the last one (fractional
+# HiDPI on the GTK host) upstream. See docs/sdk-notes.md before adding another.
 #
 # Zig is downloaded straight from ziglang.org and checksummed rather than
 # pulled via a third-party setup action: these workflows produce the binaries
 # people download, so the toolchain gets one less party to trust. The checksum
 # is the point — a tampered download fails the job instead of shipping.
 name: Set up Native SDK toolchain
-description: Install Zig, Node and @native-sdk/cli, then apply the local SDK patches.
+description: Install Zig, Node and @native-sdk/cli.
 
 inputs:
   zig-version:
@@ -26,10 +23,7 @@ inputs:
     default: "0.16.0"
   native-sdk-version:
     description: "@native-sdk/cli version to install"
-    default: "0.6.0"
-  apply-patches:
-    description: Whether to run scripts/apply-sdk-patches.sh
-    default: "true"
+    default: "0.7.1"
 
 runs:
   using: composite
@@ -85,12 +79,3 @@ runs:
         npm i -g "@native-sdk/cli@${NATIVE_SDK_VERSION}"
         zig version
         native --version
-
-    - name: Apply local SDK patches
-      # A release must never ship without these. The script fails loudly on
-      # partial application, so a patch file that has drifted against a new SDK
-      # breaks the build instead of quietly degrading the artifact (which is
-      # exactly how the pixelated-text bug would come back on Linux).
-      if: inputs.apply-patches == 'true'
-      shell: bash
-      run: ./scripts/apply-sdk-patches.sh
