@@ -13,7 +13,10 @@
           <text size="heading">{panel_title}</text>
           <row gap="8" cross="center">
             <text size="sm" foreground="text_muted">{panel_sub}</text>
-            <button variant="ghost" size="sm" icon="x" label="Back to LIVE" on-press="close_panel"/>
+            <stack>
+              <button variant="ghost" size="sm" icon="x" label="Back to LIVE" on-press="close_panel"/>
+              <tooltip anchor="below">Back to LIVE · Esc</tooltip>
+            </stack>
           </row>
         </row>
         <separator/>

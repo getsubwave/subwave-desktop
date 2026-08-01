@@ -21,7 +21,10 @@
     <if test="{update_available}">
       <icon name="circle-dot" width="10" height="10" foreground="accent"/>
     </if>
-    <button variant="ghost" icon="settings" label="Back panel" on-press="open_panel"/>
+    <stack>
+      <button variant="ghost" icon="settings" label="Back panel" on-press="open_panel"/>
+      <tooltip anchor="below">Back panel</tooltip>
+    </stack>
   </row>
   <separator/>
 

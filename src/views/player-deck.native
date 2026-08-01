@@ -3,7 +3,10 @@
   <!-- Transport deck -->
   <separator/>
   <row gap="14" cross="center" padding="12">
-    <button variant="outline" size="lg" icon="app:power" label="{tune_label}" on-press="tune_toggle"/>
+    <stack>
+      <button variant="outline" size="lg" icon="app:power" label="{tune_label}" on-press="tune_toggle"/>
+      <tooltip anchor="above">{tune_label} · Space</tooltip>
+    </stack>
     <if test="{connecting}">
       <spinner/>
     </if>
@@ -30,7 +33,10 @@
       <icon name="volume" width="16" height="16" foreground="text_muted"/>
       <slider value="{volume}" on-change="volume_changed" label="Volume" grow="1"/>
       <text size="sm" foreground="text_muted" width="40" wrap="false" overflow="clip">{vol_display}</text>
-      <toggle-button size="sm" selected="{muted}" on-toggle="toggle_mute" icon="volume" label="{mute_label}"/>
+      <stack>
+        <toggle-button size="sm" selected="{muted}" on-toggle="toggle_mute" icon="volume" label="{mute_label}"/>
+        <tooltip anchor="above">{mute_label} · M</tooltip>
+      </stack>
     </row>
   </row>
 

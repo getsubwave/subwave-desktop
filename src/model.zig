@@ -56,6 +56,7 @@ pub const keys = struct {
     pub const update_timer: u64 = 44;
     pub const open_release_spawn: u64 = 45;
     pub const open_support_spawn: u64 = 46;
+    pub const copy_clipboard: u64 = 47;
 
     // Cover art loads through `fx.loadImage`, where the ImageId IS the effect
     // key — so the id counter has to start clear of every key above or a cover
@@ -677,6 +678,11 @@ pub const Model = struct {
     /// failed one.
     pub fn has_cover(self: *const Model) bool {
         return self.cover_id != 0;
+    }
+    /// A real track is on the deck (not the "Tuning in…" placeholder), so
+    /// there is something worth copying.
+    pub fn has_track(self: *const Model) bool {
+        return self.title.len != 0 and !std.mem.eql(u8, self.title, "Tuning in…");
     }
 
     // ------------------------------------------------------- signal meter
@@ -1349,6 +1355,11 @@ pub const Msg = union(enum) {
     toggle_mini,
     expand_mini,
     mini_closed,
+
+    // Right-click on the sleeve. The SDK has no OS now-playing surface, so
+    // "what is this track" leaves the app through the clipboard or not at all.
+    copy_track,
+    copy_station,
 
     // sleep timer
     sleep_pick: i64,
@@ -2870,6 +2881,21 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 model.active_tab = .live;
             }
         },
+        // Both writes are fire-and-forget: `writeClipboard` copies the text at
+        // call time, so the stack scratch here is safe to let go, and a failed
+        // write has no honest surface to report into (no toast in this UI).
+        .copy_track => {
+            // Same gate the markup uses, so the placeholder title can never
+            // reach the clipboard even if the item is reached another way.
+            if (!model.has_track()) return;
+            var buf: [512]u8 = undefined;
+            const text = if (model.artist.len == 0)
+                std.fmt.bufPrint(&buf, "{s}", .{model.title}) catch return
+            else
+                std.fmt.bufPrint(&buf, "{s} — {s}", .{ model.title, model.artist }) catch return;
+            fx.writeClipboard(.{ .key = keys.copy_clipboard, .text = text });
+        },
+        .copy_station => fx.writeClipboard(.{ .key = keys.copy_clipboard, .text = model.base }),
         .open_panel => model.sheet = .panel,
         .open_sleep => model.sheet = .sleep,
         .open_themes => model.sheet = .themes,
@@ -3441,6 +3467,41 @@ test "mini flow keeps one player surface: open minimizes main, every exit restor
     // for good) and never quits the app.
     try testing.expectEqual(@as(u32, 0), fx.windowActionState().close_count);
     try testing.expectEqual(@as(u32, 0), fx.windowActionState().quit_count);
+}
+
+test "sleeve context menu copies the track and the station link" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+
+    // Nothing on the deck yet: the copy is a no-op rather than a blank write.
+    // (Markup hides the item behind has_track too; this is the model half.)
+    update(&m, .copy_track, &fx);
+    try testing.expectEqual(@as(usize, 0), fx.pendingClipboardCount());
+
+    setStr(&m.title_buf, &m.title, "Overload");
+    setStr(&m.artist_buf, &m.artist, "Tarsem Jassar");
+    update(&m, .copy_track, &fx);
+    try testing.expectEqual(@as(usize, 1), fx.pendingClipboardCount());
+    try testing.expectEqualStrings("Overload — Tarsem Jassar", fx.pendingClipboardAt(0).?.text);
+
+    // A track with no artist copies the bare title, not a dangling em dash.
+    var fx2 = Effects.init(testing.allocator);
+    defer fx2.deinit();
+    fx2.executor = .fake;
+    var m2: Model = .{};
+    setStr(&m2.title_buf, &m2.title, "Untitled");
+    update(&m2, .copy_track, &fx2);
+    try testing.expectEqualStrings("Untitled", fx2.pendingClipboardAt(0).?.text);
+
+    var fx3 = Effects.init(testing.allocator);
+    defer fx3.deinit();
+    fx3.executor = .fake;
+    var m3: Model = .{};
+    setStr(&m3.base_buf, &m3.base, "https://radio.example.com");
+    update(&m3, .copy_station, &fx3);
+    try testing.expectEqualStrings("https://radio.example.com", fx3.pendingClipboardAt(0).?.text);
 }
 
 test "jsonEscape escapes quotes and drops raw control bytes" {
