@@ -253,6 +253,9 @@ pub const Settings = struct {
     stationPassword: ?[]const u8 = null,
     recents: ?[]SettingsRecent = null,
     discordEnabled: ?bool = null,
+    // Listener-entered Discord application ID (public identifier, not a
+    // secret); ""/absent = use the build-time discord.zon default, if any.
+    discordClientId: ?[]const u8 = null,
 };
 
 // Parse `body` into T, tolerating unknown/extra fields. Caller owns the result
