@@ -347,7 +347,15 @@ pub const Model = struct {
 
     // Discord Rich Presence (opt-in; see discord_rpc.zig / discord.zon).
     discord_enabled: bool = false,
-    discord_configured: bool = discord_rpc.configured_at_build,
+    // Listener-entered Discord application ID (Discord sheet, persisted in
+    // settings.json); "" = fall back to the build-time discord.zon default.
+    // Whether the feature is configured at all is the derived
+    // discord_configured() getter, not a stored flag.
+    discord_id_buffer: canvas.TextBuffer(24) = .{},
+    discord_client_id_buf: [24]u8 = undefined,
+    discord_client_id: []const u8 = "",
+    discord_id_status: []const u8 = "", // static literals; "" = nothing to show
+    discord_error: []const u8 = "", // static literals mapped from helper ERROR lines
     discord_connected: bool = false,
     discord_retry_count: u6 = 0,
     discord_spawn_key: u64 = keys.discord_rpc_a,
@@ -754,14 +762,33 @@ pub const Model = struct {
     }
 
     // ---------------------------------------------------------------- discord
+    /// The ID the helper actually handshakes with: the listener-entered one
+    /// wins, the build-time discord.zon constant is the default.
+    pub fn effectiveDiscordClientId(self: *const Model) []const u8 {
+        return if (self.discord_client_id.len > 0) self.discord_client_id else discord_rpc.client_id;
+    }
+    pub fn discord_configured(self: *const Model) bool {
+        return self.effectiveDiscordClientId().len > 0;
+    }
+    pub fn has_own_discord_id(self: *const Model) bool {
+        return self.discord_client_id.len > 0;
+    }
+    pub fn discord_id_text(self: *const Model) []const u8 {
+        return self.discord_id_buffer.text();
+    }
+    pub fn has_discord_id_status(self: *const Model) bool {
+        return self.discord_id_status.len > 0;
+    }
+
     pub fn discord_row_value(self: *const Model) []const u8 {
-        if (!self.discord_configured) return "Not configured";
+        if (!self.discord_configured()) return "Not configured";
         return if (self.discord_enabled) "On" else "Off";
     }
 
     pub fn discord_status_line(self: *const Model) []const u8 {
         if (!self.discord_enabled) return "";
         if (self.discord_connected) return "Connected";
+        if (self.discord_error.len > 0) return self.discord_error;
         return "Waiting for Discord…";
     }
 
@@ -1235,6 +1262,8 @@ pub const Model = struct {
         // discord rich presence (bound via getters, not the raw fields)
         "discord_connected",  "discord_retry_count",
         "discord_spawn_key",  "discord_last_payload", "discord_last_payload_buf",
+        "discord_id_buffer",  "discord_client_id_buf", "discord_error",
+        "effectiveDiscordClientId",
         // per-track elapsed plumbing (surfaced via elapsed_str/np_head)
         "track_started_at_s", "track_anchor_ms",     "track_elapsed_ms",
     };
@@ -1337,6 +1366,9 @@ pub const Msg = union(enum) {
     pick_theme: []const u8, // payload = theme id
     pick_format: []const u8, // payload = format id ("mp3" | "aac" | "opus" | "flac")
     toggle_discord,
+    discord_id_edit: canvas.TextInputEvent,
+    submit_discord_id,
+    clear_discord_id,
 
     // listener like (stage heart / mini heart / L key)
     press_like,
@@ -1607,6 +1639,11 @@ pub fn applySettingsJson(model: *Model, bytes: []const u8) void {
         }
     }
     if (s.discordEnabled) |v| model.discord_enabled = v;
+    if (s.discordClientId) |id| {
+        // Same gate as the sheet's input — a hand-edited invalid ID is
+        // dropped rather than left to fail the handshake forever.
+        if (discord_rpc.isValidClientId(id)) setStr(&model.discord_client_id_buf, &model.discord_client_id, id);
+    }
 }
 
 // Persist the current settings (async via fx.writeFile). While a write is in
@@ -1623,7 +1660,9 @@ fn saveSettings(model: *Model, fx: *Effects) void {
     // The password gets its own escape buffer: worst case every byte doubles,
     // and a truncated secret would silently fail to unlock on the next run.
     var pw_esc: [256]u8 = undefined;
-    w.print("{{\"volume\":{d:.2},\"themeOverride\":\"{s}\",\"streamFormat\":\"{s}\",\"station\":\"{s}\",\"stationName\":\"{s}\",\"stationPassword\":\"{s}\",\"discordEnabled\":{s},\"recents\":[", .{
+    // discord_client_id needs no escape pass: it only ever holds an
+    // isValidClientId-vetted string (pure ASCII digits).
+    w.print("{{\"volume\":{d:.2},\"themeOverride\":\"{s}\",\"streamFormat\":\"{s}\",\"station\":\"{s}\",\"stationName\":\"{s}\",\"stationPassword\":\"{s}\",\"discordEnabled\":{s},\"discordClientId\":\"{s}\",\"recents\":[", .{
         model.volume,
         jsonEscape(esc[0..64], model.theme_override),
         model.format_pref.id(),
@@ -1631,6 +1670,7 @@ fn saveSettings(model: *Model, fx: *Effects) void {
         jsonEscape(esc[64..128], model.station_name),
         jsonEscape(&pw_esc, model.station_pw),
         if (model.discord_enabled) "true" else "false",
+        model.discord_client_id,
     }) catch return;
     for (model.recents[0..model.recents_count], 0..) |r, i| {
         if (i > 0) w.print(",", .{}) catch return;
@@ -1720,7 +1760,7 @@ fn likeCount(v: ?i64) u32 {
 // there is nothing to show. All state transitions are driven by the spawn's
 // on_line/on_exit results (see the .discord_line/.discord_exited arms).
 fn updateDiscordPresence(model: *Model, fx: *Effects) void {
-    if (!model.discord_configured or !model.discord_enabled) return cancelDiscordPresence(model, fx);
+    if (!model.discord_configured() or !model.discord_enabled) return cancelDiscordPresence(model, fx);
     if (model.transport != .playing and model.transport != .paused) return cancelDiscordPresence(model, fx);
     // No resolved own-binary path means nothing to spawn — without this,
     // a failed executablePath at startup would put the exit handler's
@@ -1729,6 +1769,7 @@ fn updateDiscordPresence(model: *Model, fx: *Effects) void {
     var cover_url_buf: [256]u8 = undefined;
     const cover_url = if (model.cover_sid.len > 0) api.coverUrl(&cover_url_buf, model.base, model.cover_sid) catch "" else "";
     const req: discord_rpc.ActivityRequest = .{
+        .client_id = model.effectiveDiscordClientId(),
         .details = model.title,
         .state = model.artist,
         .url = model.base,
@@ -1749,6 +1790,16 @@ fn cancelDiscordPresence(model: *Model, fx: *Effects) void {
     fx.cancel(model.discord_spawn_key);
     model.discord_last_payload = "";
     model.discord_connected = false;
+}
+
+// Helper ERROR lines → the static literals discord_status_line shows. Only
+// the two actionable reasons get their own message; everything else (bad
+// payload, encode/write failures) is an internal detail the listener can't
+// act on beyond "it didn't work".
+fn mapDiscordError(reason: []const u8) []const u8 {
+    if (std.mem.eql(u8, reason, "Discord not running")) return "Discord isn't running";
+    if (std.mem.eql(u8, reason, "client id rejected")) return "Discord rejected the client ID";
+    return "Connection to Discord failed";
 }
 
 fn respawnDiscordHelper(model: *Model, fx: *Effects, signature: []const u8, req: discord_rpc.ActivityRequest) void {
@@ -2747,6 +2798,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (std.mem.eql(u8, line.line, "READY")) {
                 model.discord_connected = true;
                 model.discord_retry_count = 0;
+                model.discord_error = "";
+            } else if (std.mem.startsWith(u8, line.line, "ERROR: ")) {
+                model.discord_error = mapDiscordError(line.line["ERROR: ".len..]);
             }
         },
         .discord_exited => |exit| {
@@ -3022,6 +3076,37 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         },
         .toggle_discord => {
             model.discord_enabled = !model.discord_enabled;
+            model.discord_error = ""; // a fresh attempt starts with a clean slate
+            updateDiscordPresence(model, fx);
+            saveSettings(model, fx);
+        },
+        .discord_id_edit => |edit| {
+            model.discord_id_buffer.apply(edit);
+            model.discord_id_status = ""; // typing clears the complaint
+        },
+        .submit_discord_id => {
+            const raw = std.mem.trim(u8, model.discord_id_buffer.text(), " \t\r\n");
+            if (raw.len == 0) return;
+            if (!discord_rpc.isValidClientId(raw)) {
+                model.discord_id_status = "That doesn't look like an application ID (17-20 digits)";
+                return;
+            }
+            setStr(&model.discord_client_id_buf, &model.discord_client_id, raw);
+            model.discord_id_buffer.clear();
+            model.discord_id_status = "";
+            model.discord_error = "";
+            // Pasting an ID is an unambiguous "turn it on" — don't make the
+            // listener find the toggle as a second step.
+            model.discord_enabled = true;
+            updateDiscordPresence(model, fx);
+            saveSettings(model, fx);
+        },
+        .clear_discord_id => {
+            model.discord_client_id = "";
+            model.discord_id_status = "";
+            model.discord_error = "";
+            // Falls back to the build-time default if one exists; otherwise
+            // discord_configured() goes false and the presence cancels.
             updateDiscordPresence(model, fx);
             saveSettings(model, fx);
         },
@@ -3642,10 +3727,125 @@ test "private station: switching stations forgets the password" {
     try testing.expect(!std.mem.startsWith(u8, &m.stream_url_buf, "https://other.example/stream.mp3?"));
 }
 
+// Configure Discord the way a listener would end up configured: a stored,
+// validated client ID (the discord.zon build default is "" in this repo).
+fn testSetDiscordId(m: *Model) void {
+    setStr(&m.discord_client_id_buf, &m.discord_client_id, "123456789012345678");
+}
+
 test "discord settings round-trip through applySettingsJson" {
     var m: Model = .{};
-    applySettingsJson(&m, "{\"discordEnabled\":true}");
+    applySettingsJson(&m, "{\"discordEnabled\":true,\"discordClientId\":\"123456789012345678\"}");
     try testing.expect(m.discord_enabled);
+    try testing.expectEqualStrings("123456789012345678", m.discord_client_id);
+    try testing.expect(m.discord_configured());
+}
+
+test "an invalid discordClientId in settings.json is dropped" {
+    var m: Model = .{};
+    applySettingsJson(&m, "{\"discordClientId\":\"not-a-snowflake\"}");
+    try testing.expectEqualStrings("", m.discord_client_id);
+    try testing.expect(!m.discord_configured());
+}
+
+test "submitting a valid client ID stores it, enables the feature, and spawns" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.transport = .playing;
+    m.self_exe_path = "/usr/local/bin/subwave-desktop";
+    m.title = "Night Drive";
+    update(&m, .{ .discord_id_edit = .{ .insert_text = " 123456789012345678 " } }, &fx);
+    update(&m, .submit_discord_id, &fx);
+    try testing.expectEqualStrings("123456789012345678", m.discord_client_id);
+    try testing.expect(m.discord_enabled);
+    try testing.expectEqualStrings("", m.discord_id_text()); // field cleared for next time
+    try testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+    // The ID rides the helper's stdin payload.
+    const req = fx.pendingSpawnAt(0).?;
+    try testing.expect(std.mem.indexOf(u8, req.stdin, "\"client_id\":\"123456789012345678\"") != null);
+}
+
+test "submitting a malformed client ID complains and changes nothing" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.transport = .playing;
+    m.self_exe_path = "/usr/local/bin/subwave-desktop";
+    update(&m, .{ .discord_id_edit = .{ .insert_text = "12345" } }, &fx);
+    update(&m, .submit_discord_id, &fx);
+    try testing.expect(m.has_discord_id_status());
+    try testing.expect(!m.discord_enabled);
+    try testing.expectEqualStrings("", m.discord_client_id);
+    try testing.expectEqual(@as(usize, 0), fx.pendingSpawnCount());
+    // Typing again clears the complaint.
+    update(&m, .{ .discord_id_edit = .{ .insert_text = "6" } }, &fx);
+    try testing.expect(!m.has_discord_id_status());
+}
+
+test "changing the client ID respawns the helper under the new identity" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.transport = .playing;
+    m.self_exe_path = "/usr/local/bin/subwave-desktop";
+    testSetDiscordId(&m);
+    update(&m, .toggle_discord, &fx);
+    const first_key = m.discord_spawn_key;
+    update(&m, .{ .discord_id_edit = .{ .insert_text = "987654321098765432" } }, &fx);
+    update(&m, .submit_discord_id, &fx);
+    try testing.expect(m.discord_spawn_key != first_key);
+    const req = fx.pendingSpawnAt(0).?;
+    try testing.expect(std.mem.indexOf(u8, req.stdin, "\"client_id\":\"987654321098765432\"") != null);
+}
+
+test "clearing the client ID cancels the presence when no build default exists" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.transport = .playing;
+    m.self_exe_path = "/usr/local/bin/subwave-desktop";
+    testSetDiscordId(&m);
+    update(&m, .toggle_discord, &fx);
+    try testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+    update(&m, .clear_discord_id, &fx);
+    try testing.expect(!m.discord_configured()); // discord.zon default is "" here
+    try testing.expectEqual(@as(usize, 0), fx.pendingSpawnCount());
+}
+
+test "helper ERROR lines surface through the status line and READY clears them" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.transport = .playing;
+    m.self_exe_path = "/usr/local/bin/subwave-desktop";
+    testSetDiscordId(&m);
+    update(&m, .toggle_discord, &fx);
+    update(&m, .{ .discord_line = .{ .key = m.discord_spawn_key, .line = "ERROR: client id rejected" } }, &fx);
+    try testing.expectEqualStrings("Discord rejected the client ID", m.discord_status_line());
+    update(&m, .{ .discord_line = .{ .key = m.discord_spawn_key, .line = "ERROR: Discord not running" } }, &fx);
+    try testing.expectEqualStrings("Discord isn't running", m.discord_status_line());
+    update(&m, .{ .discord_line = .{ .key = m.discord_spawn_key, .line = "ERROR: activity write failed" } }, &fx);
+    try testing.expectEqualStrings("Connection to Discord failed", m.discord_status_line());
+    update(&m, .{ .discord_line = .{ .key = m.discord_spawn_key, .line = "READY" } }, &fx);
+    try testing.expectEqualStrings("Connected", m.discord_status_line());
+}
+
+test "saveSettings persists the client ID" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.settings_path = "/tmp/settings.json";
+    testSetDiscordId(&m);
+    saveSettings(&m, &fx);
+    const written = fx.pendingFileAt(0).?;
+    try testing.expect(std.mem.indexOf(u8, written.bytes, "\"discordClientId\":\"123456789012345678\"") != null);
 }
 
 test "enabling Discord Rich Presence while playing spawns the helper" {
@@ -3653,7 +3853,7 @@ test "enabling Discord Rich Presence while playing spawns the helper" {
     defer fx.deinit();
     fx.executor = .fake;
     var m: Model = .{};
-    m.discord_configured = true;
+    testSetDiscordId(&m);
     m.transport = .playing;
     m.self_exe_path = "/usr/local/bin/subwave-desktop";
     m.title = "Night Drive";
@@ -3671,7 +3871,7 @@ test "an unchanged now-playing poll does not respawn the helper" {
     defer fx.deinit();
     fx.executor = .fake;
     var m: Model = .{};
-    m.discord_configured = true;
+    testSetDiscordId(&m);
     m.transport = .playing;
     m.self_exe_path = "/usr/local/bin/subwave-desktop";
     m.title = "Night Drive";
@@ -3688,7 +3888,7 @@ test "a track change respawns the helper with the new payload" {
     defer fx.deinit();
     fx.executor = .fake;
     var m: Model = .{};
-    m.discord_configured = true;
+    testSetDiscordId(&m);
     m.transport = .playing;
     m.self_exe_path = "/usr/local/bin/subwave-desktop";
     m.title = "Night Drive";
@@ -3705,7 +3905,7 @@ test "track elapsed is anchored to when the track actually changed, not the raw 
     defer fx.deinit();
     fx.executor = .fake;
     var m: Model = .{};
-    m.discord_configured = true;
+    testSetDiscordId(&m);
     m.transport = .playing;
     m.self_exe_path = "/usr/local/bin/subwave-desktop";
     m.title = "Night Drive";
@@ -3734,7 +3934,7 @@ test "tuning out cancels the helper without respawning" {
     defer fx.deinit();
     fx.executor = .fake;
     var m: Model = .{};
-    m.discord_configured = true;
+    testSetDiscordId(&m);
     m.transport = .playing;
     m.self_exe_path = "/usr/local/bin/subwave-desktop";
     update(&m, .toggle_discord, &fx);
@@ -3749,7 +3949,7 @@ test "a READY line marks connected; a non-cancelled exit schedules a retry" {
     defer fx.deinit();
     fx.executor = .fake;
     var m: Model = .{};
-    m.discord_configured = true;
+    testSetDiscordId(&m);
     m.transport = .playing;
     m.self_exe_path = "/usr/local/bin/subwave-desktop";
     update(&m, .toggle_discord, &fx);
@@ -3765,7 +3965,7 @@ test "a stale exit from a superseded helper does not disturb the current one" {
     defer fx.deinit();
     fx.executor = .fake;
     var m: Model = .{};
-    m.discord_configured = true;
+    testSetDiscordId(&m);
     m.transport = .playing;
     m.self_exe_path = "/usr/local/bin/subwave-desktop";
     m.title = "Night Drive";

@@ -229,10 +229,25 @@
             <separator/>
             <text size="sm" foreground="text_muted">{discord_status_line}</text>
           </if>
+          <separator/>
+        </if>
+        <text size="sm" foreground="text_muted">CLIENT ID</text>
+        <if test="{has_own_discord_id}">
+          <row main="space_between" cross="center" gap="8">
+            <text size="sm">{discord_client_id}</text>
+            <button variant="ghost" size="sm" label="Clear client ID" on-press="clear_discord_id"/>
+          </row>
         </if>
         <else>
-          <text size="sm" foreground="text_muted" wrap="true">Discord Rich Presence — not configured for this build. Set client_id in discord.zon to enable it.</text>
+          <text size="sm" foreground="text_muted" wrap="true">Create an application at discord.com/developers, then paste its Application ID here. Presence turns on as soon as it saves.</text>
         </else>
+        <row gap="8" cross="center">
+          <input text="{discord_id_text}" placeholder="paste your Discord application ID" on-input="discord_id_edit" on-submit="submit_discord_id" label="Discord application ID" grow="1"/>
+          <button variant="ghost" size="sm" label="Save client ID" on-press="submit_discord_id"/>
+        </row>
+        <if test="{has_discord_id_status}">
+          <text size="sm" foreground="text_muted">{discord_id_status}</text>
+        </if>
       </column>
     </sheet>
   </if>

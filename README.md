@@ -68,8 +68,9 @@ repo from the main `subwave` monorepo; it tracks the same station HTTP API.
 - **Discord Rich Presence** — opt-in; shows the current track/artist (title
   clickable through to the station, cover art included) on your Discord
   profile while the SDK's `fx.spawn` drives a small self-relaunched helper
-  (`--discord-rpc-helper`) that owns the local Discord IPC socket. Requires
-  a client ID in `discord.zon` (see below) — ships disabled otherwise.
+  (`--discord-rpc-helper`) that owns the local Discord IPC socket. Configure
+  it from the Discord sheet by pasting your own application ID (see below) —
+  no rebuild needed; `discord.zon` can bake in a build-time default.
 
 ## Layout
 
@@ -130,9 +131,17 @@ native automate wait && native automate screenshot main-canvas
 
 ### Discord Rich Presence setup (optional)
 
-Discord Rich Presence needs an application client ID. Create one at
+Discord Rich Presence needs an application client ID (a public identifier,
+not a secret). Create one at
 [discord.com/developers/applications](https://discord.com/developers/applications),
-then fill it into `src/discord.zon`:
+then paste its Application ID into the app: panel → INTEGRATIONS → Discord
+Rich Presence → CLIENT ID. Saving a valid ID turns the presence on
+immediately and persists in settings.json; the status line under the toggle
+reports the outcome ("Connected", "Discord isn't running", "Discord rejected
+the client ID").
+
+A build can also bake in a default ID via `src/discord.zon` (a listener-entered
+ID always wins over it):
 
 ```zig
 .{
@@ -140,9 +149,9 @@ then fill it into `src/discord.zon`:
 }
 ```
 
-Leave it empty (the checked-in default) to ship without the feature — the
-settings sheet shows it as unconfigured rather than hiding it, and no
-Discord IPC connection is ever attempted.
+With neither a pasted ID nor a `discord.zon` one, the sheet still offers the
+CLIENT ID field but the toggle stays hidden, and no Discord IPC connection is
+ever attempted.
 
 ## Codecs & the format picker
 
