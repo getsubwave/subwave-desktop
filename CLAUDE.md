@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A native desktop player (macOS + Linux + Windows) for the SUB/WAVE internet radio station, built on the **Vercel Native SDK**: declarative `.native` markup + Zig logic, rendered by the SDK's own engine — no browser, no WebView. Requires **Zig 0.16.0** and a global `@native-sdk/cli` **0.6.0+** (`npm i -g @native-sdk/cli`).
+A native desktop player (macOS + Linux + Windows) for the SUB/WAVE internet radio station, built on the **Vercel Native SDK**: declarative `.native` markup + Zig logic, rendered by the SDK's own engine — no browser, no WebView. Requires **Zig 0.16.0** and a global `@native-sdk/cli` **0.7.1+** (`npm i -g @native-sdk/cli`).
 
 ## Commands
 
