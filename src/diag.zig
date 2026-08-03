@@ -99,7 +99,17 @@ pub fn print(comptime fmt: []const u8, args: anytype) void {
     var line_buf: [512]u8 = undefined;
     var w = std.Io.Writer.fixed(&line_buf);
     const since_ms = native_sdk.nowMs() - state.start_ms;
-    w.print("[+{d}.{d:0>3}s] ", .{ @divTrunc(since_ms, 1000), @rem(since_ms, 1000) }) catch return;
+    // Zig 0.16 zero-pads a *signed* integer by inserting an explicit '+'
+    // ahead of the digits ({d:0>3} of i64 7 renders "0+7", not "007"), which
+    // silently turned every line's millisecond field to garbage like
+    // "0+0" — exactly the field a stalled-loop diagnosis depends on reading
+    // cleanly. Cast to unsigned so the padding has no sign to insert. The
+    // cast is sound only because `since_ms` is a forward elapsed time (never
+    // negative) and `@rem` with a positive divisor preserves the dividend's
+    // sign — so a non-negative dividend can never yield a negative
+    // remainder here. Do not "simplify" this back to the signed `@rem` call.
+    const ms_remainder: u64 = @intCast(@rem(since_ms, 1000));
+    w.print("[+{d}.{d:0>3}s] ", .{ @divTrunc(since_ms, 1000), ms_remainder }) catch return;
     w.print(fmt, args) catch return;
     w.writeByte('\n') catch return;
     const line = w.buffered();
@@ -234,6 +244,39 @@ test "print is a silent no-op when never opened" {
     // No open() call. Must not crash and must not create anything.
     print("this goes nowhere", .{});
     try testing.expectEqualStrings("", dir());
+}
+
+test "the millisecond field is zero-padded digits with no sign" {
+    // Regression test for the Zig 0.16 signed-integer padding bug: `{d:0>3}`
+    // against an `i64` renders 7 as "0+7" (a literal '+' where a padding
+    // zero belongs), turning every timestamp into garbage like "[+0.0+0s]".
+    // A stalled message loop is diagnosed by the gap between the last
+    // timestamp and the crash, so a malformed millisecond field defeats the
+    // whole point of this log — this must fail if the '+' ever creeps back.
+    const d = testDir("timestamp");
+    std.Io.Dir.cwd().deleteTree(testing.io, d) catch {};
+    defer std.Io.Dir.cwd().deleteTree(testing.io, d) catch {};
+
+    open(testing.io, d);
+    defer close(testing.io);
+    // Force a small, single-digit millisecond remainder that requires
+    // zero-padding — exactly the shape (e.g. 7ms) that exposed the bug.
+    state.start_ms -= 7;
+    print("tick", .{});
+
+    var buf: [4096]u8 = undefined;
+    const text = readBack("timestamp", "subwave.log", &buf);
+
+    const dot = std.mem.indexOf(u8, text, ".") orelse return testing.expect(false) catch unreachable;
+    const suffix = std.mem.indexOf(u8, text, "s] ") orelse return testing.expect(false) catch unreachable;
+    try testing.expect(suffix > dot);
+    const ms_field = text[dot + 1 .. suffix];
+
+    // Exactly 3 digits, all numeric — a '+' anywhere in here is the bug.
+    try testing.expectEqual(@as(usize, 3), ms_field.len);
+    for (ms_field) |c| try testing.expect(c >= '0' and c <= '9');
+    const parsed_ms = std.fmt.parseInt(u32, ms_field, 10) catch unreachable;
+    try testing.expect(parsed_ms >= 7);
 }
 
 test "reclaimSdkLog deletes only an oversized file" {
