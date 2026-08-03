@@ -91,3 +91,27 @@ jobs:
         # an AV minifilter (issue #23), so every `native build` in every
         # workflow drops it, guarded by scripts/check-release-flags.sh.
         run: native build -Dcpu=baseline -Dtrace=off
+
+      - name: Smoke-test the player phase
+        # Windows only: this is where issue #23 lives, and the release
+        # workflow's copy of this step only runs at release time. Catching it
+        # here blocks a merge instead of surfacing mid-release, which is the
+        # same miss that shipped the MP3-only Windows build.
+        if: runner.os == 'Windows'
+        timeout-minutes: 6
+        env:
+          SUBWAVE_STATION_URL: http://127.0.0.1:9
+        run: |
+          native build -Dautomation=true -Dcpu=baseline -Dtrace=off
+          "./zig-out/bin/subwave-desktop.exe" &
+          app_pid=$!
+          fail=0
+          native automate wait || fail=1
+          if [ "$fail" -eq 0 ]; then
+            native automate assert --timeout-ms 30000 'gpu_nonblank=true' || fail=1
+          fi
+          if [ "$fail" -eq 0 ]; then
+            native automate assert --timeout-ms 30000 'gpu_frame=[1-9]' || fail=1
+          fi
+          kill "$app_pid" 2>/dev/null || true
+          exit "$fail"
