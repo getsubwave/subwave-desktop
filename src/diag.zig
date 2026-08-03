@@ -55,6 +55,11 @@ pub fn dir() []const u8 {
 /// Silent no-op if anything fails.
 pub fn open(io: std.Io, log_dir: []const u8) void {
     if (log_dir.len == 0 or log_dir.len > state.dir_buf.len) return;
+    // Close any handle already held before anything below can fail and
+    // return early — otherwise a second open() without an intervening
+    // close() overwrites state.file and leaks the old fd (issue #23 review).
+    if (state.file) |f| f.close(io);
+    state.file = null;
     const platform = native_sdk.app_dirs.currentPlatform();
     var cur_buf: [1200]u8 = undefined;
     var prev_buf: [1200]u8 = undefined;
@@ -102,7 +107,7 @@ pub fn print(comptime fmt: []const u8, args: anytype) void {
     if (state.offset + line.len > cap_bytes) {
         state.capped = true;
         const notice = "[+0.000s] log capped\n";
-        file.writePositionalAll(state.io, notice, state.offset) catch {};
+        file.writePositionalAll(state.io, notice, state.offset) catch return;
         state.offset += notice.len;
         return;
     }
@@ -179,6 +184,28 @@ test "a second open rolls the previous run aside" {
     try testing.expect(std.mem.indexOf(u8, cur, "second run") != null);
     // The fresh run must not inherit the old run's lines.
     try testing.expect(std.mem.indexOf(u8, cur, "first run") == null);
+}
+
+test "a second open without close does not leak the first handle" {
+    const d = testDir("reopen");
+    std.Io.Dir.cwd().deleteTree(testing.io, d) catch {};
+    defer std.Io.Dir.cwd().deleteTree(testing.io, d) catch {};
+
+    open(testing.io, d);
+    print("first line", .{});
+    // No close() here — open() itself must close the still-live handle
+    // rather than overwriting state.file and leaking the fd.
+    open(testing.io, d);
+    print("second line", .{});
+
+    var buf: [4096]u8 = undefined;
+    const text = readBack("reopen", "subwave.log", &buf);
+    // The second open() truncates, so only the second line survives.
+    try testing.expect(std.mem.indexOf(u8, text, "second line") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "first line") == null);
+
+    // The handle from the second open() is still good.
+    close(testing.io);
 }
 
 test "the byte cap stops writing and says so exactly once" {
