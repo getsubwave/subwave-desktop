@@ -75,11 +75,10 @@ jobs:
         run: native test
 
       - name: Build and package
-        # -Dcpu=baseline (and -Dtrace=off, below) is load bearing: a plain
-        # `native-build` invocation bakes the CI runner's CPU features (Ice
-        # Lake AVX-512) into the exe, which then dies on an illegal
-        # instruction at startup on most listeners' machines. That is exactly
-        # how the v0.2.1 Windows zip shipped broken.
+        # -Dcpu=baseline is load bearing: a plain `native build` bakes the CI
+        # runner's CPU features (Ice Lake AVX-512) into the exe, which then
+        # dies on an illegal instruction at startup on most listeners'
+        # machines. That is exactly how the v0.2.1 Windows zip shipped broken.
         # -Dtrace=off is equally load bearing. The SDK's default trace mode
         # writes a record per rendered frame and per audio callback, and each
         # record is a full open/stat/write/close on an unbounded log file —

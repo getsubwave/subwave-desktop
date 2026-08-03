@@ -88,6 +88,6 @@ jobs:
         # release one. -Dcpu=baseline matches the release workflows, so CI
         # builds the same configuration that ships. -Dtrace=off matches too:
         # the SDK's default trace mode stalls the Windows message loop behind
-        # an AV minifilter (issue #23), so every `native-build` invocation in
-        # every workflow drops it, guarded by scripts/check-release-flags.sh.
+        # an AV minifilter (issue #23), so every `native build` in every
+        # workflow drops it, guarded by scripts/check-release-flags.sh.
         run: native build -Dcpu=baseline -Dtrace=off

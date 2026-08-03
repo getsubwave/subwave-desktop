@@ -17,12 +17,21 @@ set -euo pipefail
 fail=0
 for wf in release-windows release-macos release-linux ci; do
   file=".github/workflows/${wf}.yml"
+  n=0
   while IFS= read -r line; do
-    case "$line" in
-      *"-Dtrace=off"*) ;;
-      *) echo "error: ${file}: 'native build' without -Dtrace=off:${line}" >&2; fail=1 ;;
+    n=$((n + 1))
+    # Strip from the first '#' on, so prose that names the command cannot
+    # trip the guard — only what the shell would actually run is inspected.
+    code="${line%%#*}"
+    case "$code" in
+      *"native build"*) ;;
+      *) continue ;;
     esac
-  done < <(grep -n 'native build' "$file")
+    case "$code" in
+      *"-Dtrace=off"*) ;;
+      *) echo "error: ${file}:${n}: 'native build' without -Dtrace=off:${code}" >&2; fail=1 ;;
+    esac
+  done < "$file"
 done
 
 if [ "$fail" -ne 0 ]; then
