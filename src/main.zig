@@ -481,6 +481,7 @@ pub fn main(init: std.process.Init) !void {
     // resolves the same directory for last-panic.txt, so everything a user
     // needs to attach to a bug report lands in one folder.
     var log_buffers: native_sdk.debug.LogPathBuffers = .{};
+    var sdk_log_reclaim: diag.ReclaimResult = .absent;
     if (native_sdk.debug.resolveLogPaths(
         &log_buffers,
         bundle_id,
@@ -491,7 +492,7 @@ pub fn main(init: std.process.Init) !void {
         // megabytes by the SDK's per-frame trace sink — the issue #23 stall.
         // Shipping builds now pass -Dtrace=off, but the old file is still on
         // disk and still gets scanned by AV on every access.
-        diag.reclaimSdkLog(init.io, paths.log_file, diag.sdk_reclaim_bytes);
+        sdk_log_reclaim = diag.reclaimSdkLog(init.io, paths.log_file, diag.sdk_reclaim_bytes);
         diag.open(init.io, paths.log_dir);
     } else |_| {}
     defer diag.close(init.io);
@@ -514,6 +515,14 @@ pub fn main(init: std.process.Init) !void {
     });
     diag.print("log dir {s}", .{diag.dir()});
     diag.print("settings {s}", .{app_state.model.settings_path});
+    // Confirms the -Dtrace=off fix is actually present in whatever binary
+    // produced this log: a user attaching subwave.log to an issue tells us
+    // immediately whether their build is still growing the old SDK log.
+    switch (sdk_log_reclaim) {
+        .absent => diag.print("sdk trace log: none found", .{}),
+        .kept => |size| diag.print("sdk trace log: {d} bytes, left in place (at or under the {d}-byte reclaim threshold)", .{ size, diag.sdk_reclaim_bytes }),
+        .reclaimed => |size| diag.print("sdk trace log: {d} bytes, reclaimed", .{size}),
+    }
     diag.print("phase {s} station {s}", .{
         @tagName(app_state.model.phase),
         if (app_state.model.base.len > 0) app_state.model.base else "(none)",

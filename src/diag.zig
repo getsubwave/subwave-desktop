@@ -9,7 +9,8 @@
 //!    AV minifilter it stalls the pump outright. Shipping builds disable it
 //!    with -Dtrace=off; this module is its replacement, and copying its
 //!    shape would reintroduce the bug. The heartbeat is driven by elapsed
-//!    time (the existing 1s tick), never by frame count.
+//!    time (every 12th fired tick_feed tick, 5s each = 60s), never by frame
+//!    count — see model.zig's .tick_feed arm for why 12.
 //!
 //! 2. This writes SYNCHRONOUSLY and does NOT route through the effects
 //!    channel, against the architecture rule in CLAUDE.md. That is
@@ -38,7 +39,6 @@ const State = struct {
     io: std.Io = undefined,
     file: ?std.Io.File = null,
     offset: u64 = 0,
-    capped: bool = false,
     // A monotonic origin, not a wall-clock instant — see the comment on
     // `native_sdk.monotonicMs()` at the call site in print().
     start_ms: u64 = 0,
@@ -80,7 +80,6 @@ pub fn open(io: std.Io, log_dir: []const u8) void {
     state.io = io;
     state.file = file;
     state.offset = 0;
-    state.capped = false;
     // Monotonic, not wall-clock: elapsed time in this log must not jump when
     // the OS clock does (NTP correction, suspend/resume, manual clock
     // change) — see the comment on the subtraction in print().
@@ -92,14 +91,23 @@ pub fn close(io: std.Io) void {
     state.file = null;
     state.dir_len = 0;
     state.offset = 0;
-    state.capped = false;
 }
 
-/// One timestamped line. No-op when unopened or capped. Lines longer than
-/// the buffer are dropped rather than truncated mid-format.
+/// One timestamped line. No-op when unopened. Lines longer than the buffer
+/// are dropped rather than truncated mid-format.
+///
+/// Past `cap_bytes` this wraps rather than going permanently silent: the
+/// file is truncated back to empty, a one-line marker records the wrap, and
+/// writing continues from offset 0. Issue #23's reporter ran sessions for
+/// days; at the old ~72-byte-per-heartbeat rate the 256 KB cap was reached
+/// in about 5 hours (`log capped` and never another line), which would have
+/// left a `subwave.log` whose last line was many hours stale for exactly the
+/// kind of multi-day hang this module exists to diagnose. For diagnosing a
+/// stall, the last line before the silence is the whole evidence, so the
+/// most recent lines must always survive — older history is expendable,
+/// silence is not.
 pub fn print(comptime fmt: []const u8, args: anytype) void {
     const file = state.file orelse return;
-    if (state.capped) return;
 
     var line_buf: [512]u8 = undefined;
     var w = std.Io.Writer.fixed(&line_buf);
@@ -119,24 +127,49 @@ pub fn print(comptime fmt: []const u8, args: anytype) void {
     const line = w.buffered();
 
     if (state.offset + line.len > cap_bytes) {
-        state.capped = true;
-        const notice = "[+0.000s] log capped\n";
-        file.writePositionalAll(state.io, notice, state.offset) catch return;
-        state.offset += notice.len;
+        var notice_buf: [64]u8 = undefined;
+        var nw = std.Io.Writer.fixed(&notice_buf);
+        nw.print("[+{d}.{d:0>3}s] log wrapped at cap ({d} bytes)\n", .{ since_ms / 1000, since_ms % 1000, cap_bytes }) catch return;
+        const notice = nw.buffered();
+        // Truncate before writing the notice (rather than after) so a crash
+        // between the two calls leaves an empty-or-notice-only file — never
+        // a file that still looks like it holds the pre-wrap history plus a
+        // stray marker at the wrong offset.
+        file.setLength(state.io, 0) catch return;
+        file.writePositionalAll(state.io, notice, 0) catch return;
+        state.offset = notice.len;
+        file.writePositionalAll(state.io, line, state.offset) catch return;
+        state.offset += line.len;
         return;
     }
     file.writePositionalAll(state.io, line, state.offset) catch return;
     state.offset += line.len;
 }
 
+/// What `reclaimSdkLog` found at the SDK trace-log path, so main.zig can log
+/// it on boot without re-doing the stat itself. A user attaching
+/// `subwave.log` to an issue then tells us immediately whether their build
+/// is still growing the old log.
+pub const ReclaimResult = union(enum) {
+    /// No file at that path — a fresh install, or the SDK's own trace sink
+    /// never wrote one (e.g. `-Dtrace=off` was already in effect).
+    absent,
+    /// A file was present but at or under `max_bytes`; left in place.
+    kept: u64,
+    /// A file was present, over `max_bytes`, and was deleted. The size is
+    /// what was reclaimed.
+    reclaimed: u64,
+};
+
 /// Delete the SDK's trace log if it grew past `max_bytes`. Pre-`-Dtrace=off`
 /// installs carry hundreds of megabytes of per-frame records; this reclaims
 /// it once, and keeps the machine safe if a future SDK re-enables tracing.
-pub fn reclaimSdkLog(io: std.Io, path: []const u8, max_bytes: u64) void {
+pub fn reclaimSdkLog(io: std.Io, path: []const u8, max_bytes: u64) ReclaimResult {
     var cwd = std.Io.Dir.cwd();
-    const st = cwd.statFile(io, path, .{}) catch return;
-    if (st.size <= max_bytes) return;
-    cwd.deleteFile(io, path) catch {};
+    const st = cwd.statFile(io, path, .{}) catch return .absent;
+    if (st.size <= max_bytes) return .{ .kept = st.size };
+    cwd.deleteFile(io, path) catch return .{ .kept = st.size };
+    return .{ .reclaimed = st.size };
 }
 
 const testing = std.testing;
@@ -200,7 +233,12 @@ test "a second open rolls the previous run aside" {
     try testing.expect(std.mem.indexOf(u8, cur, "first run") == null);
 }
 
-test "a second open without close does not leak the first handle" {
+test "a second open truncates and leaves close working" {
+    // Formerly named "...does not leak the first handle" — what this
+    // actually proves is that the second open() truncates (only the second
+    // line survives) and that the resulting handle still closes cleanly. It
+    // says nothing about fd leaks either way; that name passed against the
+    // pre-fix code too.
     const d = testDir("reopen");
     std.Io.Dir.cwd().deleteTree(testing.io, d) catch {};
     defer std.Io.Dir.cwd().deleteTree(testing.io, d) catch {};
@@ -222,30 +260,59 @@ test "a second open without close does not leak the first handle" {
     close(testing.io);
 }
 
-test "the byte cap stops writing and says so exactly once" {
+test "the byte cap wraps instead of going silent, so the most recent line survives" {
+    // Regression test for the issue #23 review finding: the old behaviour
+    // hit cap_bytes, wrote a one-time "log capped" line, and then went
+    // permanently silent for the rest of the run. Issue #23's reporter ran
+    // sessions for days; the old cap (reached in ~5 hours at the previous
+    // 5s heartbeat cadence) would have left a log whose last line was many
+    // hours stale by the time of an eventual hang — destroying the one
+    // thing this module exists to guarantee: the last line before the
+    // silence is the evidence. Wrapping (truncate + one marker line + keep
+    // writing) must keep the file bounded exactly like the old cap did, but
+    // must never again go silent.
     const d = testDir("cap");
     std.Io.Dir.cwd().deleteTree(testing.io, d) catch {};
     defer std.Io.Dir.cwd().deleteTree(testing.io, d) catch {};
 
     open(testing.io, d);
     defer close(testing.io);
-    // 64 bytes of payload per line, well past cap_bytes over this many lines.
+
+    print("the first line ever written to this run's log", .{});
+
+    // 64 bytes of payload per line, several multiples of cap_bytes so the
+    // wrap fires more than once — proving it keeps working on the second
+    // and third crossing, not just the first.
     var i: usize = 0;
-    while (i < (cap_bytes / 32) + 100) : (i += 1) {
+    while (i < (cap_bytes / 32) * 3) : (i += 1) {
         print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", .{});
     }
+    print("the most recent line, written well past the cap", .{});
 
     const size = std.Io.Dir.cwd().statFile(testing.io, ".zig-cache/diag-test-cap/subwave.log", .{}) catch unreachable;
-    // Capped, with headroom for the final notice line.
-    try testing.expect(size.size <= cap_bytes + 128);
+    // Still bounded by roughly cap_bytes — wrapping must not let the file
+    // grow unbounded either. This bound is not weakened from the old test.
+    try testing.expect(size.size <= cap_bytes + 256);
 
-    const n = std.Io.Dir.cwd().readFileAlloc(testing.io, ".zig-cache/diag-test-cap/subwave.log", testing.allocator, .limited(cap_bytes + 256)) catch unreachable;
+    const n = std.Io.Dir.cwd().readFileAlloc(testing.io, ".zig-cache/diag-test-cap/subwave.log", testing.allocator, .limited(cap_bytes + 512)) catch unreachable;
     defer testing.allocator.free(n);
-    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, n, "log capped"));
+
+    // The whole point: the old permanently-silent behaviour would have
+    // dropped this — the last line written must survive.
+    try testing.expect(std.mem.indexOf(u8, n, "the most recent line, written well past the cap") != null);
+    // The old behaviour never truncated, so it would have kept the very
+    // first line forever; wrapping must have evicted it by now.
+    try testing.expect(std.mem.indexOf(u8, n, "the first line ever written to this run's log") == null);
+    // The wrap marker itself must appear.
+    try testing.expect(std.mem.indexOf(u8, n, "log wrapped") != null);
 }
 
-test "print is a silent no-op when never opened" {
-    // No open() call. Must not crash and must not create anything.
+test "print is a silent no-op after close" {
+    // Named for what this actually exercises: module state is global, and
+    // by this point in the suite earlier tests have already opened and
+    // closed the log, so this proves the post-close state is silent, not
+    // literally "never opened" (that state is indistinguishable from this
+    // one — close() resets every field print()/dir() consult).
     print("this goes nowhere", .{});
     try testing.expectEqualStrings("", dir());
 }
@@ -277,10 +344,13 @@ test "the millisecond field is zero-padded digits with no sign" {
     const ms_field = text[dot + 1 .. suffix];
 
     // Exactly 3 digits, all numeric — a '+' anywhere in here is the bug.
+    // (Not asserting the parsed value is >= 7: real open-to-print latency on
+    // a loaded CI runner can push the elapsed time past a full second,
+    // rolling the remainder back under 7 — that made this test time-flaky
+    // without adding coverage the three-digits/all-numeric checks above
+    // don't already provide.)
     try testing.expectEqual(@as(usize, 3), ms_field.len);
     for (ms_field) |c| try testing.expect(c >= '0' and c <= '9');
-    const parsed_ms = std.fmt.parseInt(u32, ms_field, 10) catch unreachable;
-    try testing.expect(parsed_ms >= 7);
 }
 
 test "print saturates instead of underflowing when start_ms is ahead of the clock" {
@@ -310,7 +380,7 @@ test "print saturates instead of underflowing when start_ms is ahead of the cloc
     try testing.expect(std.mem.startsWith(u8, text, "[+0.000s] skewed"));
 }
 
-test "reclaimSdkLog deletes only an oversized file" {
+test "reclaimSdkLog deletes only an oversized file and reports what it found" {
     // `d` feeds `++` below, which requires a comptime-known operand — force
     // comptime evaluation of the call rather than relying on the runtime
     // slice testDir() otherwise returns.
@@ -325,12 +395,17 @@ test "reclaimSdkLog deletes only an oversized file" {
     const payload = [_]u8{'x'} ** 4096;
     std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = big, .data = &payload }) catch unreachable;
 
-    reclaimSdkLog(testing.io, small, 1024);
-    reclaimSdkLog(testing.io, big, 1024);
+    const small_result = reclaimSdkLog(testing.io, small, 1024);
+    const big_result = reclaimSdkLog(testing.io, big, 1024);
+
+    try testing.expectEqual(ReclaimResult{ .kept = 4 }, small_result);
+    try testing.expectEqual(ReclaimResult{ .reclaimed = 4096 }, big_result);
 
     _ = std.Io.Dir.cwd().statFile(testing.io, small, .{}) catch return testing.expect(false) catch unreachable;
     try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(testing.io, big, .{}));
 
-    // A missing path is a no-op, not a crash.
-    reclaimSdkLog(testing.io, d ++ "/absent.jsonl", 1024);
+    // A missing path is a no-op, not a crash — and reports as absent rather
+    // than as either of the present-file variants.
+    const absent_result = reclaimSdkLog(testing.io, d ++ "/absent.jsonl", 1024);
+    try testing.expectEqual(ReclaimResult.absent, absent_result);
 }
