@@ -261,6 +261,13 @@ pub const Model = struct {
     // NEVER log per event — count here, emit on the tick. See src/diag.zig's
     // header and issue #23.
     hb_audio_events: u32 = 0,
+    // Counts fired tick_feed ticks between heartbeat emissions. At 5s/tick, a
+    // ~72-byte heartbeat line every tick fills diag's 256 KB cap in about
+    // 3640 beats — just over 5 hours — silencing the log long before issue
+    // #23's multi-day sessions hang. Emitting only every 12th fired tick
+    // slows the heartbeat to 60s, buying roughly 12x the runtime before the
+    // cap (now wrapping, not going silent — see diag.zig) is next hit.
+    hb_tick_count: u8 = 0,
 
     // transport / audio
     transport: Transport = .playing,
@@ -1256,6 +1263,9 @@ pub const Model = struct {
         "meta_line",          "has_meta",            "mood_line",           "has_mood",
         "state_line",         "has_state",           "has_booth",           "panel_open",
         "ob_steps",           "ob_done",             "chrome_top",
+        // heartbeat bookkeeping consumed only by the .tick_feed arm, never
+        // by markup (see src/diag.zig and issue #23)
+        "hb_tick_count",
         // stream-format state (bound via format_rows/format_value)
         "format_pref",        "stream_flags_known",  "stream_opus",
         "stream_flac",        "stream_aac",          "stationEnables",      "effectiveFormat",
@@ -1663,9 +1673,12 @@ pub fn applySettingsJson(model: *Model, bytes: []const u8) void {
         if (st.len > 0) {
             if (api.normalizeBase(&model.base_buf, st)) |b| {
                 model.base = b;
-                // A saved station means onboarding already happened.
+                // A saved station means onboarding already happened. Not
+                // logged here: this runs via settings.loadFromDisk, which
+                // main.zig calls before diag.open(), so a diag.print call at
+                // this call site can never actually appear in the log.
+                // main.zig logs the same fact once the station is resolved.
                 model.phase = .player;
-                diag.print("phase player (saved station)", .{});
             } else |_| {}
         }
     }
@@ -2177,17 +2190,33 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
     switch (msg) {
         .tick_feed => |t| {
             if (t.outcome != .fired) return;
-            // The 5s feed poll doubles as the diagnostic heartbeat: a gap in
-            // these lines is how a stalled message loop shows up in the log,
-            // and audio_events reading zero while they continue separates a
-            // dead feed from a dead loop. See src/diag.zig and issue #23.
-            diag.print("hb phase={s} transport={s} audio_events={d} retry={d}", .{
-                @tagName(model.phase),
-                @tagName(model.transport),
-                model.hb_audio_events,
-                model.retry,
-            });
-            model.hb_audio_events = 0;
+            // fetchFeed runs on EVERY fired tick regardless of the heartbeat
+            // cadence below — the poll must not be coupled to diagnostics.
+            //
+            // The heartbeat itself only emits every 12th fired tick (feed_timer
+            // is 5000ms, so 12 ticks = 60s). At the 5s cadence this used to run
+            // at, a ~72-byte line every tick fills diag's 256 KB cap in about
+            // 3640 beats — just over 5 hours — which would silence the log
+            // long before issue #23's multi-day sessions ever hang. Slowing to
+            // 60s buys roughly 12x the headroom. audio_events keeps
+            // accumulating across the whole 60s window and only resets when
+            // the heartbeat actually fires, so no audio_event Msg is ever
+            // dropped from the count between emissions.
+            model.hb_tick_count +|= 1;
+            if (model.hb_tick_count >= 12) {
+                model.hb_tick_count = 0;
+                // A gap in these lines is how a stalled message loop shows up
+                // in the log, and audio_events reading zero while they
+                // continue separates a dead feed from a dead loop. See
+                // src/diag.zig and issue #23.
+                diag.print("hb phase={s} transport={s} audio_events={d} retry={d}", .{
+                    @tagName(model.phase),
+                    @tagName(model.transport),
+                    model.hb_audio_events,
+                    model.retry,
+                });
+                model.hb_audio_events = 0;
+            }
             fetchFeed(model, fx);
         },
         .tick_reconnect => |t| {
@@ -4255,7 +4284,7 @@ test "open_support opens ko-fi behind the same one-opener guard" {
     try testing.expect(!m.opener_inflight);
 }
 
-test "the feed-poll heartbeat resets the audio-event count on a fired tick, not a rejected one" {
+test "the feed-poll heartbeat resets the audio-event count only every 12th fired tick" {
     var fx = Effects.init(testing.allocator);
     defer fx.deinit();
     fx.executor = .fake;
@@ -4268,11 +4297,42 @@ test "the feed-poll heartbeat resets the audio-event count on a fired tick, not 
     }
     try testing.expectEqual(@as(u32, 40), m.hb_audio_events);
 
-    // A tick that did not fire must not touch the count.
+    // A tick that did not fire must not touch the count, or the tick counter.
     update(&m, .{ .tick_feed = .{ .key = keys.feed_timer, .outcome = .rejected, .timestamp_ns = 0 } }, &fx);
     try testing.expectEqual(@as(u32, 40), m.hb_audio_events);
+    try testing.expectEqual(@as(u8, 0), m.hb_tick_count);
 
-    // A fired tick is the heartbeat: the count resets.
+    // Fired ticks 1 through 11 (5s each = 55s) must fetch the feed every
+    // time but must NOT reset the audio-event count — only the 12th (60s)
+    // fired tick is the heartbeat.
+    var t: usize = 0;
+    while (t < 11) : (t += 1) {
+        update(&m, .{ .tick_feed = .{ .key = keys.feed_timer, .outcome = .fired, .timestamp_ns = 0 } }, &fx);
+        try testing.expectEqual(@as(u32, 40), m.hb_audio_events);
+    }
+    try testing.expectEqual(@as(u8, 11), m.hb_tick_count);
+
+    // The 12th fired tick is the heartbeat: the count and the tick counter
+    // both reset.
     update(&m, .{ .tick_feed = .{ .key = keys.feed_timer, .outcome = .fired, .timestamp_ns = 0 } }, &fx);
     try testing.expectEqual(@as(u32, 0), m.hb_audio_events);
+    try testing.expectEqual(@as(u8, 0), m.hb_tick_count);
+}
+
+test "fetchFeed's fetch keys occupy their slots on the very first fired tick_feed tick" {
+    // The feed poll must never be coupled to the heartbeat's 12-tick divisor
+    // — issue #23 review flagged this as the one thing that must not
+    // regress when the heartbeat cadence changed. fetchFeed sits outside the
+    // 12-tick gate in the .tick_feed arm, so even the first fired tick (long
+    // before any heartbeat would fire) must schedule the np/state/session
+    // fetches.
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.base = "http://example.test";
+
+    try testing.expectEqual(@as(usize, 0), fx.pendingFetchCount());
+    update(&m, .{ .tick_feed = .{ .key = keys.feed_timer, .outcome = .fired, .timestamp_ns = 0 } }, &fx);
+    try testing.expectEqual(@as(usize, 3), fx.pendingFetchCount());
 }
