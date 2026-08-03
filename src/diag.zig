@@ -39,7 +39,9 @@ const State = struct {
     file: ?std.Io.File = null,
     offset: u64 = 0,
     capped: bool = false,
-    start_ms: i64 = 0,
+    // A monotonic origin, not a wall-clock instant — see the comment on
+    // `native_sdk.monotonicMs()` at the call site in print().
+    start_ms: u64 = 0,
     dir_buf: [1024]u8 = undefined,
     dir_len: usize = 0,
 };
@@ -79,7 +81,10 @@ pub fn open(io: std.Io, log_dir: []const u8) void {
     state.file = file;
     state.offset = 0;
     state.capped = false;
-    state.start_ms = native_sdk.nowMs();
+    // Monotonic, not wall-clock: elapsed time in this log must not jump when
+    // the OS clock does (NTP correction, suspend/resume, manual clock
+    // change) — see the comment on the subtraction in print().
+    state.start_ms = native_sdk.monotonicMs();
 }
 
 pub fn close(io: std.Io) void {
@@ -98,18 +103,17 @@ pub fn print(comptime fmt: []const u8, args: anytype) void {
 
     var line_buf: [512]u8 = undefined;
     var w = std.Io.Writer.fixed(&line_buf);
-    const since_ms = native_sdk.nowMs() - state.start_ms;
-    // Zig 0.16 zero-pads a *signed* integer by inserting an explicit '+'
-    // ahead of the digits ({d:0>3} of i64 7 renders "0+7", not "007"), which
-    // silently turned every line's millisecond field to garbage like
-    // "0+0" — exactly the field a stalled-loop diagnosis depends on reading
-    // cleanly. Cast to unsigned so the padding has no sign to insert. The
-    // cast is sound only because `since_ms` is a forward elapsed time (never
-    // negative) and `@rem` with a positive divisor preserves the dividend's
-    // sign — so a non-negative dividend can never yield a negative
-    // remainder here. Do not "simplify" this back to the signed `@rem` call.
-    const ms_remainder: u64 = @intCast(@rem(since_ms, 1000));
-    w.print("[+{d}.{d:0>3}s] ", .{ @divTrunc(since_ms, 1000), ms_remainder }) catch return;
+    // native_sdk.monotonicMs(), not nowMs(): elapsed time here must not move
+    // when the OS wall clock does (NTP correction, suspend/resume, a manual
+    // clock change), only nowMs() is subject to that — see the SDK's own
+    // wall-vs-monotonic split in runtime/clock.zig. Both operands are `u64`,
+    // so there is no sign for Zig 0.16's `{d:0>3}` padding to insert (that
+    // quirk turned every line's millisecond field into garbage like "0+0"
+    // when this used to be `i64` nowMs() math). `-|` saturates instead of
+    // wrapping for the documented `monotonicMs() == 0` fallback on targets
+    // with no readable clock.
+    const since_ms = native_sdk.monotonicMs() -| state.start_ms;
+    w.print("[+{d}.{d:0>3}s] ", .{ since_ms / 1000, since_ms % 1000 }) catch return;
     w.print(fmt, args) catch return;
     w.writeByte('\n') catch return;
     const line = w.buffered();
@@ -277,6 +281,33 @@ test "the millisecond field is zero-padded digits with no sign" {
     for (ms_field) |c| try testing.expect(c >= '0' and c <= '9');
     const parsed_ms = std.fmt.parseInt(u32, ms_field, 10) catch unreachable;
     try testing.expect(parsed_ms >= 7);
+}
+
+test "print saturates instead of underflowing when start_ms is ahead of the clock" {
+    // Regression test for the finding that replaced nowMs() with
+    // monotonicMs(): the original fix cast a signed remainder to u64 and
+    // reasoned "since_ms can never be negative" — false, because nowMs() is
+    // wall-clock REALTIME and jumps on an NTP correction or suspend/resume,
+    // which can make since_ms negative and the @intCast an out-of-range
+    // panic (Debug/ReleaseSafe) or UB (ReleaseFast). This simulates the
+    // analogous skew directly against the current implementation: start_ms
+    // recorded ahead of the monotonic reading print() sees. The `-|`
+    // saturating subtraction must clamp to 0, never panic or wrap around to
+    // a huge value.
+    const d = testDir("skew");
+    std.Io.Dir.cwd().deleteTree(testing.io, d) catch {};
+    defer std.Io.Dir.cwd().deleteTree(testing.io, d) catch {};
+
+    open(testing.io, d);
+    defer close(testing.io);
+    state.start_ms = native_sdk.monotonicMs() + 1_000_000;
+    print("skewed", .{});
+
+    var buf: [4096]u8 = undefined;
+    const text = readBack("skew", "subwave.log", &buf);
+    // No panic reaching here is itself most of the assertion; also check the
+    // line is well-formed rather than a huge wrapped number.
+    try testing.expect(std.mem.startsWith(u8, text, "[+0.000s] skewed"));
 }
 
 test "reclaimSdkLog deletes only an oversized file" {
