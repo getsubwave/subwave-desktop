@@ -52,6 +52,14 @@ jobs:
 
       - uses: ./.github/actions/setup-native
 
+      - name: Check release build flags
+        # ci.yml runs this too, but only on pushes/PRs. A tag pushed straight
+        # to a release without CI having run on it (or a hotfix branch that
+        # skipped CI) would otherwise reach this workflow with nothing
+        # guarding -Dtrace=off. See scripts/check-release-flags.sh and issue
+        # #23.
+        run: ./scripts/check-release-flags.sh
+
       - name: Verify tag matches app.zon version
         env:
           TAG: ${{ steps.tag.outputs.tag }}
@@ -122,11 +130,20 @@ jobs:
         #
         # This USED to launch with no station configured, so the app parked on
         # onboarding, reported ready, and exited — it never entered the player
-        # and could not have caught issue #23. SUBWAVE_STATION_URL points it
-        # at the discard port: main() takes the override, phase becomes
-        # .player with no network needed, every fetch fails fast, and the
-        # frame loop and audio start path both run. That is the exact
-        # transition where #23 goes blank.
+        # and could not have caught issue #23's class of bug at all.
+        # SUBWAVE_STATION_URL points it at the discard port: main() takes the
+        # override, phase becomes .player with no network needed, every fetch
+        # fails fast, and the frame loop and audio start path both run.
+        #
+        # This is NOT a reproduction of issue #23. Reproducing #23 needs a
+        # real AV minifilter, a native-sdk.jsonl grown to hundreds of
+        # megabytes, and tracing enabled; this step builds with -Dtrace=off on
+        # a clean runner with no log at all — the exact configuration that
+        # fixes the bug. What this guards is the class of failure #23
+        # belonged to: the player phase reaching the glass and continuing to
+        # service its loop. Losing that distinction is the danger — if this
+        # step is ever read as "CI covers #23", someone will feel safe
+        # dropping -Dtrace=off, and the bug ships again.
         #
         # NOTE: the override persists into settings.json on the machine that
         # runs it. Fine on a throwaway runner, destructive on a dev box.
@@ -156,9 +173,22 @@ jobs:
           fi
           # Every assert below requires the app to service its automation
           # channel, so a stalled message loop fails on timeout instead of
-          # passing. gpu_nonblank is the host's own frame sampling — a solid
-          # white client area reads false. gpu_frame advancing past zero
-          # catches a surface that presented once and froze.
+          # passing. Together these two prove: the app reached the player
+          # phase, its message loop kept servicing automation requests (not
+          # stalled the way #23's was), and it presented at least one
+          # non-black frame with the frame counter advancing (not stuck after
+          # a single presented frame).
+          #
+          # gpu_nonblank is the host's own frame sampling of the surface's
+          # centre pixel: true means that pixel is not pure black, and it
+          # latches — once set it never clears (gtk_host.c: `if (sr || sg ||
+          # sb) view->gpu_nonblank = 1;`; the AppKit host's
+          # verifiedNonblankFrame is likewise set-once). A solid white client
+          # area — issue #23's actual symptom — reads gpu_nonblank=true, same
+          # as a correctly rendered frame. This assertion does NOT distinguish
+          # a white surface from a correct one; do not read it as a
+          # pixel-correctness check. gpu_frame advancing past zero is what
+          # catches a surface that presented once and then froze.
           # No `|` alternation: native automate assert does not support it.
           if [ "$fail" -eq 0 ]; then
             native automate assert --timeout-ms 30000 'gpu_nonblank=true' || fail=1

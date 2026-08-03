@@ -68,6 +68,14 @@ jobs:
       # fractional-scale desktop, so that step is not optional here.
       - uses: ./.github/actions/setup-native
 
+      - name: Check release build flags
+        # ci.yml runs this too, but only on pushes/PRs. A tag pushed straight
+        # to a release without CI having run on it (or a hotfix branch that
+        # skipped CI) would otherwise reach this workflow with nothing
+        # guarding -Dtrace=off. See scripts/check-release-flags.sh and issue
+        # #23.
+        run: ./scripts/check-release-flags.sh
+
       - name: Verify tag matches app.zon version
         env:
           TAG: ${{ steps.tag.outputs.tag }}

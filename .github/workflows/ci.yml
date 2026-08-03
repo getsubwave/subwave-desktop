@@ -93,10 +93,18 @@ jobs:
         run: native build -Dcpu=baseline -Dtrace=off
 
       - name: Smoke-test the player phase
-        # Windows only: this is where issue #23 lives, and the release
-        # workflow's copy of this step only runs at release time. Catching it
-        # here blocks a merge instead of surfacing mid-release, which is the
-        # same miss that shipped the MP3-only Windows build.
+        # Windows only. This is NOT a reproduction of issue #23 — that needs
+        # a real AV minifilter, a native-sdk.jsonl grown to hundreds of
+        # megabytes, and tracing enabled; this step builds with -Dtrace=off
+        # on a clean runner with no log at all, the exact configuration that
+        # fixes the bug. What it guards is the class of failure #23 belonged
+        # to: the player phase reaching the glass and continuing to service
+        # its loop. Losing that distinction is the danger — read this as "CI
+        # covers #23" and someone eventually drops -Dtrace=off.
+        #
+        # The release workflow's copy of this step only runs at release time.
+        # Catching a regression here blocks a merge instead of surfacing
+        # mid-release, the same miss that shipped the MP3-only Windows build.
         if: runner.os == 'Windows'
         timeout-minutes: 6
         env:
@@ -107,6 +115,23 @@ jobs:
           app_pid=$!
           fail=0
           native automate wait || fail=1
+          # Together these two prove: the app reached the player phase, its
+          # message loop kept servicing automation requests (not stalled the
+          # way #23's was), and it presented at least one non-black frame
+          # with the frame counter advancing (not stuck after a single
+          # presented frame).
+          #
+          # gpu_nonblank is the host's own frame sampling of the surface's
+          # centre pixel: true means that pixel is not pure black, and it
+          # latches — once set it never clears (gtk_host.c: `if (sr || sg ||
+          # sb) view->gpu_nonblank = 1;`; the AppKit host's
+          # verifiedNonblankFrame is likewise set-once). A solid white client
+          # area — issue #23's actual symptom — reads gpu_nonblank=true, same
+          # as a correctly rendered frame. This does NOT distinguish a white
+          # surface from a correct one; it is not a pixel-correctness check.
+          # gpu_frame advancing past zero is what catches a surface that
+          # presented once and then froze. No `|` alternation: native
+          # automate assert does not support it.
           if [ "$fail" -eq 0 ]; then
             native automate assert --timeout-ms 30000 'gpu_nonblank=true' || fail=1
           fi
