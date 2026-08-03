@@ -1056,11 +1056,14 @@ Replace the body of the `Smoke-test on real Windows` step in `.github/workflows/
           name: windows-smoke-evidence
           path: |
             .zig-cache/native-sdk-automation/screenshot-main-canvas.png
-            ${{ runner.temp }}/../subwave.log
+            ${{ env.LOCALAPPDATA }}/dev.subwave.player/Logs/subwave.log
           if-no-files-found: warn
 ```
 
-The `subwave.log` path under `LOCALAPPDATA` is not knowable from YAML with confidence — leave the placeholder in place for now. Step 4 captures the real path from a CI run and replaces it.
+That log path is not a guess. `app_dirs.resolveOne` builds the Windows logs
+directory as `%LOCALAPPDATA%\<app_name>\Logs`
+(`primitives/app_dirs/root.zig:263`), and the app name the SDK keys on is the
+bundle id, `dev.subwave.player`.
 
 - [ ] **Step 2: Add the same step to CI's Windows leg**
 
@@ -1117,29 +1120,17 @@ cp /tmp/settings.json.bak ~/.config/subwave-player/settings.json
 
 **If `gpu_nonblank` reads false on Linux**, do not weaken the assertion. The FFT and frame feeds are gated on the window being visibly on screen — activate the window and retry. If it stays false with the window focused, that is a finding worth reporting before this step proceeds.
 
-- [ ] **Step 4: Capture the real Windows log path for the artifact upload**
-
-The `subwave.log` path in Step 1's artifact block is a placeholder. Add a temporary debug line to the release smoke step:
-
-```bash
-          native automate assert --timeout-ms 5000 'gpu_nonblank=true' || true
-          echo "LOG DIR: $LOCALAPPDATA"
-          find "$LOCALAPPDATA" -name 'subwave*.log' 2>/dev/null || true
-```
-
-Push the branch, let CI run the Windows leg, read the path from the log, then replace the placeholder path in the artifact block with the real one and delete the debug line.
-
-- [ ] **Step 5: Verify the guard still passes**
+- [ ] **Step 4: Verify the guard still passes**
 
 Run: `./scripts/check-release-flags.sh`
 Expected: PASS. Both new `native build` invocations carry `-Dtrace=off`.
 
-- [ ] **Step 6: Run the suite**
+- [ ] **Step 5: Run the suite**
 
 Run: `native check && native test`
 Expected: PASS. No source changed.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add .github/workflows/release-windows.yml .github/workflows/ci.yml
