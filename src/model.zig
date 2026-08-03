@@ -254,12 +254,12 @@ pub const Model = struct {
     cover_url_buf: [256]u8 = undefined,
     cover_cache_buf: [832]u8 = undefined,
 
-    // Heartbeat bookkeeping. The 1s tick drives a 5s diagnostic line; the
-    // audio-event count is the closest honest proxy for "is the loop still
-    // turning" (the model has no frame counter, and the audio channel is the
-    // ~25 Hz animation clock). NEVER log per event — count here, emit on the
-    // tick. See src/diag.zig's header and issue #23.
-    hb_ticks: u8 = 0,
+    // Heartbeat bookkeeping. The audio-event count is the closest honest
+    // proxy for "is the loop still turning" (the model has no frame counter,
+    // and the audio channel is the ~25 Hz animation clock). It rides the
+    // free-running 5s feed poll (tick_feed) as the diagnostic heartbeat.
+    // NEVER log per event — count here, emit on the tick. See src/diag.zig's
+    // header and issue #23.
     hb_audio_events: u32 = 0,
 
     // transport / audio
@@ -2172,7 +2172,19 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
     };
     switch (msg) {
         .tick_feed => |t| {
-            if (t.outcome == .fired) fetchFeed(model, fx);
+            if (t.outcome != .fired) return;
+            // The 5s feed poll doubles as the diagnostic heartbeat: a gap in
+            // these lines is how a stalled message loop shows up in the log,
+            // and audio_events reading zero while they continue separates a
+            // dead feed from a dead loop. See src/diag.zig and issue #23.
+            diag.print("hb phase={s} transport={s} audio_events={d} retry={d}", .{
+                @tagName(model.phase),
+                @tagName(model.transport),
+                model.hb_audio_events,
+                model.retry,
+            });
+            model.hb_audio_events = 0;
+            fetchFeed(model, fx);
         },
         .tick_reconnect => |t| {
             if (t.outcome == .fired and model.transport == .playing) startStream(model, fx);
@@ -2227,17 +2239,6 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .tick_second => |t| {
             if (t.outcome != .fired) return;
             model.now_wall_ms = native_sdk.nowMs();
-            model.hb_ticks += 1;
-            if (model.hb_ticks >= 5) {
-                model.hb_ticks = 0;
-                diag.print("hb phase={s} transport={s} audio_events={d} retry={d}", .{
-                    @tagName(model.phase),
-                    @tagName(model.transport),
-                    model.hb_audio_events,
-                    model.retry,
-                });
-                model.hb_audio_events = 0;
-            }
             if (model.sleep_deadline_ms > 0 and model.now_wall_ms >= model.sleep_deadline_ms) {
                 disarmSleep(model, fx);
                 tuneOut(model, fx);
@@ -4244,7 +4245,7 @@ test "open_support opens ko-fi behind the same one-opener guard" {
     try testing.expect(!m.opener_inflight);
 }
 
-test "the heartbeat fires every fifth tick and resets the audio-event count" {
+test "the feed-poll heartbeat resets the audio-event count on a fired tick, not a rejected one" {
     var fx = Effects.init(testing.allocator);
     defer fx.deinit();
     fx.executor = .fake;
@@ -4257,20 +4258,11 @@ test "the heartbeat fires every fifth tick and resets the audio-event count" {
     }
     try testing.expectEqual(@as(u32, 40), m.hb_audio_events);
 
-    // Four ticks accumulate without reaching the boundary.
-    i = 0;
-    while (i < 4) : (i += 1) {
-        update(&m, .{ .tick_second = .{ .key = keys.second_timer, .outcome = .fired, .timestamp_ns = 0 } }, &fx);
-    }
-    try testing.expectEqual(@as(u8, 4), m.hb_ticks);
+    // A tick that did not fire must not touch the count.
+    update(&m, .{ .tick_feed = .{ .key = keys.feed_timer, .outcome = .rejected, .timestamp_ns = 0 } }, &fx);
     try testing.expectEqual(@as(u32, 40), m.hb_audio_events);
 
-    // The fifth is the heartbeat boundary: both counters reset.
-    update(&m, .{ .tick_second = .{ .key = keys.second_timer, .outcome = .fired, .timestamp_ns = 0 } }, &fx);
-    try testing.expectEqual(@as(u8, 0), m.hb_ticks);
+    // A fired tick is the heartbeat: the count resets.
+    update(&m, .{ .tick_feed = .{ .key = keys.feed_timer, .outcome = .fired, .timestamp_ns = 0 } }, &fx);
     try testing.expectEqual(@as(u32, 0), m.hb_audio_events);
-
-    // A tick that did not fire must not advance the heartbeat.
-    update(&m, .{ .tick_second = .{ .key = keys.second_timer, .outcome = .rejected, .timestamp_ns = 0 } }, &fx);
-    try testing.expectEqual(@as(u8, 0), m.hb_ticks);
 }
