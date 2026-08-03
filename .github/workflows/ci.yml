@@ -71,6 +71,12 @@ jobs:
         if: runner.os != 'Linux'
         run: ./scripts/set-close-policy.sh hide
 
+      - name: Check release build flags
+        # Guards -Dtrace=off across every workflow's `native build`. See
+        # scripts/check-release-flags.sh and issue #23.
+        if: runner.os == 'Linux'
+        run: ./scripts/check-release-flags.sh
+
       - name: Check markup and manifest
         run: native check
 
@@ -80,5 +86,8 @@ jobs:
       - name: Build
         # Catches anything that compiles under the test build but not the
         # release one. -Dcpu=baseline matches the release workflows, so CI
-        # builds the same configuration that ships.
-        run: native build -Dcpu=baseline
+        # builds the same configuration that ships. -Dtrace=off matches too:
+        # the SDK's default trace mode stalls the Windows message loop behind
+        # an AV minifilter (issue #23), so every `native-build` invocation in
+        # every workflow drops it, guarded by scripts/check-release-flags.sh.
+        run: native build -Dcpu=baseline -Dtrace=off

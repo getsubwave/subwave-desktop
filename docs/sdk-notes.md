@@ -174,3 +174,20 @@ the surface density back —
 ```bash
 native automate wait | grep -o 'gpu_scale=[0-9.]*'   # 1.6666666, not 2
 ```
+
+## `-Dtrace=off` is mandatory on shipping builds
+
+Not a patch — a build flag, but just as load bearing as the local
+`gtk_host.c` patch above. The SDK's default trace mode writes a record per
+frame and per audio callback, each one a full open/stat/write/close on an
+unbounded file, inline on the message loop thread. On Windows behind an AV
+minifilter that stalls the pump outright (issue #23).
+
+Every `native build` in every workflow passes `-Dtrace=off`, and
+`scripts/check-release-flags.sh` fails CI if one does not. Panic capture is
+outside the trace gate, so `last-panic.txt` still works.
+
+Re-check this at every SDK upgrade: if `FileTraceSink` starts holding its
+handle open, or per-frame events leave the default level, the flag can go.
+The upstream request is `docs/sdk-trace-log-request.md`.
+

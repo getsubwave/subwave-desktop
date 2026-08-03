@@ -84,12 +84,19 @@ jobs:
         run: native test
 
       - name: Build and package
-        # -Dcpu=baseline is load bearing: a plain `native build` bakes the CI
-        # runner's CPU features into the binary (the v0.2.1 tarball required
-        # AVX2; the Windows exe from the same release required AVX-512 and
-        # died at startup on most machines).
+        # -Dcpu=baseline (and, below, -Dtrace=off) is load bearing: a plain
+        # `native-build` invocation bakes the CI runner's CPU features into
+        # the binary (the v0.2.1 tarball required AVX2; the Windows exe from
+        # the same release required AVX-512 and died at startup on most
+        # machines).
+        # -Dtrace=off matters just as much: the SDK's default trace mode
+        # writes a record per rendered frame and per audio callback, each one
+        # a full open/stat/write/close on an unbounded log file, inline on
+        # the message loop thread. That's what stalls the Windows message
+        # pump in issue #23; scripts/check-release-flags.sh guards that every
+        # workflow keeps it dropped.
         run: |
-          native build -Dcpu=baseline
+          native build -Dcpu=baseline -Dtrace=off
           native package --target linux
           test -x zig-out/package/subwave-desktop-linux/bin/subwave-desktop
 

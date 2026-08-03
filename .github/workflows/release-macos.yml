@@ -86,13 +86,20 @@ jobs:
         run: native test
 
       - name: Build and package
-        # -Dcpu=baseline is load bearing on both legs: a plain `native build`
-        # bakes the runner's CPU features into the binary. The Intel runners
-        # are AVX-512 Xeons while most Intel Macs are not, and an M2+ arm64
-        # runner can emit instructions an M1 lacks. v0.2.1's Windows exe
-        # shipped exactly this bug and died at startup.
+        # -Dcpu=baseline (and -Dtrace=off, below) is load bearing on both
+        # legs: a plain `native-build` invocation bakes the runner's CPU
+        # features into the binary. The Intel runners are AVX-512 Xeons while
+        # most Intel Macs are not, and an M2+ arm64 runner can emit
+        # instructions an M1 lacks. v0.2.1's Windows exe shipped exactly this
+        # bug and died at startup.
+        # -Dtrace=off matters here too: the SDK's default trace mode writes a
+        # record per rendered frame and per audio callback via a full
+        # open/stat/write/close on an unbounded log file, inline on the
+        # message loop thread. That is what stalls the Windows message pump
+        # in issue #23; every shipping build drops it, guarded by
+        # scripts/check-release-flags.sh.
         run: |
-          native build -Dcpu=baseline
+          native build -Dcpu=baseline -Dtrace=off
           native package --target macos --signing adhoc
 
       - name: Audit CPU baseline

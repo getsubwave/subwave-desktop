@@ -75,12 +75,19 @@ jobs:
         run: native test
 
       - name: Build and package
-        # -Dcpu=baseline is load bearing: a plain `native build` bakes the CI
-        # runner's CPU features (Ice Lake AVX-512) into the exe, which then
-        # dies on an illegal instruction at startup on most listeners'
-        # machines. That is exactly how the v0.2.1 Windows zip shipped broken.
+        # -Dcpu=baseline (and -Dtrace=off, below) is load bearing: a plain
+        # `native-build` invocation bakes the CI runner's CPU features (Ice
+        # Lake AVX-512) into the exe, which then dies on an illegal
+        # instruction at startup on most listeners' machines. That is exactly
+        # how the v0.2.1 Windows zip shipped broken.
+        # -Dtrace=off is equally load bearing. The SDK's default trace mode
+        # writes a record per rendered frame and per audio callback, and each
+        # record is a full open/stat/write/close on an unbounded log file —
+        # inline on the message loop thread. Behind Bitdefender's minifilter
+        # that stalls the pump: white client area, busy cursor, near-zero CPU.
+        # That is issue #23. scripts/check-release-flags.sh guards this line.
         run: |
-          native build -Dcpu=baseline
+          native build -Dcpu=baseline -Dtrace=off
           native package --target windows --binary zig-out/bin/subwave-desktop.exe
           # Locate the exe rather than asserting a hard-coded path: it lives in
           # bin/ inside the package root, and a bare `test -f` on the wrong
@@ -121,7 +128,7 @@ jobs:
         # than deleting it.
         timeout-minutes: 6
         run: |
-          native build -Dautomation=true -Dcpu=baseline
+          native build -Dautomation=true -Dcpu=baseline -Dtrace=off
           app="zig-out/bin/subwave-desktop.exe"
           if [ ! -f "$app" ]; then
             echo "error: automation build produced no exe at $app" >&2
