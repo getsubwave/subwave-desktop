@@ -967,6 +967,10 @@ pub const Model = struct {
         _ = self;
         return updater.version;
     }
+    pub fn log_dir_value(self: *const Model) []const u8 {
+        _ = self;
+        return diag.dir();
+    }
 
     // -------------------------------------------------------------- request
     pub fn req_idle(self: *const Model) bool {
@@ -4209,6 +4213,12 @@ test "update check: newer tag arms the notice, older clears it, failures keep st
     update(&m, .{ .got_update = .{ .key = keys.fetch_update, .outcome = .ok, .status = 403, .body = "rate limited" } }, &fx);
     update(&m, .{ .got_update = .{ .key = keys.fetch_update, .outcome = .ok, .status = 200, .body = "not json" } }, &fx);
     try testing.expect(m.update_available());
+}
+
+test "log_dir_value reports the diagnostic log folder" {
+    const m: Model = .{};
+    // Unopened in the suite, so it reads empty rather than crashing.
+    try testing.expectEqualStrings("", m.log_dir_value());
 }
 
 test "open_release spawns the opener once until it exits" {
