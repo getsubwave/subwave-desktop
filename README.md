@@ -114,17 +114,21 @@ text on a fractional-scale display. (0.6.0 absorbed the two older patches — th
 comptime quota fix and close-button-hides-window.)
 
 ```bash
-native build && ./zig-out/bin/subwave-desktop   # release build + run
+native build -Dtrace=off && ./zig-out/bin/subwave-desktop   # release build + run
 native dev                                       # debug build, Zig hot-rebuild
 native test                                      # unit tests + typed markup contract
 native check                                     # validate markup + manifest
 native package --target linux --output dist      # distributable (also: --target macos)
 ```
 
+`-Dtrace=off` matters on every `native build`: the SDK's default trace mode
+writes unbounded per-frame records that can stall the Windows message loop
+behind an AV minifilter (issue #23) — see `docs/sdk-notes.md`.
+
 Headless verification (CI / agents) via the built-in automation server:
 
 ```bash
-native build -Dautomation=true
+native build -Dautomation=true -Dtrace=off
 ./zig-out/bin/subwave-desktop &
 native automate wait && native automate screenshot main-canvas
 ```
