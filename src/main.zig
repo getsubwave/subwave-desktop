@@ -522,6 +522,7 @@ pub fn main(init: std.process.Init) !void {
         .absent => diag.print("sdk trace log: none found", .{}),
         .kept => |size| diag.print("sdk trace log: {d} bytes, left in place (at or under the {d}-byte reclaim threshold)", .{ size, diag.sdk_reclaim_bytes }),
         .reclaimed => |size| diag.print("sdk trace log: {d} bytes, reclaimed", .{size}),
+        .reclaim_failed => |size| diag.print("sdk trace log: {d} bytes, OVER the {d}-byte reclaim threshold and could not be deleted", .{ size, diag.sdk_reclaim_bytes }),
     }
     diag.print("phase {s} station {s}", .{
         @tagName(app_state.model.phase),

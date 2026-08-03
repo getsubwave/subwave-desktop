@@ -26,6 +26,7 @@
 //! is inside update(), which runs on the loop thread.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const native_sdk = @import("native_sdk");
 
 /// Hard ceiling on one run's log. Evidence, not telemetry.
@@ -136,6 +137,14 @@ pub fn print(comptime fmt: []const u8, args: anytype) void {
         // a file that still looks like it holds the pre-wrap history plus a
         // stray marker at the wrong offset.
         file.setLength(state.io, 0) catch return;
+        // Invariant: state.offset never claims more bytes than the file
+        // actually holds. setLength just truncated the file to empty, so
+        // zero the tracked offset here, before attempting the marker write
+        // below — if that write then fails, offset is already 0 rather than
+        // stuck at its stale pre-wrap value while the file on disk is empty
+        // (which would have made the next print() land at a huge offset in a
+        // sparse file).
+        state.offset = 0;
         file.writePositionalAll(state.io, notice, 0) catch return;
         state.offset = notice.len;
         file.writePositionalAll(state.io, line, state.offset) catch return;
@@ -159,6 +168,13 @@ pub const ReclaimResult = union(enum) {
     /// A file was present, over `max_bytes`, and was deleted. The size is
     /// what was reclaimed.
     reclaimed: u64,
+    /// A file was present, over `max_bytes`, and `deleteFile` failed — most
+    /// plausibly on Windows because an AV scanner still holds it open, i.e.
+    /// exactly the circumstance issue #23 exists to address. Distinct from
+    /// `kept`: `kept` means "at or under the threshold, nothing to do", which
+    /// would be a false "it's fine" for a file that is in fact still oversized
+    /// and growing. The size is what remains undeleted.
+    reclaim_failed: u64,
 };
 
 /// Delete the SDK's trace log if it grew past `max_bytes`. Pre-`-Dtrace=off`
@@ -168,7 +184,7 @@ pub fn reclaimSdkLog(io: std.Io, path: []const u8, max_bytes: u64) ReclaimResult
     var cwd = std.Io.Dir.cwd();
     const st = cwd.statFile(io, path, .{}) catch return .absent;
     if (st.size <= max_bytes) return .{ .kept = st.size };
-    cwd.deleteFile(io, path) catch return .{ .kept = st.size };
+    cwd.deleteFile(io, path) catch return .{ .reclaim_failed = st.size };
     return .{ .reclaimed = st.size };
 }
 
@@ -408,4 +424,58 @@ test "reclaimSdkLog deletes only an oversized file and reports what it found" {
     // than as either of the present-file variants.
     const absent_result = reclaimSdkLog(testing.io, d ++ "/absent.jsonl", 1024);
     try testing.expectEqual(ReclaimResult.absent, absent_result);
+}
+
+test "reclaimSdkLog reports reclaim_failed when the oversized file cannot be deleted" {
+    // Linux-only: this needs `statFile` to report a "big" size for the target
+    // path while `deleteFile` on that same path reliably fails, and the only
+    // clean (non-contorted) way found to force that deterministically is to
+    // point reclaimSdkLog at a *directory* instead of a regular file —
+    // `deleteFile`'s unlink() rejects directories unconditionally (EISDIR),
+    // while `statFile` succeeds on them same as any path.
+    //
+    // Verified by hand on this repo's btrfs filesystem before writing this
+    // test (see the issue #23 branch report): an empty directory reports
+    // st.size == 0, but one populated with enough directory entries reports a
+    // real nonzero size that grows with entry count, exactly like ext4 and
+    // xfs (GitHub Actions' ubuntu-24.04 runner uses ext4) — unlike tmpfs,
+    // which does not grow directory size with entry count. macOS (APFS) and
+    // Windows (NTFS) directory-size semantics were not verified — likely
+    // different enough (e.g. NTFS reliably reports 0) that this would either
+    // not exercise `.reclaim_failed` or would flat-out fail there, so the
+    // test is gated to Linux rather than guessed at.
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    // Comptime-forced for the same reason as the sibling reclaim test above:
+    // `++` below requires a comptime-known operand.
+    const d = comptime testDir("reclaim-fail");
+    std.Io.Dir.cwd().deleteTree(testing.io, d) catch {};
+    defer std.Io.Dir.cwd().deleteTree(testing.io, d) catch {};
+
+    const target = d ++ "/oversized-dir";
+    std.Io.Dir.cwd().createDirPath(testing.io, target) catch unreachable;
+    // Populate with enough entries that the directory's own on-disk size (not
+    // the size of anything inside it) exceeds max_bytes below. 80 tiny files
+    // measured ~1.6 KB of directory size on this filesystem; use a threshold
+    // comfortably under that.
+    var i: usize = 0;
+    var name_buf: [64]u8 = undefined;
+    while (i < 80) : (i += 1) {
+        const name = std.fmt.bufPrint(&name_buf, "{s}/f{d}", .{ target, i }) catch unreachable;
+        std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = name, .data = "x" }) catch unreachable;
+    }
+
+    const st = std.Io.Dir.cwd().statFile(testing.io, target, .{}) catch unreachable;
+    // Confirms the premise this test relies on before asserting the thing it
+    // actually cares about — if a future Zig/kernel/filesystem combination
+    // stops growing directory size with entry count, this fails loudly here
+    // instead of silently passing for the wrong reason.
+    try testing.expect(st.size > 200);
+
+    const result = reclaimSdkLog(testing.io, target, 200);
+    try testing.expectEqual(ReclaimResult{ .reclaim_failed = st.size }, result);
+
+    // The directory must genuinely still be there — deleteFile must not have
+    // partially succeeded or torn anything down.
+    _ = std.Io.Dir.cwd().statFile(testing.io, target, .{}) catch return testing.expect(false) catch unreachable;
 }
