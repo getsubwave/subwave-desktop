@@ -1,0 +1,235 @@
+//! Bounded diagnostic breadcrumb log — the file a user attaches to a bug
+//! report.
+//!
+//! TWO RULES, both learned from issue #23:
+//!
+//! 1. NEVER log per-frame or per-audio-event. The SDK's own trace sink does
+//!    exactly that, with a full open/stat/write/close per record on an
+//!    unbounded file, inline on the message loop thread. On Windows behind an
+//!    AV minifilter it stalls the pump outright. Shipping builds disable it
+//!    with -Dtrace=off; this module is its replacement, and copying its
+//!    shape would reintroduce the bug. The heartbeat is driven by elapsed
+//!    time (the existing 1s tick), never by frame count.
+//!
+//! 2. This writes SYNCHRONOUSLY and does NOT route through the effects
+//!    channel, against the architecture rule in CLAUDE.md. That is
+//!    deliberate and the exemption is this module only: an fx-routed log
+//!    cannot record the failure of the loop that runs fx, which is precisely
+//!    the failure worth recording.
+//!
+//! The handle is opened once in main() and held for the process lifetime.
+//! Everything is a silent no-op on failure — the app runs without
+//! diagnostics rather than not at all, matching settings.zig's posture.
+//!
+//! Single-threaded by construction: main() opens it, and every other caller
+//! is inside update(), which runs on the loop thread.
+
+const std = @import("std");
+const native_sdk = @import("native_sdk");
+
+/// Hard ceiling on one run's log. Evidence, not telemetry.
+pub const cap_bytes: u64 = 256 * 1024;
+
+/// An SDK trace log bigger than this is a pre-`-Dtrace=off` install's
+/// leftovers; reclaim it once at startup.
+pub const sdk_reclaim_bytes: u64 = 8 * 1024 * 1024;
+
+const State = struct {
+    io: std.Io = undefined,
+    file: ?std.Io.File = null,
+    offset: u64 = 0,
+    capped: bool = false,
+    start_ms: i64 = 0,
+    dir_buf: [1024]u8 = undefined,
+    dir_len: usize = 0,
+};
+
+var state: State = .{};
+
+/// The resolved log directory, or "" when the log was never opened.
+pub fn dir() []const u8 {
+    return state.dir_buf[0..state.dir_len];
+}
+
+/// Roll the previous run aside and open a fresh log in `log_dir`.
+/// Silent no-op if anything fails.
+pub fn open(io: std.Io, log_dir: []const u8) void {
+    if (log_dir.len == 0 or log_dir.len > state.dir_buf.len) return;
+    const platform = native_sdk.app_dirs.currentPlatform();
+    var cur_buf: [1200]u8 = undefined;
+    var prev_buf: [1200]u8 = undefined;
+    const cur = native_sdk.app_dirs.join(platform, &cur_buf, &.{ log_dir, "subwave.log" }) catch return;
+    const prev = native_sdk.app_dirs.join(platform, &prev_buf, &.{ log_dir, "subwave.prev.log" }) catch return;
+
+    var cwd = std.Io.Dir.cwd();
+    cwd.createDirPath(io, log_dir) catch {};
+    // A hang means the user restarts before thinking to grab the file, so
+    // one run of history is kept. Missing source is fine — first launch.
+    cwd.rename(cur, cwd, prev, io) catch {};
+
+    const file = cwd.createFile(io, cur, .{ .truncate = true }) catch return;
+    @memcpy(state.dir_buf[0..log_dir.len], log_dir);
+    state.dir_len = log_dir.len;
+    state.io = io;
+    state.file = file;
+    state.offset = 0;
+    state.capped = false;
+    state.start_ms = native_sdk.nowMs();
+}
+
+pub fn close(io: std.Io) void {
+    if (state.file) |f| f.close(io);
+    state.file = null;
+    state.dir_len = 0;
+    state.offset = 0;
+    state.capped = false;
+}
+
+/// One timestamped line. No-op when unopened or capped. Lines longer than
+/// the buffer are dropped rather than truncated mid-format.
+pub fn print(comptime fmt: []const u8, args: anytype) void {
+    const file = state.file orelse return;
+    if (state.capped) return;
+
+    var line_buf: [512]u8 = undefined;
+    var w = std.Io.Writer.fixed(&line_buf);
+    const since_ms = native_sdk.nowMs() - state.start_ms;
+    w.print("[+{d}.{d:0>3}s] ", .{ @divTrunc(since_ms, 1000), @rem(since_ms, 1000) }) catch return;
+    w.print(fmt, args) catch return;
+    w.writeByte('\n') catch return;
+    const line = w.buffered();
+
+    if (state.offset + line.len > cap_bytes) {
+        state.capped = true;
+        const notice = "[+0.000s] log capped\n";
+        file.writePositionalAll(state.io, notice, state.offset) catch {};
+        state.offset += notice.len;
+        return;
+    }
+    file.writePositionalAll(state.io, line, state.offset) catch return;
+    state.offset += line.len;
+}
+
+/// Delete the SDK's trace log if it grew past `max_bytes`. Pre-`-Dtrace=off`
+/// installs carry hundreds of megabytes of per-frame records; this reclaims
+/// it once, and keeps the machine safe if a future SDK re-enables tracing.
+pub fn reclaimSdkLog(io: std.Io, path: []const u8, max_bytes: u64) void {
+    var cwd = std.Io.Dir.cwd();
+    const st = cwd.statFile(io, path, .{}) catch return;
+    if (st.size <= max_bytes) return;
+    cwd.deleteFile(io, path) catch {};
+}
+
+const testing = std.testing;
+
+// Each test gets its own directory so a failure in one cannot mask another.
+fn testDir(comptime name: []const u8) []const u8 {
+    return ".zig-cache/diag-test-" ++ name;
+}
+
+fn readBack(comptime name: []const u8, file: []const u8, buf: []u8) []const u8 {
+    var path_buf: [256]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ testDir(name), file }) catch unreachable;
+    const n = std.Io.Dir.cwd().readFileAlloc(testing.io, path, testing.allocator, .limited(buf.len)) catch return "";
+    defer testing.allocator.free(n);
+    @memcpy(buf[0..n.len], n);
+    return buf[0..n.len];
+}
+
+test "open writes into the log dir and print appends timestamped lines" {
+    const d = testDir("basic");
+    std.Io.Dir.cwd().deleteTree(testing.io, d) catch {};
+    defer std.Io.Dir.cwd().deleteTree(testing.io, d) catch {};
+
+    open(testing.io, d);
+    defer close(testing.io);
+    try testing.expectEqualStrings(d, dir());
+
+    print("hello {s}", .{"world"});
+    print("second", .{});
+
+    var buf: [4096]u8 = undefined;
+    const text = readBack("basic", "subwave.log", &buf);
+    try testing.expect(std.mem.indexOf(u8, text, "hello world") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "second") != null);
+    // Every line carries a relative-time prefix so a gap is visible.
+    try testing.expect(std.mem.startsWith(u8, text, "[+"));
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, text, "\n"));
+}
+
+test "a second open rolls the previous run aside" {
+    const d = testDir("roll");
+    std.Io.Dir.cwd().deleteTree(testing.io, d) catch {};
+    defer std.Io.Dir.cwd().deleteTree(testing.io, d) catch {};
+
+    open(testing.io, d);
+    print("first run", .{});
+    close(testing.io);
+
+    open(testing.io, d);
+    print("second run", .{});
+    close(testing.io);
+
+    var buf: [4096]u8 = undefined;
+    const prev = readBack("roll", "subwave.prev.log", &buf);
+    try testing.expect(std.mem.indexOf(u8, prev, "first run") != null);
+
+    var buf2: [4096]u8 = undefined;
+    const cur = readBack("roll", "subwave.log", &buf2);
+    try testing.expect(std.mem.indexOf(u8, cur, "second run") != null);
+    // The fresh run must not inherit the old run's lines.
+    try testing.expect(std.mem.indexOf(u8, cur, "first run") == null);
+}
+
+test "the byte cap stops writing and says so exactly once" {
+    const d = testDir("cap");
+    std.Io.Dir.cwd().deleteTree(testing.io, d) catch {};
+    defer std.Io.Dir.cwd().deleteTree(testing.io, d) catch {};
+
+    open(testing.io, d);
+    defer close(testing.io);
+    // 64 bytes of payload per line, well past cap_bytes over this many lines.
+    var i: usize = 0;
+    while (i < (cap_bytes / 32) + 100) : (i += 1) {
+        print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", .{});
+    }
+
+    const size = std.Io.Dir.cwd().statFile(testing.io, ".zig-cache/diag-test-cap/subwave.log", .{}) catch unreachable;
+    // Capped, with headroom for the final notice line.
+    try testing.expect(size.size <= cap_bytes + 128);
+
+    const n = std.Io.Dir.cwd().readFileAlloc(testing.io, ".zig-cache/diag-test-cap/subwave.log", testing.allocator, .limited(cap_bytes + 256)) catch unreachable;
+    defer testing.allocator.free(n);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, n, "log capped"));
+}
+
+test "print is a silent no-op when never opened" {
+    // No open() call. Must not crash and must not create anything.
+    print("this goes nowhere", .{});
+    try testing.expectEqualStrings("", dir());
+}
+
+test "reclaimSdkLog deletes only an oversized file" {
+    // `d` feeds `++` below, which requires a comptime-known operand — force
+    // comptime evaluation of the call rather than relying on the runtime
+    // slice testDir() otherwise returns.
+    const d = comptime testDir("reclaim");
+    std.Io.Dir.cwd().deleteTree(testing.io, d) catch {};
+    defer std.Io.Dir.cwd().deleteTree(testing.io, d) catch {};
+    std.Io.Dir.cwd().createDirPath(testing.io, d) catch unreachable;
+
+    const small = d ++ "/small.jsonl";
+    const big = d ++ "/big.jsonl";
+    std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = small, .data = "tiny" }) catch unreachable;
+    const payload = [_]u8{'x'} ** 4096;
+    std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = big, .data = &payload }) catch unreachable;
+
+    reclaimSdkLog(testing.io, small, 1024);
+    reclaimSdkLog(testing.io, big, 1024);
+
+    _ = std.Io.Dir.cwd().statFile(testing.io, small, .{}) catch return testing.expect(false) catch unreachable;
+    try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(testing.io, big, .{}));
+
+    // A missing path is a no-op, not a crash.
+    reclaimSdkLog(testing.io, d ++ "/absent.jsonl", 1024);
+}
