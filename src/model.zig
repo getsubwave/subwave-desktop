@@ -15,6 +15,7 @@ const discord_rpc = @import("discord_rpc.zig");
 // `update` is the reducer below, so the self-update module needs an alias.
 const updater = @import("update.zig");
 const links = @import("links.zig");
+const diag = @import("diag.zig");
 pub const StreamFormat = stream_format.StreamFormat;
 
 // Default listening volume on tune-in. (Decode/position/spectrum report
@@ -252,6 +253,14 @@ pub const Model = struct {
     cover_sid: []const u8 = "",
     cover_url_buf: [256]u8 = undefined,
     cover_cache_buf: [832]u8 = undefined,
+
+    // Heartbeat bookkeeping. The 1s tick drives a 5s diagnostic line; the
+    // audio-event count is the closest honest proxy for "is the loop still
+    // turning" (the model has no frame counter, and the audio channel is the
+    // ~25 Hz animation clock). NEVER log per event — count here, emit on the
+    // tick. See src/diag.zig's header and issue #23.
+    hb_ticks: u8 = 0,
+    hb_audio_events: u32 = 0,
 
     // transport / audio
     transport: Transport = .playing,
@@ -1527,6 +1536,7 @@ fn startStream(model: *Model, fx: *Effects) void {
         .on_event = Effects.audioMsg(.audio_event),
     });
     fx.setAudioVolume(if (model.muted) 0.0 else model.volume);
+    diag.print("stream start format={s}", .{model.effectiveFormat().id()});
     model.transport = .playing;
     updateDiscordPresence(model, fx);
 }
@@ -1651,6 +1661,7 @@ pub fn applySettingsJson(model: *Model, bytes: []const u8) void {
                 model.base = b;
                 // A saved station means onboarding already happened.
                 model.phase = .player;
+                diag.print("phase player (saved station)", .{});
             } else |_| {}
         }
     }
@@ -1738,6 +1749,7 @@ fn scheduleReconnect(model: *Model, fx: *Effects) void {
     const shift: u5 = @intCast(@min(model.retry, 7));
     const delay: u32 = @min(@as(u32, 500) * (@as(u32, 1) << shift), 60_000);
     model.retry +|= 1;
+    diag.print("stream reconnect retry={d} delay_ms={d} format={s}", .{ model.retry, delay, model.effectiveFormat().id() });
     fx.startTimer(.{ .key = keys.reconnect, .interval_ms = delay, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick_reconnect) });
 }
 
@@ -2101,6 +2113,7 @@ fn disarmSleep(model: *Model, fx: *Effects) void {
 }
 
 fn tuneOut(model: *Model, fx: *Effects) void {
+    diag.print("stream stop", .{});
     fx.stopAudio();
     // Tuning out ends any reconnect story: without this a prior failure would
     // keep the "STREAM LOST" banner up over a deliberately stopped player.
@@ -2214,6 +2227,17 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .tick_second => |t| {
             if (t.outcome != .fired) return;
             model.now_wall_ms = native_sdk.nowMs();
+            model.hb_ticks += 1;
+            if (model.hb_ticks >= 5) {
+                model.hb_ticks = 0;
+                diag.print("hb phase={s} transport={s} audio_events={d} retry={d}", .{
+                    @tagName(model.phase),
+                    @tagName(model.transport),
+                    model.hb_audio_events,
+                    model.retry,
+                });
+                model.hb_audio_events = 0;
+            }
             if (model.sleep_deadline_ms > 0 and model.now_wall_ms >= model.sleep_deadline_ms) {
                 disarmSleep(model, fx);
                 tuneOut(model, fx);
@@ -2752,6 +2776,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
 
         // --------------------------------------------------------- transport
         .audio_event => |e| {
+            // Counted, never logged: this fires ~25 times a second. The
+            // heartbeat reports the count once per 5s. See issue #23.
+            model.hb_audio_events +|= 1;
             switch (e.kind) {
                 .loaded => {
                     model.stream_failed = false;
@@ -3232,14 +3259,17 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 fx.startTimer(.{ .key = keys.ob_step_timer, .interval_ms = 400, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick_ob_step) });
             } else {
                 model.ob_steps[1] = .fail;
-                const diag: []const u8 = switch (r.outcome) {
+                // Named `note`, not `diag`: that name now belongs to the
+                // top-level src/diag.zig import (breadcrumb logging), and
+                // Zig disallows a local shadowing a file-scope declaration.
+                const note: []const u8 = switch (r.outcome) {
                     .ok => "The address answered, but not like a SUB/WAVE station — is /api routed to the controller?",
                     .timed_out => "No answer — the station didn't respond in time.",
                     .connect_failed => "Couldn't open a connection — check the address is right and the station is reachable from this network.",
                     .tls_failed => "Secure connection failed — try the http:// prefix if the station has no certificate.",
                     else => "Couldn't reach the station.",
                 };
-                setStr(&model.ob_diag_buf, &model.ob_diag, diag);
+                setStr(&model.ob_diag_buf, &model.ob_diag, note);
             }
         },
         .got_ob_dj => |r| {
@@ -3274,6 +3304,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 pushRecent(model, model.station_name, model.base);
                 model.station_buffer.clear();
                 model.phase = .player;
+                diag.print("phase player (onboarding complete)", .{});
                 model.ob_checking = false;
                 model.day_sel = utcWeekday(native_sdk.nowMs());
                 startPlayerTimers(fx);
@@ -4211,4 +4242,35 @@ test "open_support opens ko-fi behind the same one-opener guard" {
     try testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
     update(&m, .{ .opener_exited = .{ .key = keys.open_support_spawn, .reason = .exited } }, &fx);
     try testing.expect(!m.opener_inflight);
+}
+
+test "the heartbeat fires every fifth tick and resets the audio-event count" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+
+    // Audio events are counted, never logged — the arm must not emit per event.
+    var i: usize = 0;
+    while (i < 40) : (i += 1) {
+        update(&m, .{ .audio_event = .{ .key = keys.audio, .kind = .position, .position_ms = 1000 } }, &fx);
+    }
+    try testing.expectEqual(@as(u32, 40), m.hb_audio_events);
+
+    // Four ticks accumulate without reaching the boundary.
+    i = 0;
+    while (i < 4) : (i += 1) {
+        update(&m, .{ .tick_second = .{ .key = keys.second_timer, .outcome = .fired, .timestamp_ns = 0 } }, &fx);
+    }
+    try testing.expectEqual(@as(u8, 4), m.hb_ticks);
+    try testing.expectEqual(@as(u32, 40), m.hb_audio_events);
+
+    // The fifth is the heartbeat boundary: both counters reset.
+    update(&m, .{ .tick_second = .{ .key = keys.second_timer, .outcome = .fired, .timestamp_ns = 0 } }, &fx);
+    try testing.expectEqual(@as(u8, 0), m.hb_ticks);
+    try testing.expectEqual(@as(u32, 0), m.hb_audio_events);
+
+    // A tick that did not fire must not advance the heartbeat.
+    update(&m, .{ .tick_second = .{ .key = keys.second_timer, .outcome = .rejected, .timestamp_ns = 0 } }, &fx);
+    try testing.expectEqual(@as(u8, 0), m.hb_ticks);
 }
