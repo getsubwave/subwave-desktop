@@ -167,6 +167,13 @@ jobs:
             native automate assert --timeout-ms 30000 'gpu_frame=[1-9]' || fail=1
           fi
           native automate screenshot main-canvas || true
+          # Stage the diagnostic log into the workspace for the artifact
+          # upload. It cannot be referenced as ${{ env.LOCALAPPDATA }} in a
+          # path: expression — the env context only carries what a workflow
+          # sets via env: or $GITHUB_ENV, not the runner's own process
+          # environment. Here it is an ordinary shell variable and works.
+          mkdir -p smoke-evidence
+          cp "$LOCALAPPDATA/dev.subwave.player/Logs/subwave.log" smoke-evidence/ 2>/dev/null || true
           kill "$app_pid" 2>/dev/null || true
           exit "$fail"
 
@@ -177,7 +184,7 @@ jobs:
           name: windows-smoke-evidence
           path: |
             .zig-cache/native-sdk-automation/screenshot-main-canvas.png
-            ${{ env.LOCALAPPDATA }}/dev.subwave.player/Logs/subwave.log
+            smoke-evidence/subwave.log
           if-no-files-found: warn
 
       - name: Upload to release
