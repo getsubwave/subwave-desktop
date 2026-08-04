@@ -8,7 +8,9 @@ native test   # verify
 ```
 
 The unified diff lives at `patches/native-sdk-local.patch`, generated against
-the pristine 0.7.1 npm tarball. Symptom of a lost patch: pixelated text on a
+the pristine 0.7.1 npm tarball and re-verified against 0.8.0, whose
+`gtk_host.c` is byte-identical (so the hunks land with zero offset and the file
+needed no regeneration). Symptom of a lost patch: pixelated text on a
 fractional-scale Linux display.
 
 ## Two version pins, and they must agree
@@ -65,6 +67,45 @@ workarounds they replaced are still visible in the git log:
 [native#148]: https://github.com/vercel-labs/native/issues/148
 [native#149]: https://github.com/vercel-labs/native/issues/149
 
+## What 0.8.0 changed (upgraded 2026-08-04)
+
+0.8.0 is a **TypeScript-core release**, and this app has no TypeScript core —
+its logic is Zig and its views are markup. The headline change (TS cores now
+compile through an external core compiler, and the TS-to-Zig transpiled lane is
+removed as a deliberate pre-1.0 break) cannot reach a Zig app: the only trace of
+it in our manifest surface is a new optional `core_compiler` field that defaults
+to `"external"` and which `app.zon` never mentions.
+
+The useful part of this upgrade is really **0.7.2**, which we skipped over:
+
+| Surface | 0.7.1 → 0.8.0 |
+| --- | --- |
+| `Effects` `pub fn` list | identical |
+| `PlatformFeature` enum, `*_fn` platform services | identical |
+| `src/platform/linux/gtk_host.c` | **byte-identical** — the HiDPI patch is untouched |
+| CLI `bin/` | byte-identical |
+| Automation protocol | `0x096c8aa4730c11ec`, unchanged — existing `native automate` calls keep working |
+| `minimum_zig_version` | 0.16.0, unchanged |
+| Markup vocabulary | additions only: `added-lines` / `removed-lines` on `<code>` (Geist-style diffs) |
+| `DesignTokens` | additive: `button_disabled_border` and five `tabs_*` metrics; `theme.zig` writes only color slots, so defaults apply |
+| `app.zon` manifest | one new optional field, `core_compiler` (default `"external"`); everything we declare is unchanged |
+| Trace default | still `.events` — see the `-Dtrace=off` section below, the flag stays mandatory |
+
+Two 0.7.2 fixes land on platforms this app ships to, neither needing an app edit:
+
+- **Windows GPU surfaces now render through Direct2D/DirectWrite** with
+  dirty-region patching, replacing the software RGBA→BGRA path. That is the
+  Windows leg of our one `gpu_surface` view, so it is worth a look on the next
+  Windows release build.
+- **`Effects.spawn` no longer flashes a console window** on Windows when a
+  tray/GUI app launches a console-subsystem child. `links.zig` opens every
+  outbound URL through a spawned per-OS browser argv, so this removes a visible
+  black-box blink on Windows for free.
+
+Still **no** audio output-device API and still no OS media-controls surface — no
+MPRIS, MPNowPlayingInfoCenter or SystemMediaTransportControls anywhere in the
+0.8.0 tree. Re-checked, not assumed.
+
 ## What 0.7.1 changed (upgraded 2026-08-01)
 
 Additive across every surface this app touches, which is why the upgrade landed
@@ -84,7 +125,7 @@ Nothing removed, nothing renamed. Still **no** audio output-device API and
 still no OS media-controls surface — no MPRIS, MPNowPlayingInfoCenter or
 SystemMediaTransportControls anywhere in the tree.
 
-## No audio output-device selection (checked 0.6.0 and 0.7.1)
+## No audio output-device selection (checked 0.6.0, 0.7.1 and 0.8.0)
 
 The platform seam's whole audio surface is `audio_load` / `audio_load_url` /
 `play` / `pause` / `stop` / `seek` / `set_volume`. There is no device
@@ -159,13 +200,14 @@ surface at 1.6667 yields an 1889px buffer for 1888px of screen) and maps buffer
 pixels 1:1 to device pixels when it matches, letting the surplus edge column
 fall outside the clip.
 
-0.6.0 and 0.7.1 both still read the integer API at every one of those sites
-(0.6.0 added `gdk_surface_get_scale_factor` calls, which is the *integer* GDK
-entry point, not the fractional `gdk_surface_get_scale`; 0.7.1 changed none of
-them), so the patch still applies — with zero fuzz. **Re-apply after every
-`npm i -g @native-sdk/cli` upgrade**, or drop
-it once [vercel-labs/native#156](https://github.com/vercel-labs/native/issues/156)
-ships. Integer scales (100%/200%) are unaffected, which is why it can look fine
+0.6.0, 0.7.1 and 0.8.0 all still read the integer API at every one of those
+sites (0.6.0 added `gdk_surface_get_scale_factor` calls, which is the *integer*
+GDK entry point, not the fractional `gdk_surface_get_scale`; 0.7.1 changed none
+of them, and 0.8.0 does not touch `gtk_host.c` at all), so the patch still
+applies — with zero fuzz. **Re-apply after every
+`npm i -g @native-sdk/cli` upgrade**, or drop it once
+[vercel-labs/native#156](https://github.com/vercel-labs/native/issues/156)
+ships — still open as of 0.8.0. Integer scales (100%/200%) are unaffected, which is why it can look fine
 on a second machine.
 
 Verify it took on a fractional display: run the app under automation and read
@@ -189,5 +231,7 @@ outside the trace gate, so `last-panic.txt` still works.
 
 Re-check this at every SDK upgrade: if `FileTraceSink` starts holding its
 handle open, or per-frame events leave the default level, the flag can go.
-The upstream request is `docs/sdk-trace-log-request.md`.
+The upstream request is `docs/sdk-trace-log-request.md`. Re-checked at 0.8.0:
+`src/primitives/trace/` is byte-identical to 0.7.1 and `build.zig` still
+defaults `-Dtrace` to `.events`, so the flag stays mandatory.
 
