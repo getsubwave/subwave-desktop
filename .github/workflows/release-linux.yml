@@ -68,6 +68,14 @@ jobs:
       # fractional-scale desktop, so that step is not optional here.
       - uses: ./.github/actions/setup-native
 
+      - name: Check release build flags
+        # ci.yml runs this too, but only on pushes/PRs. A tag pushed straight
+        # to a release without CI having run on it (or a hotfix branch that
+        # skipped CI) would otherwise reach this workflow with nothing
+        # guarding -Dtrace=off. See scripts/check-release-flags.sh and issue
+        # #23.
+        run: ./scripts/check-release-flags.sh
+
       - name: Verify tag matches app.zon version
         env:
           TAG: ${{ steps.tag.outputs.tag }}
@@ -88,8 +96,14 @@ jobs:
         # runner's CPU features into the binary (the v0.2.1 tarball required
         # AVX2; the Windows exe from the same release required AVX-512 and
         # died at startup on most machines).
+        # -Dtrace=off matters just as much: the SDK's default trace mode
+        # writes a record per rendered frame and per audio callback, each one
+        # a full open/stat/write/close on an unbounded log file, inline on
+        # the message loop thread. That's what stalls the Windows message
+        # pump in issue #23; scripts/check-release-flags.sh guards that every
+        # workflow keeps it dropped.
         run: |
-          native build -Dcpu=baseline
+          native build -Dcpu=baseline -Dtrace=off
           native package --target linux
           test -x zig-out/package/subwave-desktop-linux/bin/subwave-desktop
 

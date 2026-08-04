@@ -104,8 +104,8 @@
                 <icon name="chevron-right" width="14" height="14" foreground="text_muted"/>
               </row>
             </row>
+            <use template="section-label" title="SERVICE"/>
             <if test="{update_available}">
-              <use template="section-label" title="SERVICE"/>
               <row on-press="open_release" main="space_between" cross="center" padding="10" label="Update available">
                 <row gap="10" cross="center">
                   <icon name="download" width="16" height="16" foreground="accent"/>
@@ -117,6 +117,14 @@
                 </row>
               </row>
             </if>
+            <!-- Display only. The opener seam bakes its URLs at comptime
+                 (links.zig) so nothing runtime-derived reaches a command
+                 line; a folder path is runtime-derived, so this row shows
+                 the path rather than launching a file manager. -->
+            <column gap="1" padding="10">
+              <text>Diagnostic log</text>
+              <text size="sm" foreground="text_muted" wrap="true">{log_dir_value}</text>
+            </column>
             <use template="section-label" title="SUPPORT"/>
             <row on-press="open_support" main="space_between" cross="center" padding="10" label="Buy me a coffee on Ko-fi">
               <row gap="10" cross="center">

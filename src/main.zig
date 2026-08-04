@@ -10,11 +10,17 @@ const theme = @import("theme.zig");
 const views = @import("views.zig");
 const settings = @import("settings.zig");
 const api = @import("api.zig");
+const diag = @import("diag.zig");
+const updater = @import("update.zig");
 
 pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
 
 const canvas = native_sdk.canvas;
 const geometry = native_sdk.geometry;
+
+// The SDK keys its per-app directories (logs, window state) on the bundle id,
+// so diag must resolve the log dir from the same string runWithOptions gets.
+pub const bundle_id = "dev.subwave.player";
 
 const canvas_label = "main-canvas";
 const window_width: f32 = 980;
@@ -470,6 +476,27 @@ pub fn main(init: std.process.Init) !void {
     // SUBWAVE_STATION_URL env override (wins over the persisted station).
     settings.resolvePath(&app_state.model, init.environ_map);
     settings.loadFromDisk(&app_state.model, init.io);
+
+    // Diagnostics open before anything else can fail interestingly. The SDK
+    // resolves the same directory for last-panic.txt, so everything a user
+    // needs to attach to a bug report lands in one folder.
+    var log_buffers: native_sdk.debug.LogPathBuffers = .{};
+    var sdk_log_reclaim: diag.ReclaimResult = .absent;
+    if (native_sdk.debug.resolveLogPaths(
+        &log_buffers,
+        bundle_id,
+        native_sdk.debug.envFromMap(init.environ_map),
+        init.environ_map.get("NATIVE_SDK_LOG_DIR"),
+    )) |paths| {
+        // Pre-0.8.1 installs carry a native-sdk.jsonl grown to hundreds of
+        // megabytes by the SDK's per-frame trace sink — the issue #23 stall.
+        // Shipping builds now pass -Dtrace=off, but the old file is still on
+        // disk and still gets scanned by AV on every access.
+        sdk_log_reclaim = diag.reclaimSdkLog(init.io, paths.log_file, diag.sdk_reclaim_bytes);
+        diag.open(init.io, paths.log_dir);
+    } else |_| {}
+    defer diag.close(init.io);
+
     const exe_len = std.process.executablePath(init.io, &app_state.model.self_exe_path_buf) catch 0;
     app_state.model.self_exe_path = app_state.model.self_exe_path_buf[0..exe_len];
     if (init.environ_map.get("SUBWAVE_STATION_URL")) |env_station| {
@@ -481,10 +508,31 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    diag.print("subwave {s} {s}-{s} start", .{
+        updater.version,
+        @tagName(builtin.os.tag),
+        @tagName(builtin.cpu.arch),
+    });
+    diag.print("log dir {s}", .{diag.dir()});
+    diag.print("settings {s}", .{app_state.model.settings_path});
+    // Confirms the -Dtrace=off fix is actually present in whatever binary
+    // produced this log: a user attaching subwave.log to an issue tells us
+    // immediately whether their build is still growing the old SDK log.
+    switch (sdk_log_reclaim) {
+        .absent => diag.print("sdk trace log: none found", .{}),
+        .kept => |size| diag.print("sdk trace log: {d} bytes, left in place (at or under the {d}-byte reclaim threshold)", .{ size, diag.sdk_reclaim_bytes }),
+        .reclaimed => |size| diag.print("sdk trace log: {d} bytes, reclaimed", .{size}),
+        .reclaim_failed => |size| diag.print("sdk trace log: {d} bytes, OVER the {d}-byte reclaim threshold and could not be deleted", .{ size, diag.sdk_reclaim_bytes }),
+    }
+    diag.print("phase {s} station {s}", .{
+        @tagName(app_state.model.phase),
+        if (app_state.model.base.len > 0) app_state.model.base else "(none)",
+    });
+
     try runner.runWithOptions(app_state.app(), .{
         .app_name = "subwave",
         .window_title = "SUB/WAVE",
-        .bundle_id = "dev.subwave.player",
+        .bundle_id = bundle_id,
         .icon_path = "assets/icon.png",
         .default_frame = geometry.RectF.init(0, 0, window_width, window_height),
         .restore_state = false,

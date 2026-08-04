@@ -52,6 +52,14 @@ jobs:
 
       - uses: ./.github/actions/setup-native
 
+      - name: Check release build flags
+        # ci.yml runs this too, but only on pushes/PRs. A tag pushed straight
+        # to a release without CI having run on it (or a hotfix branch that
+        # skipped CI) would otherwise reach this workflow with nothing
+        # guarding -Dtrace=off. See scripts/check-release-flags.sh and issue
+        # #23.
+        run: ./scripts/check-release-flags.sh
+
       - name: Verify tag matches app.zon version
         env:
           TAG: ${{ steps.tag.outputs.tag }}
@@ -79,8 +87,14 @@ jobs:
         # runner's CPU features (Ice Lake AVX-512) into the exe, which then
         # dies on an illegal instruction at startup on most listeners'
         # machines. That is exactly how the v0.2.1 Windows zip shipped broken.
+        # -Dtrace=off is equally load bearing. The SDK's default trace mode
+        # writes a record per rendered frame and per audio callback, and each
+        # record is a full open/stat/write/close on an unbounded log file —
+        # inline on the message loop thread. Behind Bitdefender's minifilter
+        # that stalls the pump: white client area, busy cursor, near-zero CPU.
+        # That is issue #23. scripts/check-release-flags.sh guards this line.
         run: |
-          native build -Dcpu=baseline
+          native build -Dcpu=baseline -Dtrace=off
           native package --target windows --binary zig-out/bin/subwave-desktop.exe
           # Locate the exe rather than asserting a hard-coded path: it lives in
           # bin/ inside the package root, and a bare `test -f` on the wrong
@@ -111,17 +125,37 @@ jobs:
 
       - name: Smoke-test on real Windows
         # The whole reason this job runs on windows-latest instead of
-        # cross-compiling. Rebuilds with the automation harness (the shipped zip
-        # is already sealed above, so this binary never reaches anyone) and
-        # waits for the app to report ready.
+        # cross-compiling. Rebuilds with the automation harness (the shipped
+        # zip is already sealed above, so this binary never reaches anyone).
         #
-        # UNPROVEN: GitHub's Windows runners execute in a service session, and
-        # the app opens a GPU surface. If `automate wait` turns out to be
-        # unreachable there, narrow this to a launch-and-survive check rather
-        # than deleting it.
+        # This USED to launch with no station configured, so the app parked on
+        # onboarding, reported ready, and exited — it never entered the player
+        # and could not have caught issue #23's class of bug at all.
+        # SUBWAVE_STATION_URL points it at the discard port: main() takes the
+        # override, phase becomes .player with no network needed, every fetch
+        # fails fast, and the frame loop and audio start path both run.
+        #
+        # This is NOT a reproduction of issue #23. Reproducing #23 needs a
+        # real AV minifilter, a native-sdk.jsonl grown to hundreds of
+        # megabytes, and tracing enabled; this step builds with -Dtrace=off on
+        # a clean runner with no log at all — the exact configuration that
+        # fixes the bug. What this guards is the class of failure #23
+        # belonged to: the player phase reaching the glass and continuing to
+        # service its loop. Losing that distinction is the danger — if this
+        # step is ever read as "CI covers #23", someone will feel safe
+        # dropping -Dtrace=off, and the bug ships again.
+        #
+        # NOTE: the override persists into settings.json on the machine that
+        # runs it. Fine on a throwaway runner, destructive on a dev box.
+        #
+        # UNPROVEN: GitHub's Windows runners execute in a service session. If
+        # automation turns out to be unreachable there, narrow this to a
+        # launch-and-survive check rather than deleting it.
         timeout-minutes: 6
+        env:
+          SUBWAVE_STATION_URL: http://127.0.0.1:9
         run: |
-          native build -Dautomation=true -Dcpu=baseline
+          native build -Dautomation=true -Dcpu=baseline -Dtrace=off
           app="zig-out/bin/subwave-desktop.exe"
           if [ ! -f "$app" ]; then
             echo "error: automation build produced no exe at $app" >&2
@@ -130,14 +164,58 @@ jobs:
           fi
           "./$app" &
           app_pid=$!
+          fail=0
           if native automate wait; then
             echo "app reported ready on Windows"
           else
             echo "error: app did not come up under automation" >&2
-            kill "$app_pid" 2>/dev/null || true
-            exit 1
+            fail=1
           fi
+          # Every assert below requires the app to service its automation
+          # channel, so a stalled message loop fails on timeout instead of
+          # passing. Together these two prove: the app reached the player
+          # phase, its message loop kept servicing automation requests (not
+          # stalled the way #23's was), and it presented at least one
+          # non-black frame with the frame counter advancing (not stuck after
+          # a single presented frame).
+          #
+          # gpu_nonblank is the host's own frame sampling of the surface's
+          # centre pixel: true means that pixel is not pure black, and it
+          # latches — once set it never clears (gtk_host.c: `if (sr || sg ||
+          # sb) view->gpu_nonblank = 1;`; the AppKit host's
+          # verifiedNonblankFrame is likewise set-once). A solid white client
+          # area — issue #23's actual symptom — reads gpu_nonblank=true, same
+          # as a correctly rendered frame. This assertion does NOT distinguish
+          # a white surface from a correct one; do not read it as a
+          # pixel-correctness check. gpu_frame advancing past zero is what
+          # catches a surface that presented once and then froze.
+          # No `|` alternation: native automate assert does not support it.
+          if [ "$fail" -eq 0 ]; then
+            native automate assert --timeout-ms 30000 'gpu_nonblank=true' || fail=1
+          fi
+          if [ "$fail" -eq 0 ]; then
+            native automate assert --timeout-ms 30000 'gpu_frame=[1-9]' || fail=1
+          fi
+          native automate screenshot main-canvas || true
+          # Stage the diagnostic log into the workspace for the artifact
+          # upload. It cannot be referenced as ${{ env.LOCALAPPDATA }} in a
+          # path: expression — the env context only carries what a workflow
+          # sets via env: or $GITHUB_ENV, not the runner's own process
+          # environment. Here it is an ordinary shell variable and works.
+          mkdir -p smoke-evidence
+          cp "$LOCALAPPDATA/dev.subwave.player/Logs/subwave.log" smoke-evidence/ 2>/dev/null || true
           kill "$app_pid" 2>/dev/null || true
+          exit "$fail"
+
+      - name: Upload smoke-test evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-smoke-evidence
+          path: |
+            .zig-cache/native-sdk-automation/screenshot-main-canvas.png
+            smoke-evidence/subwave.log
+          if-no-files-found: warn
 
       - name: Upload to release
         env:

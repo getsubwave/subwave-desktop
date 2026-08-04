@@ -9,17 +9,22 @@ A native desktop player (macOS + Linux + Windows) for the SUB/WAVE internet radi
 ## Commands
 
 ```bash
-native build && ./zig-out/bin/subwave-desktop   # release build + run
+native build -Dtrace=off && ./zig-out/bin/subwave-desktop   # release build + run
 native dev                                       # debug build, Zig hot-rebuild
 native test                                      # all tests: unit tests + markup build/layout contract
 native check                                     # validate markup + manifest (app.zon)
 native package --target macos --output dist      # distributable (also: --target linux)
 ```
 
+`-Dtrace=off` belongs on every `native build`: the SDK's default trace mode
+does unbounded per-frame file I/O on the message loop thread, which is what
+stalled it on Windows behind an AV minifilter (issue #23). See
+`docs/sdk-notes.md` and `scripts/check-release-flags.sh`.
+
 Headless verification (no human at the screen):
 
 ```bash
-native build -Dautomation=true
+native build -Dautomation=true -Dtrace=off
 ./zig-out/bin/subwave-desktop &
 native automate wait && native automate screenshot main-canvas
 # screenshot lands in .zig-cache/native-sdk-automation/screenshot-main-canvas.png
