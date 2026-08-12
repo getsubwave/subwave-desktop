@@ -2305,10 +2305,14 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             const parsed = json.parse(json.NowPlaying, std.heap.page_allocator, r.body) catch return;
             defer parsed.deinit();
             const np = parsed.value;
+            // Declared out here, not inside the nowPlaying block, because the
+            // track-change notification below fires only once the show name
+            // has been filled too — otherwise the toast would pair the new
+            // track with the previous show.
+            var track_changed = false;
             if (np.nowPlaying) |t| {
                 // Track identity flip = the anchor moment for the fallback
                 // per-track clock (see the track_elapsed_ms field docs).
-                var track_changed = false;
                 if (t.title) |v| {
                     if (!std.mem.eql(u8, v, model.title)) track_changed = true;
                     setStr(&model.title_buf, &model.title, v);
@@ -2384,6 +2388,20 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             }
             if (np.listeners) |l| {
                 if (l.current) |c| model.listeners = c;
+            }
+            // SDK 0.8.4: a background toast is the closest this SDK gets to a
+            // Now Playing surface while OS media controls stay absent. Every
+            // platform draws the app name as the notification header itself,
+            // so the title slot carries the track, not "SUBWAVE". Placed here,
+            // after the show fill, so all three fields describe one airing.
+            // Fire-and-forget: no result Msg would be truthful, since Focus /
+            // Do Not Disturb stay authoritative after the host accepts it.
+            if (track_changed and model.shouldNotifyTrack()) {
+                fx.showNotification(.{
+                    .title = model.title,
+                    .subtitle = model.artist,
+                    .body = model.show,
+                });
             }
             refreshTrayStatus(model);
             updateDiscordPresence(model, fx);
@@ -3017,13 +3035,19 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         // the truth immediately rather than up to one poll interval of stale
         // track. The feed poll keeps running while we are away, so this is a
         // freshness nudge, not a repair.
-        .app_activated => if (model.phase == .player) fetchFeed(model, fx),
+        .app_activated => {
+            model.app_active = true;
+            if (model.phase == .player) fetchFeed(model, fx);
+        },
         // Going away stops the FFT feed (the SDK gates it on the window being
         // visibly on screen), and that feed is also the visualizer's clock. Zero
         // the bars on the way out so returning never shows a frozen pattern from
         // whenever we were last on screen — they rise again from the first live
         // frame.
-        .app_deactivated => model.band_levels = [_]f32{0} ** spectrum.band_count,
+        .app_deactivated => {
+            model.app_active = false;
+            model.band_levels = [_]f32{0} ** spectrum.band_count;
+        },
 
         // ------------------------------------------------------- sleep timer
         .sleep_pick => |min| {

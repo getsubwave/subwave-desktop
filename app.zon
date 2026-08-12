@@ -8,7 +8,10 @@
     .version = "0.8.1",
     .icons = .{"assets/icon.png"},
     .platforms = .{ "macos", "linux", "windows" },
-    .permissions = .{ "view", "command" },
+    // "notifications": the model posts a desktop toast when the track changes
+    // while the app is in the background (model.shouldNotifyTrack). Added at
+    // the SDK 0.8.4 upgrade, which is where fx.showNotification landed.
+    .permissions = .{ "view", "command", "notifications" },
     // "tray": the app installs a status item (main.zig statusItem), which macOS
     // and Windows both honor. Declaring it is also what makes the SDK accept
     // close_policy "hide" on Windows — hiding there removes the taskbar entry,
