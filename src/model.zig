@@ -165,10 +165,14 @@ pub const DayTab = struct {
     label: []const u8,
 };
 
-/// Payload for chrome_changed (hidden-titlebar insets, macOS).
+/// Payload for chrome_changed (hidden-titlebar insets). The window-control
+/// cluster lands on the edge its platform puts it on — macOS reports the
+/// traffic lights as `leading`, Windows reports min/max/close as `trailing` —
+/// so the masthead pads BOTH and the unused edge is honestly zero.
 pub const ChromeInsets = struct {
     top: f32 = 0,
     leading: f32 = 0,
+    trailing: f32 = 0,
 };
 
 // ------------------------------------------------------------------ model
@@ -317,9 +321,11 @@ pub const Model = struct {
     sheet: Sheet = .none,
     mini_open: bool = false,
 
-    // hidden-titlebar chrome insets (macOS traffic lights)
+    // hidden-titlebar chrome insets (macOS traffic lights lead, Windows
+    // min/max/close trails)
     chrome_top: f32 = 0,
     chrome_leading: f32 = 0,
+    chrome_trailing: f32 = 0,
 
     // sleep timer (wall-clock deadline; 0 = off)
     sleep_deadline_ms: i64 = 0,
@@ -2731,6 +2737,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .chrome_changed => |c| {
             model.chrome_top = c.top;
             model.chrome_leading = c.leading;
+            model.chrome_trailing = c.trailing;
         },
 
         // ------------------------------------------------------ request slip
@@ -4355,6 +4362,24 @@ test "update check: newer tag arms the notice, older clears it, failures keep st
     update(&m, .{ .got_update = .{ .key = keys.fetch_update, .outcome = .ok, .status = 403, .body = "rate limited" } }, &fx);
     update(&m, .{ .got_update = .{ .key = keys.fetch_update, .outcome = .ok, .status = 200, .body = "not json" } }, &fx);
     try testing.expect(m.update_available());
+}
+
+test "chrome insets land on both edges, so the masthead clears controls on any platform" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    // macOS shape: traffic lights lead, nothing trails.
+    update(&m, .{ .chrome_changed = .{ .top = 52, .leading = 78, .trailing = 0 } }, &fx);
+    try testing.expectEqual(@as(f32, 52), m.chrome_top);
+    try testing.expectEqual(@as(f32, 78), m.chrome_leading);
+    try testing.expectEqual(@as(f32, 0), m.chrome_trailing);
+    // Windows shape: the min/max/close cluster trails instead. Dropping it is
+    // what put the gear button under the DWM caption buttons, whose colour the
+    // host samples from the pixel just leading of the cluster every present.
+    update(&m, .{ .chrome_changed = .{ .top = 32, .leading = 0, .trailing = 138 } }, &fx);
+    try testing.expectEqual(@as(f32, 0), m.chrome_leading);
+    try testing.expectEqual(@as(f32, 138), m.chrome_trailing);
 }
 
 test "log_dir_value reports the diagnostic log folder" {

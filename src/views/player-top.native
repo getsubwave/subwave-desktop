@@ -25,6 +25,12 @@
       <button variant="ghost" icon="settings" label="Back panel" on-press="open_panel"/>
       <tooltip anchor="below">Back panel</tooltip>
     </stack>
+    <!-- Windows: clears the DWM min/max/close cluster, which overlays this
+         band under hidden_inset_tall. Zero on macOS (lights lead instead) and
+         on standard chrome. The row's gap also keeps the pixel the host
+         samples for the caption colour on flat header instead of the gear's
+         antialiased edge. -->
+    <spacer width="{chrome_trailing}"/>
   </row>
   <separator/>
 

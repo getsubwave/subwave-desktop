@@ -163,12 +163,18 @@ fn onLifecycle(event: native_sdk.LifecycleEvent) ?Msg {
     };
 }
 
-// Hidden-titlebar chrome geometry → model (masthead pads around the traffic
-// lights). All-zero on standard chrome / fullscreen / non-macOS.
+// Hidden-titlebar chrome geometry → model (the masthead pads around the window
+// controls). BOTH horizontal edges are mapped because the cluster sits on a
+// different one per platform: macOS puts the traffic lights left, Windows puts
+// min/max/close right. Dropping `right` left the gear button underneath the DWM
+// caption buttons on Windows, which also fed the host's caption-colour sampler
+// a glyph edge instead of flat header — see CLAUDE.md's gotchas. All-zero on
+// standard chrome and in fullscreen.
 fn onChrome(chrome: native_sdk.platform.WindowChrome) ?Msg {
     return Msg{ .chrome_changed = .{
         .top = chrome.insets.top,
         .leading = chrome.insets.left,
+        .trailing = chrome.insets.right,
     } };
 }
 
