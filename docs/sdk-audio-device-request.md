@@ -1,7 +1,7 @@
 # Request: audio output-device selection in the platform seam
 
 Written 2026-08-01 against `@native-sdk/cli` 0.7.1, re-checked against 0.8.0
-and still accurate. Intended to be filed
+and 0.8.4 and still accurate. Intended to be filed
 upstream more or less as-is (see [vercel-labs/native][repo]).
 
 ## What's missing
@@ -25,8 +25,8 @@ audio_set_volume_fn: fn (context, volume) anyerror!void
 `loaded` / `position` / `completed` / `failed` / `spectrum`, so an app cannot
 even observe which device it landed on, let alone choose.
 
-This is unchanged from 0.6.0 through 0.8.0: the `*_fn` service list and the
-`PlatformFeature` enum are byte-identical across all three releases.
+This is unchanged from 0.6.0 through 0.8.4: the `*_fn` service list and the
+`PlatformFeature` enum are byte-identical across all four releases.
 
 ## Why an app wants it
 
