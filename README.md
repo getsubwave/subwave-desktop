@@ -5,6 +5,11 @@ radio station, built on the **Vercel Native SDK** — declarative `.native` mark
 + Zig logic, drawn by the SDK's own engine (no browser, no WebView). Separate
 repo from the main `subwave` monorepo; it tracks the same station HTTP API.
 
+![The SUB/WAVE desktop player on the BOOTH stop: now playing with cover art and
+track metadata on the left, the booth feed of DJ picks, voice lines and played
+tracks on the right, and the live FFT spectrum along the
+bottom.](docs/images/player-booth.png)
+
 ## Features
 
 - **Live stream** — plays the endless Icecast stream via `fx.playAudio` with
