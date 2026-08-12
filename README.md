@@ -4,6 +4,9 @@ A native desktop player for the [SUB/WAVE](https://www.getsubwave.com) internet
 radio station, built on the **Vercel Native SDK** — declarative `.native` markup
 + Zig logic, drawn by the SDK's own engine (no browser, no WebView). Separate
 repo from the main `subwave` monorepo; it tracks the same station HTTP API.
+MIT licensed; [prebuilt downloads for macOS, Windows and
+Linux](https://github.com/getsubwave/subwave-desktop/releases/latest) are on
+the releases page.
 
 ![The SUB/WAVE desktop player on the BOOTH stop: now playing with cover art and
 track metadata on the left, the booth feed of DJ picks, voice lines and played
@@ -290,13 +293,18 @@ cross-compiling never runs the target's suite.
 Linux reach: Ubuntu 24.04+, Fedora 40+, Arch. **Not** Ubuntu 22.04 or
 Debian 12 (glibc 2.35/2.36) — those build from source.
 
-Not yet done for release: a CI check on every push (these only run at release
-time), signing macOS with a real Developer ID and notarizing, auto-update (out
-of scope v1), crash reporting beyond the SDK's panic capture, and a version
-bump past `0.1.0` in `app.zon`.
+Not yet done for release: signing macOS with a real Developer ID and
+notarizing, auto-update (out of scope v1), and crash reporting beyond the
+SDK's panic capture.
 
 Design + plan live under `docs/`.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE). Use it, fork it, ship your own build of it; just
+keep the copyright notice.
+
+Two things that license does not cover, because they are not this repo's to
+give. The Native SDK the app is built on is Apache 2.0 and belongs to Vercel.
+And whatever music a station plays through this player is the station
+operator's to have licensed: the player is a client, it ships no audio.
