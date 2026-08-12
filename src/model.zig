@@ -1319,10 +1319,9 @@ pub const Model = struct {
         "upcoming_rows",      "upcoming_count",      "hist_title_store",    "hist_artist_store",
         "hist_time_store",    "history_rows",        "history_count",       "booth_time_store",
         "booth_text_store",   "booth_turns",         "booth_count",
-        // track-change notifications. "notify_track" is TEMPORARY here: the
-        // back-panel switch binds it, and this entry goes away in that same
-        // change. app_active and the predicate stay update-only forever.
-        "notify_track",       "app_active",          "shouldNotifyTrack",
+        // track-change notifications (notify_track is bound by the back
+        // panel's switch; the rest is update-only state)
+        "app_active",         "shouldNotifyTrack",
         // discord rich presence (bound via getters, not the raw fields)
         "discord_connected",  "discord_retry_count",
         "discord_spawn_key",  "discord_last_payload", "discord_last_payload_buf",
@@ -1435,6 +1434,7 @@ pub const Msg = union(enum) {
     follow_station,
     pick_theme: []const u8, // payload = theme id
     pick_format: []const u8, // payload = format id ("mp3" | "aac" | "opus" | "flac")
+    toggle_notify,
     toggle_discord,
     discord_id_edit: canvas.TextInputEvent,
     submit_discord_id,
@@ -3242,6 +3242,12 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (model.transport == .playing and model.effectiveFormat() != before)
                 startStream(model, fx);
             model.sheet = .panel; // back to the panel with the new value showing
+        },
+        // Nothing to start or stop: the next track flip consults
+        // shouldNotifyTrack and that is the whole feature.
+        .toggle_notify => {
+            model.notify_track = !model.notify_track;
+            saveSettings(model, fx);
         },
         .toggle_discord => {
             model.discord_enabled = !model.discord_enabled;

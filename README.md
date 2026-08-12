@@ -52,6 +52,13 @@ repo from the main `subwave` monorepo; it tracks the same station HTTP API.
   main window — playback and the tray stay alive — via `app.zon`'s
   `close_policy`; on Linux it quits, because there is no tray to bring a hidden
   window back (see `docs/sdk-notes.md`).
+- **Track notifications** — opt-in desktop toast when the song changes, via
+  SDK 0.8.4's `fx.showNotification` (macOS, Windows and Linux). Background-only
+  and on-air-only: no toast while the player is the app you are looking at,
+  while tuned out, or on the first track after launch. Off by default; the
+  switch is in the back panel under NOTIFICATIONS. This is the nearest thing
+  to a Now Playing surface the SDK offers — there is still no MPRIS /
+  MPNowPlayingInfoCenter / SMTC integration.
 - **Keyboard transport** — space play/pause, ↑/↓ volume, M mute, L like the
   current track, Esc back to LIVE, Cmd/Ctrl+K stations, Cmd/Ctrl+Shift+M mini
   player, 1–5 dial stops (app-level fallback; never steals typing from the
@@ -63,8 +70,8 @@ repo from the main `subwave` monorepo; it tracks the same station HTTP API.
   stream URL as `?auth=` for Icecast listener auth. Switching stations forgets
   it. Mirrors the web player's StationGate.
 - **Settings persistence** — volume / theme override / stream format / station
-  (+ name) / recents survive restarts (`settings.json` in the OS per-app
-  config dir), saved debounced + serialized via `fx.writeFile`.
+  (+ name) / recents / notification opt-in survive restarts (`settings.json` in
+  the OS per-app config dir), saved debounced + serialized via `fx.writeFile`.
 - **Discord Rich Presence** — opt-in; shows the current track/artist (title
   clickable through to the station, cover art included) on your Discord
   profile while the SDK's `fx.spawn` drives a small self-relaunched helper
@@ -99,7 +106,7 @@ ones appear.
 
 ## Build & run
 
-Requires **Zig 0.16.0** and `@native-sdk/cli` **0.8.0+**
+Requires **Zig 0.16.0** and `@native-sdk/cli` **0.8.4+**
 (`npm i -g @native-sdk/cli`) — **plus one local SDK patch**. After every SDK
 install/upgrade:
 
@@ -188,7 +195,7 @@ serve are listed saying exactly that rather than quietly absent. The same row
 is also in the back panel under SIGNAL.
 
 **Playing through a different output device.** Not offered in-app: the SDK's
-audio surface (re-checked at 0.8.0) is load/play/pause/stop/seek/volume, with
+audio surface (re-checked at 0.8.4) is load/play/pause/stop/seek/volume, with
 no device enumeration or output-device property on any host, so there is
 nothing honest to build a picker on. Route it at the OS instead —
 `pavucontrol` or any PipeWire patchbay on Linux, Settings → System → Sound →
@@ -196,14 +203,17 @@ Volume mixer on Windows. macOS has no per-app routing without a third-party
 virtual audio driver. The API request is written up in
 [`docs/sdk-audio-device-request.md`](docs/sdk-audio-device-request.md).
 
-**OS media integration.** The SDK (re-checked at 0.8.0) has no system
+**OS media integration.** The SDK (re-checked at 0.8.4) has no system
 now-playing or media-key surface — no `MPNowPlayingInfoCenter`/
 `MPRemoteCommandCenter` on macOS, no MPRIS on Linux — so hardware play/pause
 keys and the OS Now Playing widget can't be wired up yet (SDK feature request).
 What IS wired up: the menu-bar status item (macOS and Windows; the GTK host has
 no tray, so Linux gets neither the extra nor close-to-hide), the in-window keyboard
-transport, and per-track fetch of the station's own metadata (the app polls
-`/api/now-playing` rather than relying on ICY in-stream metadata).
+transport, the opt-in background track notification (0.8.4's
+`fx.showNotification` — the closest thing to a Now Playing surface available,
+though it only pushes, so nothing can control playback back), and per-track
+fetch of the station's own metadata (the app polls `/api/now-playing` rather
+than relying on ICY in-stream metadata).
 
 ## Notes & gotchas
 
