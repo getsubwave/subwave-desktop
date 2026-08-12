@@ -291,3 +291,7 @@ of scope v1), crash reporting beyond the SDK's panic capture, and a version
 bump past `0.1.0` in `app.zon`.
 
 Design + plan live under `docs/`.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
