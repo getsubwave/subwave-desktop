@@ -261,6 +261,8 @@ pub const Settings = struct {
     // Listener-entered Discord application ID (public identifier, not a
     // secret); ""/absent = use the build-time discord.zon default, if any.
     discordClientId: ?[]const u8 = null,
+    // Desktop track-change notifications; absent = off (opt-in).
+    notifyTrack: ?bool = null,
 };
 
 // Parse `body` into T, tolerating unknown/extra fields. Caller owns the result
