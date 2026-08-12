@@ -93,6 +93,14 @@
                 <icon name="chevron-right" width="14" height="14" foreground="text_muted"/>
               </row>
             </row>
+            <use template="section-label" title="NOTIFICATIONS"/>
+            <row main="space_between" cross="center" padding="10" label="Track notifications">
+              <row gap="10" cross="center">
+                <icon name="app:bell" width="16" height="16" foreground="text_muted"/>
+                <text>Track notifications</text>
+              </row>
+              <switch selected="{notify_track}" on-toggle="toggle_notify" label="Track notifications"/>
+            </row>
             <use template="section-label" title="INTEGRATIONS"/>
             <row on-press="open_discord" main="space_between" cross="center" padding="10" label="Discord Rich Presence">
               <row gap="10" cross="center">

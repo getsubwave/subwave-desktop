@@ -8,10 +8,12 @@ native test   # verify
 ```
 
 The unified diff lives at `patches/native-sdk-local.patch`, generated against
-the pristine 0.7.1 npm tarball and re-verified against 0.8.0, whose
-`gtk_host.c` is byte-identical (so the hunks land with zero offset and the file
-needed no regeneration). Symptom of a lost patch: pixelated text on a
-fractional-scale Linux display.
+the pristine 0.7.1 npm tarball and re-verified against 0.8.0 (whose
+`gtk_host.c` is byte-identical) and 0.8.4 (whose `gtk_host.c` changed, but
+entirely outside the patched hunks — regenerating produced the same file byte
+for byte). In every case the hunks land with zero offset and the patch itself
+needed no edit; only `patch_sdk_version` below moves. Symptom of a lost patch:
+pixelated text on a fractional-scale Linux display.
 
 ## Two version pins, and they must agree
 
@@ -66,6 +68,69 @@ workarounds they replaced are still visible in the git log:
 
 [native#148]: https://github.com/vercel-labs/native/issues/148
 [native#149]: https://github.com/vercel-labs/native/issues/149
+
+## What 0.8.4 changed (upgraded 2026-08-12)
+
+Four releases (0.8.1–0.8.4, 5–10 August). Additive across every surface this
+app touches, so the upgrade forced no app edits — 104/104 tests passed before
+and after, with nothing under `src/` changed. Unlike 0.8.0 it carries one
+capability worth building on.
+
+| Surface | 0.8.0 → 0.8.4 |
+| --- | --- |
+| `Effects` `pub fn` list | additions only: `showNotification`, the audio-capture verbs, three `feed*` test helpers |
+| `PlatformFeature` enum, `*_fn` platform services | identical |
+| `src/platform/linux/gtk_host.c` | changed (~80 lines), but **not in the patched regions** — see below |
+| `app.zon` manifest | one new permission, `system_audio` (audio capture; unused here) |
+| Markup vocabulary | additions only: `images` on `<markdown>`, `submit-on-enter`, `max_width`, `on_drag` |
+| Built-in icons | `mic.svg` added |
+| Automation protocol | `0x096c8aa4730c11ec`, unchanged — existing `native automate` calls keep working |
+| `minimum_zig_version` | 0.16.0, unchanged |
+| Trace default | still `.events` — `-Dtrace=off` stays mandatory |
+
+**`fx.showNotification` is the useful part**, and the app now uses it for
+track-change toasts (`Model.shouldNotifyTrack` in `src/model.zig`). It is
+fire-and-forget by design: platform acceptance does not mean the OS displayed
+it, since Focus / Do Not Disturb and user notification settings stay
+authoritative, so no success `Msg` would be truthful. Bounds are title 1–128
+bytes, subtitle ≤128, body ≤1024; invalid fields, a missing service and a host
+refusal all fail closed. Wired on all three platforms
+(`show_notification_fn` non-null in the macOS, Windows and Linux hosts; Linux
+goes through `native_sdk_gtk_show_notification` and refuses when the web engine
+is not `.system`, which ours is).
+
+It is **inert and unrecorded under fake execution and session replay** — there
+is no `notificationState()` to assert on, the way `windowActionState()` exists
+for window verbs. That is why the app's decision logic lives in the pure
+`Model.shouldNotifyTrack()` predicate, which the tests cover gate by gate,
+and the `fx.showNotification` call itself is one untested line.
+
+**Audio capture also landed** (`startAudioCapture` / `stopAudioCapture` /
+`feedAudioCapture`, the `system_audio` permission, the `mic` icon). That is
+microphone input; a radio player has no use for it.
+
+**The HiDPI patch survived untouched.** `gtk_host.c` moved by ~80 lines, but
+every change is outside the eight patched hunks: regenerating the patch against
+the pristine 0.8.4 tarball produced a **byte-identical file** (same md5, same 8
+hunks, zero offset), so only `patch_sdk_version` needed bumping. All seven
+scale-reporting sites still read an integer API in the stock tree — four
+`gtk_widget_get_scale_factor()` and three `gdk_surface_get_scale_factor()` (the
+*integer* GDK entry point, not the fractional `gdk_surface_get_scale()`), and
+zero uses of the fractional call. [vercel-labs/native#156] is still open.
+Verified after applying: `gpu_scale=1.6666666`, not `2`.
+
+[vercel-labs/native#156]: https://github.com/vercel-labs/native/issues/156
+
+The README repositions TypeScript cores as the default scaffold (`native init`
+takes `--template ts-core|zig-core`, defaulting to TS), with Zig "a first-class
+app-core alternative by explicit choice and the language the toolkit itself is
+built in". That is scaffolding and docs, not a runtime change; a Zig app that
+already works is unaffected.
+
+Still **no** OS media-controls surface (no MPRIS, MPNowPlayingInfoCenter or
+SystemMediaTransportControls anywhere in the 0.8.4 tree) and still **no** audio
+output-device API. Grepped for, not assumed. `-Dtrace=off` re-confirmed
+mandatory: `build.zig` still defaults `-Dtrace` to `.events`.
 
 ## What 0.8.0 changed (upgraded 2026-08-04)
 
@@ -125,7 +190,7 @@ Nothing removed, nothing renamed. Still **no** audio output-device API and
 still no OS media-controls surface — no MPRIS, MPNowPlayingInfoCenter or
 SystemMediaTransportControls anywhere in the tree.
 
-## No audio output-device selection (checked 0.6.0, 0.7.1 and 0.8.0)
+## No audio output-device selection (checked 0.6.0, 0.7.1, 0.8.0 and 0.8.4)
 
 The platform seam's whole audio surface is `audio_load` / `audio_load_url` /
 `play` / `pause` / `stop` / `seek` / `set_volume`. There is no device
@@ -200,11 +265,12 @@ surface at 1.6667 yields an 1889px buffer for 1888px of screen) and maps buffer
 pixels 1:1 to device pixels when it matches, letting the surplus edge column
 fall outside the clip.
 
-0.6.0, 0.7.1 and 0.8.0 all still read the integer API at every one of those
-sites (0.6.0 added `gdk_surface_get_scale_factor` calls, which is the *integer*
-GDK entry point, not the fractional `gdk_surface_get_scale`; 0.7.1 changed none
-of them, and 0.8.0 does not touch `gtk_host.c` at all), so the patch still
-applies — with zero fuzz. **Re-apply after every
+0.6.0, 0.7.1, 0.8.0 and 0.8.4 all still read the integer API at every one of
+those sites (0.6.0 added `gdk_surface_get_scale_factor` calls, which is the
+*integer* GDK entry point, not the fractional `gdk_surface_get_scale`; 0.7.1
+changed none of them, 0.8.0 does not touch `gtk_host.c` at all, and 0.8.4
+changes it only outside the patched hunks), so the patch still applies — with
+zero fuzz. **Re-apply after every
 `npm i -g @native-sdk/cli` upgrade**, or drop it once
 [vercel-labs/native#156](https://github.com/vercel-labs/native/issues/156)
 ships — still open as of 0.8.0. Integer scales (100%/200%) are unaffected, which is why it can look fine
@@ -233,5 +299,7 @@ Re-check this at every SDK upgrade: if `FileTraceSink` starts holding its
 handle open, or per-frame events leave the default level, the flag can go.
 The upstream request is `docs/sdk-trace-log-request.md`. Re-checked at 0.8.0:
 `src/primitives/trace/` is byte-identical to 0.7.1 and `build.zig` still
-defaults `-Dtrace` to `.events`, so the flag stays mandatory.
+defaults `-Dtrace` to `.events`, so the flag stays mandatory. Re-checked again
+at 0.8.4: `build.zig:51` still reads
+`b.option(TraceOption, "trace", ...) orelse .events`. Unchanged, flag stays.
 

@@ -35,6 +35,7 @@ pub const AppUi = canvas.Ui(Msg);
 // Registered at boot; markup reaches them as icon="app:disc" / "app:power".
 // `pub const app_icons` is the model-contract mirror `native check` verifies
 // markup names against.
+const bell_icon = canvas.svg_icon.parseComptime(@embedFile("icons/bell.svg"));
 const disc_icon = canvas.svg_icon.parseComptime(@embedFile("icons/disc.svg"));
 const heart_icon = canvas.svg_icon.parseComptime(@embedFile("icons/heart.svg"));
 const heart_fill_icon = canvas.svg_icon.parseComptime(@embedFile("icons/heart-fill.svg"));
@@ -43,6 +44,7 @@ const power_icon = canvas.svg_icon.parseComptime(@embedFile("icons/power.svg"));
 const radio_icon = canvas.svg_icon.parseComptime(@embedFile("icons/radio.svg"));
 const spark_icon = canvas.svg_icon.parseComptime(@embedFile("icons/spark.svg"));
 pub const app_icons = [_]canvas.icons.Entry{
+    .{ .name = "bell", .icon = &bell_icon },
     .{ .name = "disc", .icon = &disc_icon },
     .{ .name = "heart", .icon = &heart_icon },
     .{ .name = "heart-fill", .icon = &heart_fill_icon },

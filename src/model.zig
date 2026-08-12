@@ -370,6 +370,15 @@ pub const Model = struct {
     save_inflight: bool = false,
     save_dirty: bool = false,
 
+    // Desktop track-change toasts (SDK 0.8.4 fx.showNotification). Opt-in:
+    // an existing settings.json carries no notifyTrack key, so an update
+    // never starts interrupting a listener who never asked for it.
+    notify_track: bool = false,
+    // App foreground state, from the app_activated / app_deactivated
+    // lifecycle Msgs. Only the notification gate reads it — a toast that
+    // repeats what the on-screen stage already says is noise.
+    app_active: bool = true,
+
     // Discord Rich Presence (opt-in; see discord_rpc.zig / discord.zon).
     discord_enabled: bool = false,
     // Listener-entered Discord application ID (Discord sheet, persisted in
@@ -534,6 +543,14 @@ pub const Model = struct {
 
     pub fn live_now(self: *const Model) bool {
         return self.transport == .playing and !self.stream_failed and !self.buffering and self.stream_online;
+    }
+    /// Background-only, on-air-only, and never the first fill: the whole
+    /// track-toast decision. Kept pure because `fx.showNotification` is
+    /// inert and unrecorded under fake execution — there is no
+    /// `notificationState()` to assert on — so this predicate is the only
+    /// part of the feature a test can actually see.
+    pub fn shouldNotifyTrack(self: *const Model) bool {
+        return self.notify_track and !self.app_active and self.live_now() and self.has_track();
     }
     /// Between tune-in and audio: the power button's spinner state.
     pub fn connecting(self: *const Model) bool {
@@ -1302,6 +1319,9 @@ pub const Model = struct {
         "upcoming_rows",      "upcoming_count",      "hist_title_store",    "hist_artist_store",
         "hist_time_store",    "history_rows",        "history_count",       "booth_time_store",
         "booth_text_store",   "booth_turns",         "booth_count",
+        // track-change notifications (notify_track is bound by the back
+        // panel's switch; the rest is update-only state)
+        "app_active",         "shouldNotifyTrack",
         // discord rich presence (bound via getters, not the raw fields)
         "discord_connected",  "discord_retry_count",
         "discord_spawn_key",  "discord_last_payload", "discord_last_payload_buf",
@@ -1414,6 +1434,7 @@ pub const Msg = union(enum) {
     follow_station,
     pick_theme: []const u8, // payload = theme id
     pick_format: []const u8, // payload = format id ("mp3" | "aac" | "opus" | "flac")
+    toggle_notify,
     toggle_discord,
     discord_id_edit: canvas.TextInputEvent,
     submit_discord_id,
@@ -1702,6 +1723,7 @@ pub fn applySettingsJson(model: *Model, bytes: []const u8) void {
             model.recents_count += 1;
         }
     }
+    if (s.notifyTrack) |v| model.notify_track = v;
     if (s.discordEnabled) |v| model.discord_enabled = v;
     if (s.discordClientId) |id| {
         // Same gate as the sheet's input — a hand-edited invalid ID is
@@ -1726,7 +1748,7 @@ fn saveSettings(model: *Model, fx: *Effects) void {
     var pw_esc: [256]u8 = undefined;
     // discord_client_id needs no escape pass: it only ever holds an
     // isValidClientId-vetted string (pure ASCII digits).
-    w.print("{{\"volume\":{d:.2},\"themeOverride\":\"{s}\",\"streamFormat\":\"{s}\",\"station\":\"{s}\",\"stationName\":\"{s}\",\"stationPassword\":\"{s}\",\"discordEnabled\":{s},\"discordClientId\":\"{s}\",\"recents\":[", .{
+    w.print("{{\"volume\":{d:.2},\"themeOverride\":\"{s}\",\"streamFormat\":\"{s}\",\"station\":\"{s}\",\"stationName\":\"{s}\",\"stationPassword\":\"{s}\",\"discordEnabled\":{s},\"discordClientId\":\"{s}\",\"notifyTrack\":{s},\"recents\":[", .{
         model.volume,
         jsonEscape(esc[0..64], model.theme_override),
         model.format_pref.id(),
@@ -1735,6 +1757,7 @@ fn saveSettings(model: *Model, fx: *Effects) void {
         jsonEscape(&pw_esc, model.station_pw),
         if (model.discord_enabled) "true" else "false",
         model.discord_client_id,
+        if (model.notify_track) "true" else "false",
     }) catch return;
     for (model.recents[0..model.recents_count], 0..) |r, i| {
         if (i > 0) w.print(",", .{}) catch return;
@@ -2282,10 +2305,14 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             const parsed = json.parse(json.NowPlaying, std.heap.page_allocator, r.body) catch return;
             defer parsed.deinit();
             const np = parsed.value;
+            // Declared out here, not inside the nowPlaying block, because the
+            // track-change notification below fires only once the show name
+            // has been filled too — otherwise the toast would pair the new
+            // track with the previous show.
+            var track_changed = false;
             if (np.nowPlaying) |t| {
                 // Track identity flip = the anchor moment for the fallback
                 // per-track clock (see the track_elapsed_ms field docs).
-                var track_changed = false;
                 if (t.title) |v| {
                     if (!std.mem.eql(u8, v, model.title)) track_changed = true;
                     setStr(&model.title_buf, &model.title, v);
@@ -2361,6 +2388,20 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             }
             if (np.listeners) |l| {
                 if (l.current) |c| model.listeners = c;
+            }
+            // SDK 0.8.4: a background toast is the closest this SDK gets to a
+            // Now Playing surface while OS media controls stay absent. Every
+            // platform draws the app name as the notification header itself,
+            // so the title slot carries the track, not "SUBWAVE". Placed here,
+            // after the show fill, so all three fields describe one airing.
+            // Fire-and-forget: no result Msg would be truthful, since Focus /
+            // Do Not Disturb stay authoritative after the host accepts it.
+            if (track_changed and model.shouldNotifyTrack()) {
+                fx.showNotification(.{
+                    .title = model.title,
+                    .subtitle = model.artist,
+                    .body = model.show,
+                });
             }
             refreshTrayStatus(model);
             updateDiscordPresence(model, fx);
@@ -2994,13 +3035,19 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         // the truth immediately rather than up to one poll interval of stale
         // track. The feed poll keeps running while we are away, so this is a
         // freshness nudge, not a repair.
-        .app_activated => if (model.phase == .player) fetchFeed(model, fx),
+        .app_activated => {
+            model.app_active = true;
+            if (model.phase == .player) fetchFeed(model, fx);
+        },
         // Going away stops the FFT feed (the SDK gates it on the window being
         // visibly on screen), and that feed is also the visualizer's clock. Zero
         // the bars on the way out so returning never shows a frozen pattern from
         // whenever we were last on screen — they rise again from the first live
         // frame.
-        .app_deactivated => model.band_levels = [_]f32{0} ** spectrum.band_count,
+        .app_deactivated => {
+            model.app_active = false;
+            model.band_levels = [_]f32{0} ** spectrum.band_count;
+        },
 
         // ------------------------------------------------------- sleep timer
         .sleep_pick => |min| {
@@ -3195,6 +3242,12 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (model.transport == .playing and model.effectiveFormat() != before)
                 startStream(model, fx);
             model.sheet = .panel; // back to the panel with the new value showing
+        },
+        // Nothing to start or stop: the next track flip consults
+        // shouldNotifyTrack and that is the whole feature.
+        .toggle_notify => {
+            model.notify_track = !model.notify_track;
+            saveSettings(model, fx);
         },
         .toggle_discord => {
             model.discord_enabled = !model.discord_enabled;
@@ -3958,6 +4011,66 @@ test "private station: switching stations forgets the password" {
 // validated client ID (the discord.zon build default is "" in this repo).
 fn testSetDiscordId(m: *Model) void {
     setStr(&m.discord_client_id_buf, &m.discord_client_id, "123456789012345678");
+}
+
+test "shouldNotifyTrack gates on opt-in, background, on-air and a real track" {
+    var m: Model = .{};
+    setStr(&m.title_buf, &m.title, "Night Drive");
+    m.transport = .playing;
+    m.stream_online = true;
+    m.notify_track = true;
+    m.app_active = false;
+
+    // All four gates open.
+    try testing.expect(m.shouldNotifyTrack());
+
+    // Opt-out wins over everything else.
+    m.notify_track = false;
+    try testing.expect(!m.shouldNotifyTrack());
+    m.notify_track = true;
+
+    // Foreground: the LIVE stage already names the track, so a toast would
+    // just repeat what is on screen.
+    m.app_active = true;
+    try testing.expect(!m.shouldNotifyTrack());
+    m.app_active = false;
+
+    // Tuned out: this is a player, not a station ticker.
+    m.transport = .stopped;
+    try testing.expect(!m.shouldNotifyTrack());
+    m.transport = .playing;
+
+    // Mid-buffer and mid-failure are not "on air".
+    m.buffering = true;
+    try testing.expect(!m.shouldNotifyTrack());
+    m.buffering = false;
+    m.stream_failed = true;
+    try testing.expect(!m.shouldNotifyTrack());
+    m.stream_failed = false;
+
+    // Stream offline: nothing is airing to announce.
+    m.stream_online = false;
+    try testing.expect(!m.shouldNotifyTrack());
+    m.stream_online = true;
+
+    // The first fill: got_np sets track_changed when the title flips from ""
+    // on the very first fetch, but that is a first fill at launch, not a
+    // track change, and must not fire a toast.
+    m.title = "";
+    try testing.expect(!m.shouldNotifyTrack());
+}
+
+test "notifyTrack round-trips through applySettingsJson" {
+    var m: Model = .{};
+    // Off by default: an existing settings.json has no key, so an update
+    // never starts interrupting a listener who did not ask for it.
+    try testing.expect(!m.notify_track);
+
+    applySettingsJson(&m, "{\"notifyTrack\":true}");
+    try testing.expect(m.notify_track);
+
+    applySettingsJson(&m, "{\"notifyTrack\":false}");
+    try testing.expect(!m.notify_track);
 }
 
 test "discord settings round-trip through applySettingsJson" {
