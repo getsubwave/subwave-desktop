@@ -8,7 +8,7 @@
     <!-- Record sleeve: field card around SQUARE art. Pressing it opens the
          timeline. `<image>` draws nothing for id 0, so the initials disc is
          the explicit fallback while the cover loads (or after it fails). -->
-    <panel padding="12" background="surface" border-color="border" radius="lg"
+    <panel padding="5" background="surface" border-color="border" radius="sm"
            on-press="open_timeline" label="Open timeline">
       <!-- Metadata, not flow: right-click on the sleeve. The copy item drops
            out entirely while nothing is playing, which is how a menu declares

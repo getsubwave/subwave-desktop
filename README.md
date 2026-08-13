@@ -50,8 +50,9 @@ bottom.](docs/images/player-booth.png)
   optional signed name + status polling).
 - **Signal + sleep** — timed `/api/health` probe → latency readout while
   playing; sleep timer (15–90 min) from the tray or the back panel.
-- **Mini player** — a compact secondary window (420×168) toggled from the tray
-  or Cmd/Ctrl+Shift+M. One player surface at a time: opening it minimizes the
+- **Mini player** — a compact secondary window (420×168) toggled from the
+  masthead button, the tray, or Cmd/Ctrl+Shift+M. One player surface at a
+  time: opening it minimizes the
   full player, and EXPAND — or closing the mini window — brings the full
   player back.
 - **Menu-bar extra** — macOS `NSStatusItem` and the Windows tray (the GTK host

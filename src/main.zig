@@ -40,6 +40,7 @@ const disc_icon = canvas.svg_icon.parseComptime(@embedFile("icons/disc.svg"));
 const heart_icon = canvas.svg_icon.parseComptime(@embedFile("icons/heart.svg"));
 const heart_fill_icon = canvas.svg_icon.parseComptime(@embedFile("icons/heart-fill.svg"));
 const logo_icon = canvas.svg_icon.parseComptime(@embedFile("icons/logo.svg"));
+const mini_icon = canvas.svg_icon.parseComptime(@embedFile("icons/mini.svg"));
 const power_icon = canvas.svg_icon.parseComptime(@embedFile("icons/power.svg"));
 const radio_icon = canvas.svg_icon.parseComptime(@embedFile("icons/radio.svg"));
 const spark_icon = canvas.svg_icon.parseComptime(@embedFile("icons/spark.svg"));
@@ -49,6 +50,7 @@ pub const app_icons = [_]canvas.icons.Entry{
     .{ .name = "heart", .icon = &heart_icon },
     .{ .name = "heart-fill", .icon = &heart_fill_icon },
     .{ .name = "logo", .icon = &logo_icon },
+    .{ .name = "mini", .icon = &mini_icon },
     .{ .name = "power", .icon = &power_icon },
     .{ .name = "radio", .icon = &radio_icon },
     .{ .name = "spark", .icon = &spark_icon },
@@ -59,8 +61,9 @@ pub const app_icons = [_]canvas.icons.Entry{
 // (typing in the request/station fields is never stolen). Space = tune toggle,
 // arrows = volume, M = mute, cmd/ctrl+K = stations, cmd/ctrl+shift+M = mini
 // player (plain cmd+M is the macOS system minimize), Esc = back to LIVE,
-// 1–5 = dial stops. The shortcut is also the only way into mini mode on
-// Linux, where the GTK host has no tray to offer the menu item.
+// 1–5 = dial stops. The masthead's mini button and the tray item reach mini
+// mode too; on Linux the button and the shortcut are the only routes, since
+// the GTK host has no tray to offer the menu item.
 fn onKey(keyboard: canvas.WidgetKeyboardEvent) ?Msg {
     if (keyboard.phase != .key_down) return null;
     const mods = keyboard.modifiers;

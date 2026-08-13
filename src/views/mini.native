@@ -12,15 +12,41 @@
     </if>
     <spacer grow="1"/>
     <button variant="ghost" size="sm" icon="external-link" label="Open full player" on-press="expand_mini">EXPAND</button>
+    <!-- Both edges, same rule as the masthead: the window-control cluster
+         leads on macOS and trails on Windows, so EXPAND needs clearance on the
+         trailing side too. Zero on macOS, so this costs nothing there. -->
+    <spacer width="{chrome_trailing}"/>
   </row>
   <row gap="12" cross="center" padding="10" grow="1">
-    <card padding="6" label="Cover art sleeve">
-      <avatar image="{cover_id}" width="46" height="46" label="Cover art">{initials}</avatar>
-    </card>
-    <column gap="2" grow="1">
-      <text><span weight="bold">{title}</span></text>
-      <text size="sm" foreground="text_muted"><span foreground="text">{artist}</span><span foreground="text_muted">{album_line}</span></text>
-      <text size="sm" foreground="text_muted">{np_head}</text>
+    <!-- `card` stretches to fill the row, which crushed the text column to a
+         single glyph wide; a `panel` hugs its explicitly-sized child the way
+         the LIVE stage's sleeve does. -->
+    <panel padding="3" background="surface" border-color="border" radius="sm" label="Cover art sleeve">
+      <!-- `<image>`, not `<avatar>`: avatar renders a disc, and a record sleeve
+           is square. Same shape as the LIVE stage — `<image>` draws nothing for
+           id 0, so the initials tile is the explicit fallback while the cover
+           loads or after it fails. -->
+      <if test="{has_cover}">
+        <image image="{cover_id}" width="46" height="46" label="Cover art"/>
+      </if>
+      <else>
+        <panel width="46" height="46" background="surface_subtle">
+          <column grow="1" main="center" cross="center">
+            <text size="sm" foreground="text_muted">{initials}</text>
+          </column>
+        </panel>
+      </else>
+    </panel>
+    <!-- min-width 0 lets the metadata elide instead of forcing the row wider
+         than the fixed 420pt window. -->
+    <column gap="2" grow="1" min-width="0" main="center">
+      <!-- No <span> on these two: a span paragraph always word-wraps and
+           reserves the wrapped height, which is what overflowed the row. The
+           window is fixed at 168pt, so single-line elision beats the bold
+           weight and the ink/muted split — size carries the hierarchy. -->
+      <text wrap="false" overflow="ellipsis">{title}</text>
+      <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{artist}{album_line}</text>
+      <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{np_head}</text>
     </column>
     <if test="{like_available}">
       <stack>
