@@ -9,11 +9,13 @@ native test   # verify
 
 The unified diff lives at `patches/native-sdk-local.patch`, generated against
 the pristine 0.7.1 npm tarball and re-verified against 0.8.0 (whose
-`gtk_host.c` is byte-identical) and 0.8.4 (whose `gtk_host.c` changed, but
-entirely outside the patched hunks — regenerating produced the same file byte
-for byte). In every case the hunks land with zero offset and the patch itself
-needed no edit; only `patch_sdk_version` below moves. Symptom of a lost patch:
-pixelated text on a fractional-scale Linux display.
+`gtk_host.c` is byte-identical), 0.8.4 and 0.9.0 (whose `gtk_host.c` both
+changed, but entirely outside the patched hunks). Through 0.8.4 the patch body
+never moved at all; 0.9.0 is the first release where the file grew enough
+*before* the patched regions that the hunk **headers** had to be re-cut — the
+eight `@@` line numbers shift, every `+`/`-` line is unchanged. The hunks still
+land with zero fuzz. Symptom of a lost patch: pixelated text on a
+fractional-scale Linux display.
 
 ## Two version pins, and they must agree
 
@@ -68,6 +70,53 @@ workarounds they replaced are still visible in the git log:
 
 [native#148]: https://github.com/vercel-labs/native/issues/148
 [native#149]: https://github.com/vercel-labs/native/issues/149
+
+## What 0.9.0 changed (upgraded 2026-08-13)
+
+A big release, and **additive everywhere this app touches** — no app edits, no
+markup edits, the same 106 passed / 1 skipped before and after with nothing
+under `src/` changed. The bulk of it is a new persistence stack plus a much wider embed/C
+API and mobile hosts, none of which a desktop Zig core has to adopt.
+
+| Surface | 0.8.4 → 0.9.0 |
+| --- | --- |
+| `Effects` `pub fn` list | additions only (~35): `persist`, the `store*` KV verbs, the `db*` relational verbs, `credentials*`, `bindSystemServices`, **`hideWindow`**, **`setDockPresence`** |
+| Platform `*_fn` services | additions only: `hide_window_fn`, `set_dock_presence_fn`, `set_launch_at_login_fn` / `launch_at_login_status_fn`, `update_tray_presentation_fn`, `format_local_time_fn`, `note_blocking_call_abandoned_fn` |
+| `PlatformFeature` enum | identical |
+| `app.zon` manifest permissions | identical — nothing new to declare |
+| Markup vocabulary | identical: no new elements, no new attributes |
+| Built-in icons | identical (still nothing for picture-in-picture — hence `src/icons/mini.svg`) |
+| Automation protocol | `0x096c8aa4730c11ec`, unchanged — existing `native automate` calls keep working |
+| `minimum_zig_version` | 0.16.0, unchanged |
+| Trace default | still `.events` — `-Dtrace=off` stays mandatory |
+| `src/platform/linux/gtk_host.c` | changed (13 hunks), but **not in the patched regions** — see below |
+
+**`fx.hideWindow` is the one worth acting on later.** `model.zig`'s
+`toggle_mini` currently calls `fx.minimizeWindow("main")` because, as the
+comment there says, minimize was "the only reversible app-driven get-it-off-the-glass
+verb the SDK has" — `fx.closeWindow` is a real close and a closed shell window
+cannot come back. 0.9.0 removes that constraint, so mini mode could hide the
+full player outright instead of animating it into the Dock/taskbar. That is a
+behavior change, not an upgrade step; it is deliberately **not** part of this
+bump. Same for `setDockPresence` (an LSUIElement-style hide) and
+`setLaunchAtLogin`, both plausible features this app does not have yet.
+
+The persistence stack (`persist` / `store*` / `db*` / `credentials*`) could in
+principle replace `settings.zig`'s hand-rolled `settings.json`. It should not,
+yet: the current path is debounced, serialized, and covered by tests, and
+swapping it buys nothing a radio player needs.
+
+**The HiDPI patch survived again, with one wrinkle.** All seven scale sites in
+the stock 0.9.0 tree still read an integer API — four `gtk_widget_get_scale_factor()`
+and three `gdk_surface_get_scale_factor()`, zero uses of the fractional
+`gdk_surface_get_scale()` — so [vercel-labs/native#156] remains open and the
+patch remains necessary. `gtk_host.c` changed in 13 hunks (0.9.0 adds
+`native_sdk_gtk_hide_window`, a libsecret-backed credentials store, and a
+deferred-show path), none overlapping the eight patched regions: a
+`patch --fuzz=0 --dry-run` against the pristine tarball still applies. Unlike
+0.8.4, though, regenerating did **not** reproduce a byte-identical file — the
+additions at line 358 push everything down, so the eight `@@` headers were
+re-cut against 0.9.0. Patch body unchanged line for line.
 
 ## What 0.8.4 changed (upgraded 2026-08-12)
 
@@ -265,15 +314,15 @@ surface at 1.6667 yields an 1889px buffer for 1888px of screen) and maps buffer
 pixels 1:1 to device pixels when it matches, letting the surplus edge column
 fall outside the clip.
 
-0.6.0, 0.7.1, 0.8.0 and 0.8.4 all still read the integer API at every one of
-those sites (0.6.0 added `gdk_surface_get_scale_factor` calls, which is the
-*integer* GDK entry point, not the fractional `gdk_surface_get_scale`; 0.7.1
-changed none of them, 0.8.0 does not touch `gtk_host.c` at all, and 0.8.4
-changes it only outside the patched hunks), so the patch still applies — with
-zero fuzz. **Re-apply after every
+0.6.0, 0.7.1, 0.8.0, 0.8.4 and 0.9.0 all still read the integer API at every
+one of those sites (0.6.0 added `gdk_surface_get_scale_factor` calls, which is
+the *integer* GDK entry point, not the fractional `gdk_surface_get_scale`;
+0.7.1 changed none of them, 0.8.0 does not touch `gtk_host.c` at all, and
+0.8.4 and 0.9.0 change it only outside the patched hunks), so the patch still
+applies — with zero fuzz. **Re-apply after every
 `npm i -g @native-sdk/cli` upgrade**, or drop it once
 [vercel-labs/native#156](https://github.com/vercel-labs/native/issues/156)
-ships — still open as of 0.8.0. Integer scales (100%/200%) are unaffected, which is why it can look fine
+ships — still open as of 0.9.0. Integer scales (100%/200%) are unaffected, which is why it can look fine
 on a second machine.
 
 Verify it took on a fractional display: run the app under automation and read
