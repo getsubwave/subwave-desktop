@@ -22,7 +22,14 @@
       <icon name="circle-dot" width="10" height="10" foreground="accent"/>
     </if>
     <stack>
-      <button variant="ghost" icon="settings" label="Back panel" on-press="open_panel"/>
+      <button variant="ghost" icon="app:mini" label="Mini player" on-press="toggle_mini"/>
+      <tooltip anchor="below">Mini player · Cmd/Ctrl+Shift+M</tooltip>
+    </stack>
+    <!-- `settings` read as preferences-only; the back panel is SHOWS,
+         TIMELINE, BOOTH and REQUEST as well, and it opens as a right-hand
+         column — which is what panel-right names. -->
+    <stack>
+      <button variant="ghost" icon="panel-right" label="Back panel" on-press="open_panel"/>
       <tooltip anchor="below">Back panel</tooltip>
     </stack>
     <!-- Windows: clears the DWM min/max/close cluster, which overlays this
