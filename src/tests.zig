@@ -15,6 +15,7 @@ comptime {
     _ = @import("diag.zig");
     _ = @import("model.zig");
     _ = @import("stream_format.zig");
+    _ = @import("theme.zig");
     _ = @import("discord_rpc.zig");
 }
 
