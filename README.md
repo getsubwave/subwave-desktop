@@ -65,9 +65,12 @@ bottom.](docs/images/player-booth.png)
   SDK 0.8.4's `fx.showNotification` (macOS, Windows and Linux). Background-only
   and on-air-only: no toast while the player is the app you are looking at,
   while tuned out, or on the first track after launch. Off by default; the
-  switch is in the back panel under NOTIFICATIONS. This is the nearest thing
-  to a Now Playing surface the SDK offers — there is still no MPRIS /
-  MPNowPlayingInfoCenter / SMTC integration.
+  switch is in the back panel under NOTIFICATIONS. Every toast reuses the
+  `now-playing` id, so a new track **replaces** the previous notification
+  instead of stacking, and carries an **Open Player** button that raises the
+  window (SDK 0.9.1). This is the nearest thing to a Now Playing surface the
+  SDK offers — there is still no MPRIS / MPNowPlayingInfoCenter / SMTC
+  integration.
 - **Keyboard transport** — space play/pause, ↑/↓ volume, M mute, L like the
   current track, Esc back to LIVE, Cmd/Ctrl+K stations, Cmd/Ctrl+Shift+M mini
   player, 1–5 dial stops (app-level fallback; never steals typing from the
@@ -219,8 +222,10 @@ keys and the OS Now Playing widget can't be wired up yet (SDK feature request).
 What IS wired up: the menu-bar status item (macOS and Windows; the GTK host has
 no tray, so Linux gets neither the extra nor close-to-hide), the in-window keyboard
 transport, the opt-in background track notification (0.8.4's
-`fx.showNotification` — the closest thing to a Now Playing surface available,
-though it only pushes, so nothing can control playback back), and per-track
+`fx.showNotification`, made replaceable and given an Open Player button by
+0.9.1 — the closest thing to a Now Playing surface available, though its one
+action only raises the window, so nothing can control playback back), and
+per-track
 fetch of the station's own metadata (the app polls `/api/now-playing` rather
 than relying on ICY in-stream metadata).
 

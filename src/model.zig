@@ -78,6 +78,15 @@ pub const max_booth = 16;
 pub const signal_scale_ms: i64 = 250;
 const probe_backoff_after: u8 = 3;
 
+// The host identity every track toast reuses, so a new track replaces the
+// previous notification instead of stacking (SDK 0.9.1).
+pub const track_notification_id = "now-playing";
+// The application command the toast's action button sends. `onCommand` in
+// main.zig is the other half of this route — a rename on one side without
+// the other silently turns the button into a no-op, which is what the
+// "notification action routes to the player" test in main.zig guards.
+pub const open_player_command = "open-player";
+
 // ------------------------------------------------------------------ enums
 pub const Transport = enum { stopped, playing, paused };
 
@@ -557,6 +566,28 @@ pub const Model = struct {
     /// part of the feature a test can actually see.
     pub fn shouldNotifyTrack(self: *const Model) bool {
         return self.notify_track and !self.app_active and self.live_now() and self.has_track();
+    }
+    /// The toast itself, as data. `fx.showNotification` stays inert under
+    /// fake execution, so building the options here — rather than inline at
+    /// the call site — is what makes the id and the action assertable;
+    /// `shouldNotifyTrack` decides *whether*, this decides *what*.
+    pub fn trackNotification(self: *const Model) native_sdk.NotificationOptions {
+        return .{
+            // One stable id for the whole session: SDK 0.9.1 replaces the
+            // notification carrying this id, so a busy hour leaves one
+            // current toast in the centre instead of a stack of stale ones.
+            .id = track_notification_id,
+            // Every platform draws the app name as the notification header
+            // itself, so the title slot carries the track, not "SUBWAVE".
+            .title = self.title,
+            .subtitle = self.artist,
+            .body = self.show,
+            // Paired fields — the SDK drops the whole notification if only
+            // one is set. The command is an ordinary application command,
+            // the same one the tray's "Open player" item sends.
+            .action_label = "Open Player",
+            .action_command = open_player_command,
+        };
     }
     /// Between tune-in and audio: the power button's spinner state.
     pub fn connecting(self: *const Model) bool {
@@ -1327,7 +1358,7 @@ pub const Model = struct {
         "booth_text_store",   "booth_turns",         "booth_count",
         // track-change notifications (notify_track is bound by the back
         // panel's switch; the rest is update-only state)
-        "app_active",         "shouldNotifyTrack",
+        "app_active",         "shouldNotifyTrack",   "trackNotification",
         // discord rich presence (bound via getters, not the raw fields)
         "discord_connected",  "discord_retry_count",
         "discord_spawn_key",  "discord_last_payload", "discord_last_payload_buf",
@@ -2396,18 +2427,14 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 if (l.current) |c| model.listeners = c;
             }
             // SDK 0.8.4: a background toast is the closest this SDK gets to a
-            // Now Playing surface while OS media controls stay absent. Every
-            // platform draws the app name as the notification header itself,
-            // so the title slot carries the track, not "SUBWAVE". Placed here,
-            // after the show fill, so all three fields describe one airing.
-            // Fire-and-forget: no result Msg would be truthful, since Focus /
-            // Do Not Disturb stay authoritative after the host accepts it.
+            // Now Playing surface while OS media controls stay absent. Placed
+            // here, after the show fill, so all three fields describe one
+            // airing. Fire-and-forget: no result Msg would be truthful, since
+            // Focus / Do Not Disturb stay authoritative after the host
+            // accepts it — and the action button's press comes back as an
+            // ordinary command, not as a result of this call.
             if (track_changed and model.shouldNotifyTrack()) {
-                fx.showNotification(.{
-                    .title = model.title,
-                    .subtitle = model.artist,
-                    .body = model.show,
-                });
+                fx.showNotification(model.trackNotification());
             }
             refreshTrayStatus(model);
             updateDiscordPresence(model, fx);
@@ -4065,6 +4092,41 @@ test "shouldNotifyTrack gates on opt-in, background, on-air and a real track" {
     // track change, and must not fire a toast.
     m.title = "";
     try testing.expect(!m.shouldNotifyTrack());
+}
+
+test "trackNotification carries a stable id and the Open Player action" {
+    var m: Model = .{};
+    setStr(&m.title_buf, &m.title, "Night Drive");
+    setStr(&m.artist_buf, &m.artist, "The Midnight");
+    setStr(&m.show_buf, &m.show, "graveyard shift");
+
+    const n = m.trackNotification();
+    try testing.expectEqualStrings("now-playing", n.id);
+    try testing.expectEqualStrings("Night Drive", n.title);
+    try testing.expectEqualStrings("The Midnight", n.subtitle);
+    try testing.expectEqualStrings("graveyard shift", n.body);
+    try testing.expectEqualStrings("Open Player", n.action_label);
+    try testing.expectEqualStrings("open-player", n.action_command);
+
+    // The id is what makes the replacement work: two consecutive tracks must
+    // reuse it, or the second toast stacks under the first instead of
+    // taking its place.
+    setStr(&m.title_buf, &m.title, "Static Bloom");
+    try testing.expectEqualStrings(n.id, m.trackNotification().id);
+
+    // The SDK drops a notification whose action fields are half-set, and it
+    // does so silently — no toast at all, rather than a display-only one.
+    const half_set = (n.action_label.len == 0) != (n.action_command.len == 0);
+    try testing.expect(!half_set);
+
+    // A show-less track still notifies; only the body goes empty. The
+    // action and the id do not depend on the optional fields.
+    m.show = "";
+    m.artist = "";
+    const bare = m.trackNotification();
+    try testing.expect(bare.title.len > 0);
+    try testing.expectEqualStrings("", bare.body);
+    try testing.expectEqualStrings("open-player", bare.action_command);
 }
 
 test "notifyTrack round-trips through applySettingsJson" {
