@@ -607,3 +607,14 @@ test "status-item menu derives from the model and maps commands back" {
     try testing.expect(onCommand("toggle-mini").? == .toggle_mini);
     try testing.expect(onCommand("unknown") == null);
 }
+
+test "the track toast's action button routes back into the player" {
+    // The notification's action arrives as an ordinary application command,
+    // so the whole route is model.trackNotification -> onCommand. Nothing
+    // else connects the two halves: assert the name the toast sends is one
+    // this handler answers, or the button silently does nothing.
+    var m: Model = .{};
+    m.title = "Night Drive";
+    try testing.expect(onCommand(m.trackNotification().action_command).? == .show_player);
+    try testing.expect(onCommand(model.open_player_command).? == .show_player);
+}

@@ -186,6 +186,20 @@ for window verbs. That is why the app's decision logic lives in the pure
 `Model.shouldNotifyTrack()` predicate, which the tests cover gate by gate,
 and the `fx.showNotification` call itself is one untested line.
 
+**0.9.1 added `id`, `action_label` and `action_command`**, and the app uses
+all three (`Model.trackNotification()`, the *what* to `shouldNotifyTrack`'s
+*whether* — same reason: options built as data are assertable, the call is
+not). Reissuing a non-empty `id` replaces the notification carrying it, so
+every toast reuses `now-playing` and a busy hour leaves one current toast
+rather than a stack. The action pair is all-or-nothing — the SDK's
+`validateNotificationOptions` rejects a half-set pair and
+`fx.showNotification` swallows the error, so a drifted pair means *no toast at
+all*, not a display-only one; the model test asserts the pair stays whole. An
+action press arrives as an **ordinary application command**, not as a result
+`Msg`, so the route is
+`trackNotification().action_command` -> `onCommand` in `src/main.zig` ->
+`.show_player`, and only a test spans the two halves.
+
 **Audio capture also landed** (`startAudioCapture` / `stopAudioCapture` /
 `feedAudioCapture`, the `system_audio` permission, the `mic` icon). That is
 microphone input; a radio player has no use for it.
