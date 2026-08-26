@@ -10,7 +10,7 @@ set -euo pipefail
 # lines, or reporting success against a tree the app can no longer build. Bump
 # this together with .github/actions/setup-native's native-sdk-version whenever
 # the patch is regenerated (docs/sdk-notes.md walks through it).
-patch_sdk_version="0.9.0"
+patch_sdk_version="0.10.1"
 
 sdk="$(npm root -g)/@native-sdk/cli"
 repo="$(cd "$(dirname "$0")/.." && pwd)"

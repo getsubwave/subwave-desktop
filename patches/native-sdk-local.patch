@@ -1,6 +1,6 @@
 --- a/src/platform/linux/gtk_host.c
 +++ b/src/platform/linux/gtk_host.c
-@@ -1001,6 +1001,41 @@
+@@ -1061,6 +1061,41 @@
      g_free(preedit);
  }
  
@@ -42,7 +42,7 @@
  static double native_sdk_gpu_surface_width(native_sdk_gtk_native_view_t *view) {
      int width = view->widget ? gtk_widget_get_width(view->widget) : 0;
      if (width > 0) return (double)width;
-@@ -1058,7 +1093,7 @@
+@@ -1118,7 +1153,7 @@
      const double width = native_sdk_gpu_surface_width(view);
      const double height = native_sdk_gpu_surface_height(view);
      if (width <= 0 || height <= 0) return;
@@ -51,7 +51,7 @@
      if (native_sdk_gpu_surface_sync_geometry(view, width, height, scale)) {
          gtk_widget_queue_draw(view->widget);
      }
-@@ -1098,7 +1133,7 @@
+@@ -1158,7 +1193,7 @@
  
      const double width = native_sdk_gpu_surface_width(view);
      const double height = native_sdk_gpu_surface_height(view);
@@ -60,7 +60,7 @@
      if (width <= 0 || height <= 0) return;
  
      (void)native_sdk_gpu_surface_sync_geometry(view, width, height, scale);
-@@ -1208,7 +1243,7 @@
+@@ -1268,7 +1303,7 @@
      const double logical_width = native_sdk_gpu_surface_width(view);
      const double logical_height = native_sdk_gpu_surface_height(view);
      if (logical_width <= 0 || logical_height <= 0) return;
@@ -69,7 +69,7 @@
      if (native_sdk_gpu_surface_sync_geometry(view, logical_width, logical_height, scale)) {
          gtk_widget_queue_draw(view->widget);
      }
-@@ -1223,18 +1258,29 @@
+@@ -1283,18 +1318,29 @@
          return;
      }
      cairo_save(cr);
@@ -110,7 +110,7 @@
          cairo_set_source_surface(cr, surface, 0, 0);
          cairo_pattern_set_filter(cairo_get_source(cr), exact ? CAIRO_FILTER_NEAREST : CAIRO_FILTER_BILINEAR);
      } else {
-@@ -2509,7 +2555,7 @@
+@@ -2569,7 +2615,7 @@
      int w = 0, h = 0;
      native_sdk_window_content_size(win, &w, &h);
      GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(win->gtk_window));
@@ -119,7 +119,7 @@
      int focused = gtk_window_is_active(win->gtk_window) ? 1 : 0;
      native_sdk_emit(host, (native_sdk_gtk_event_t){
          .kind = NATIVE_SDK_GTK_EVENT_WINDOW_FRAME,
-@@ -2532,7 +2578,7 @@
+@@ -2592,7 +2638,7 @@
      int w = 0, h = 0;
      native_sdk_window_content_size(win, &w, &h);
      GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(win->gtk_window));
@@ -128,7 +128,7 @@
      native_sdk_emit(host, (native_sdk_gtk_event_t){
          .kind = NATIVE_SDK_GTK_EVENT_RESIZE,
          .window_id = win->id,
-@@ -2677,7 +2723,7 @@
+@@ -2737,7 +2783,7 @@
          const double w = (double)gtk_widget_get_width(GTK_WIDGET(win->gtk_window));
          const double h = (double)gtk_widget_get_height(GTK_WIDGET(win->gtk_window));
          GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(win->gtk_window));

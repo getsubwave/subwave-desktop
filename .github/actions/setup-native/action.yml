@@ -26,7 +26,7 @@ inputs:
     default: "0.16.0"
   native-sdk-version:
     description: "@native-sdk/cli version to install"
-    default: "0.9.0"
+    default: "0.10.1"
   apply-patches:
     description: Whether to run scripts/apply-sdk-patches.sh
     default: "true"
@@ -34,9 +34,9 @@ inputs:
 runs:
   using: composite
   steps:
-    - uses: actions/setup-node@v4
+    - uses: actions/setup-node@v7
       with:
-        node-version: "22"
+        node-version: "24"
 
     - name: Install Zig ${{ inputs.zig-version }}
       shell: bash
