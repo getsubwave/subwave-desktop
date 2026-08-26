@@ -49,7 +49,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install GTK4
         # Linux links the GTK4 system stack; the other two use OS frameworks

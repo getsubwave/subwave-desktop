@@ -9,13 +9,11 @@ native test   # verify
 
 The unified diff lives at `patches/native-sdk-local.patch`, generated against
 the pristine 0.7.1 npm tarball and re-verified against 0.8.0 (whose
-`gtk_host.c` is byte-identical), 0.8.4 and 0.9.0 (whose `gtk_host.c` both
-changed, but entirely outside the patched hunks). Through 0.8.4 the patch body
-never moved at all; 0.9.0 is the first release where the file grew enough
-*before* the patched regions that the hunk **headers** had to be re-cut — the
-eight `@@` line numbers shift, every `+`/`-` line is unchanged. The hunks still
-land with zero fuzz. Symptom of a lost patch: pixelated text on a
-fractional-scale Linux display.
+`gtk_host.c` is byte-identical), 0.8.4, 0.9.0 and 0.10.1. Through 0.8.4 the
+patch body never moved at all; 0.9.0 and 0.10.1 each added 60 lines before the
+patched regions, so the eight `@@` hunk headers were re-cut for each release.
+Every `+`/`-` line remains unchanged and the hunks still land with zero fuzz.
+Symptom of a lost patch: pixelated text on a fractional-scale Linux display.
 
 ## Two version pins, and they must agree
 
@@ -70,6 +68,40 @@ workarounds they replaced are still visible in the git log:
 
 [native#148]: https://github.com/vercel-labs/native/issues/148
 [native#149]: https://github.com/vercel-labs/native/issues/149
+
+## What 0.10.1 changed (upgraded 2026-08-26)
+
+Seven releases (0.9.1–0.10.1) remain source-compatible with this Zig-core app:
+stock 0.10.1 passed `native check`, all 108 tests, and a release build without
+changes under `src/` or `src/views/`. The upgrade keeps the legacy `app.zon`
+manifest; 0.9.5 made JSON the default only for newly scaffolded apps.
+
+The app-relevant fixes are stable macOS window geometry and text baselines,
+generated-runner menu handling, model-driven secondary-window restore/close
+policies, and safer Linux alert dialogs. The 0.10.x native updater and expanded
+macOS signing/notarization tooling are opt-in and deliberately not adopted by
+this dependency bump: the player retains its existing release notice and
+release workflows.
+
+| Surface | 0.9.0 → 0.10.1 |
+| --- | --- |
+| Existing Zig core and markup | source-compatible; no app edits required |
+| Manifest | `app.zon` remains supported; new scaffolds default to `app.json` |
+| Automation protocol | changed to `0x51f7889bbe3305e7`; CI and the CLI move together |
+| `minimum_zig_version` | 0.16.0, unchanged |
+| Trace default | still `.events` — `-Dtrace=off` stays mandatory |
+| `src/platform/linux/gtk_host.c` | 60 lines added before the patched regions; patch body unchanged |
+
+**The HiDPI patch is still required.** Stock 0.10.1 still contains four
+`gtk_widget_get_scale_factor()` calls and three
+`gdk_surface_get_scale_factor()` calls in `gtk_host.c`, with zero uses of the
+fractional `gdk_surface_get_scale()`. Applying the old patch with `--fuzz=0`
+succeeds at a uniform 60-line offset; regenerating against the pristine 0.10.1
+tarball therefore changes only the eight hunk headers.
+
+The upstream issue was closed after the downstream workaround was documented,
+not because the SDK absorbed it. The pristine 0.10.1 source inspection above
+is the authority for keeping the patch.
 
 ## What 0.9.0 changed (upgraded 2026-08-13)
 
@@ -314,16 +346,17 @@ surface at 1.6667 yields an 1889px buffer for 1888px of screen) and maps buffer
 pixels 1:1 to device pixels when it matches, letting the surplus edge column
 fall outside the clip.
 
-0.6.0, 0.7.1, 0.8.0, 0.8.4 and 0.9.0 all still read the integer API at every
-one of those sites (0.6.0 added `gdk_surface_get_scale_factor` calls, which is
-the *integer* GDK entry point, not the fractional `gdk_surface_get_scale`;
-0.7.1 changed none of them, 0.8.0 does not touch `gtk_host.c` at all, and
-0.8.4 and 0.9.0 change it only outside the patched hunks), so the patch still
-applies — with zero fuzz. **Re-apply after every
+0.6.0, 0.7.1, 0.8.0, 0.8.4, 0.9.0 and 0.10.1 all still read the integer API
+at every one of those sites (0.6.0 added `gdk_surface_get_scale_factor` calls,
+which is the *integer* GDK entry point, not the fractional
+`gdk_surface_get_scale`; 0.7.1 changed none of them, 0.8.0 does not touch
+`gtk_host.c` at all, and the later releases change it only outside the patched
+hunks), so the patch still applies — with zero fuzz. **Re-apply after every
 `npm i -g @native-sdk/cli` upgrade**, or drop it once
 [vercel-labs/native#156](https://github.com/vercel-labs/native/issues/156)
-ships — still open as of 0.9.0. Integer scales (100%/200%) are unaffected, which is why it can look fine
-on a second machine.
+ships. The issue is closed, but the fix is still absent from stock 0.10.1.
+Integer scales (100%/200%) are unaffected, which is why it can look fine on a
+second machine.
 
 Verify it took on a fractional display: run the app under automation and read
 the surface density back —
@@ -351,4 +384,3 @@ The upstream request is `docs/sdk-trace-log-request.md`. Re-checked at 0.8.0:
 defaults `-Dtrace` to `.events`, so the flag stays mandatory. Re-checked again
 at 0.8.4: `build.zig:51` still reads
 `b.option(TraceOption, "trace", ...) orelse .events`. Unchanged, flag stays.
-
