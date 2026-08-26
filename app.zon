@@ -5,7 +5,7 @@
     // the in-app header still renders the branded "SUB/WAVE".
     .display_name = "SUBWAVE Player",
     .description = "Native desktop player for the SUB/WAVE internet radio station.",
-    .version = "0.9.2",
+    .version = "0.10.0",
     .icons = .{"assets/icon.png"},
     .platforms = .{ "macos", "linux", "windows" },
     // "notifications": the model posts a desktop toast when the track changes
