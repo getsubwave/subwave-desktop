@@ -1,0 +1,33 @@
+{
+    "$schema": "https://schema.native-sdk.dev/app/v1.json",
+    "id":"dev.subwave.player.webviewproof",
+    "name":"webview-player",
+    "display_name":"SUBWAVE WebView Proof",
+    "version": "0.1.0",
+    "icons": ["assets/icon.png"],
+    "platforms": ["macos", "linux", "windows"],
+    "permissions": [],
+    "capabilities": ["webview"],
+    "frontend": {
+        "dist":"frontend/dist",
+        "entry": "index.html",
+        "spa_fallback": true,
+        "dev": {
+            "url":"http://127.0.0.1:5173/",
+            "command": ["npm", "--prefix", "frontend", "run", "dev", "--", "--host", "127.0.0.1"],
+            "ready_path": "/",
+            "timeout_ms": 30000
+        }
+    },
+    "security": {
+        "navigation": {
+            "allowed_origins": ["zero://app", "zero://inline", "http://127.0.0.1:5173"],
+            "external_links": { "action": "deny" }
+        }
+    },
+    "web_engine": "system",
+    "cef": { "dir": "third_party/cef/macos", "auto_install": false },
+    "windows": [
+        { "label": "main", "title":"SUBWAVE WebView Proof", "width": 720, "height": 480, "restore_state": true }
+    ]
+}
