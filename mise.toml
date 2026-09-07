@@ -1,0 +1,6 @@
+# Pin node to 24 for this repo: the `native` shim resolves to the node install
+# that carries @native-sdk/cli, and only the 24.x install has it (patched, via
+# scripts/apply-sdk-patches.sh, which resolves the SDK through `npm root -g`).
+# 24 is also what CI installs — .github/actions/setup-native pins node-version 24.
+[tools]
+node = "24.19.0"
