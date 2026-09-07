@@ -222,9 +222,9 @@ attachment remain open; continue session work against public fixtures.
 
 **Interfaces:** `Session.apply(Intent)` produces host work; `Session.onResponse(RequestTag, response)` and `Session.onAudio(load_id, event)` mutate only matching identities. Station activation increments `generation`; every replacement/reconnect allocates a new `load_id`. A timer also carries generation, load ID and timer ID.
 
-- [ ] Separate user intent from engine state. Pause/stop/disconnect cancel retries and buffering watchdogs immediately. Pause during load must cancel/unload it; a later loaded event cannot start playback. A healthy pause/resume keeps the same stream; recovery after failure starts a new load.
+- [x] Separate user intent from engine state. Pause/stop/disconnect cancel retries and buffering watchdogs immediately. Pause during load must cancel/unload it; a later loaded event cannot start playback. A healthy pause/resume keeps the same stream; recovery after failure starts a new load.
 - [ ] On candidate success: cancel old polling and pending operations; invalidate old generation/load; stop old audio; clear station metadata/privacy/format state; install candidate and credentials; load its preference (MP3 default); start exactly one audio load and feed set. Views never own a session.
-- [ ] Poll now-playing/state/session independently every 5 seconds; themes/schedule every 30 seconds. Keep at most one request per endpoint, skip overlapping ticks and cancel on switch. Hidden desktop views do not change station ownership. Defer likes, requests and beacon writes to the later product-actions task.
+- [x] Poll now-playing/state/session independently every 5 seconds; themes/schedule every 30 seconds. Keep at most one request per endpoint, skip overlapping ticks and cancel on switch. Hidden desktop views do not change station ownership. Defer likes, requests and beacon writes to the later product-actions task.
 - [ ] Implement deterministic backoff and manual retry cancellation:
 
 ```text
@@ -239,6 +239,12 @@ Reset failures after confirmed healthy playback, not bridge acceptance. Preserve
 - [ ] Use `src/stream_format.zig` as the desktop codec authority, intersected with station-advertised flags. MP3 is the floor. Preferences belong to each station; import the old global format into the active imported station only. Unsupported user selections fail without changing the saved preference.
 - [ ] Keep actual native FFT and bounded delivery. Clear frames on load identity change; retain the newest sample so a paused/reloaded view can initialize. Suspend hidden-view traffic. Suppress duplicate unchanged snapshots on position ticks.
 - [ ] Test loaded/failed/FFT from old load, stale timers, pause during load, repeated Play, offline debounce, fallback and switch during every in-flight endpoint. Run fixture playback/drop/retry with main and mini open: stream count changes only for intended replacement/reconnect. Commit with those tests.
+
+**Public-session checkpoint:** the integrated native host passes 66 foundation
+tests and the Linux session probe passes steady playback, stream drop/reconnect
+and two-station activation with native FFT. Format fallback reports a dirty
+preference for later persistence; main/mini, vault and durable settings remain
+open. Reproduction and cleanup are in `docs/webview-station-foundation.md`.
 
 ## Task 4: Host-only credential vault and private stations
 

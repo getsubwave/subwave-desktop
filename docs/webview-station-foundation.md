@@ -45,3 +45,35 @@ header bytes, while vault entries allow 2560 bytes: transport size is explicitly
 rejected before request admission, and private-station UX must honor that limit
 or use a separately verified SDK expansion. Real macOS/Windows execution is
 still required. See the foundation plan for session, vault, import and UI work.
+
+## Public session integration checkpoint
+
+`session_host.zig` now integrates the station gate, request owner, a single
+relay/native decoder pair, independent feed polling and native retry timers.
+It keeps user intent separate from engine state, rejects old load events, unloads
+when paused during loading, and preserves a healthy stream across pause/resume.
+It restores the ready connection state after the four-false-poll offline state
+recovers. Failed timer creation clears timer ownership and exposes an error;
+it cannot leave a phantom retry pending.
+
+The checkpoint foundation target has **66 passing tests** (preferences and vault
+codecs remain separate work). Public-session Linux reproduction:
+
+```sh
+# From experiments/webview-player:
+zig build -Dtrace=off -Dsession-probe=true -Dnative-sdk-path=../../.superpowers/player-transport-sdk --prefix /tmp/subwave-session-foundation
+# From the repository root, in the existing desktop session:
+python3 scripts/check-player-session-linux.py --binary /tmp/subwave-session-foundation/bin/session-probe
+```
+
+The script owns two loopback fixtures, temporary configuration/log directories
+and a private null audio sink. It checks three 12-second native runs: steady
+playback loads once and polls each endpoint at its own interval; a stream drop
+recovers under a new load ID and produces new FFT samples; station switching
+activates generation 2, loads exactly twice and produces FFT for the new station.
+Every scenario shuts down with zero active fixture streams. The script cleans
+its processes and sink even if an assertion fails.
+
+This still uses a dedicated runtime probe. Main/mini view attachment, retained
+FFT initialization after reload, vault-backed private stations, durable format
+fallback/preferences and transactional import are not closed by these results.
