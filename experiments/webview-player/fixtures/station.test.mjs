@@ -99,7 +99,7 @@ async function withStation(mode, credentials, action) {
 test('serves the closed public API contract and paced MP3', async () => {
   await withStation('public', {}, async ({ primary }) => {
     const health = await json(primary, '/api/health');
-    assert.deepEqual(health.json, { ok: true });
+    assert.deepEqual(health.json, { status: 'on-air' });
     const state = await json(primary, '/api/state');
     assert.deepEqual(Object.keys(state.json).sort(), ['history', 'privacy', 'theme', 'upcoming']);
     assert.equal(state.json.theme.active, 'fixture-dark');

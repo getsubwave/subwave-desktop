@@ -193,7 +193,7 @@ playback on an unverified backend or treat this checkpoint as shipping cutover.
 
 **Interfaces:** `normalizeStation(raw, output) -> !StationIdentity`; identity stores canonical credential-free base and SHA-256-derived stable ID. `RequestTag {operation_id:u64, generation:u64, request_id:u64, kind:Endpoint}` accompanies every queued response. `Endpoint` is the closed enum `health, now_playing, state, themes, session, schedule, station_auth`; no arbitrary URL/method bridge.
 
-- [ ] Add normalization cases for bare host, hostname case, default ports, IPv6, trailing slash, optional base path, invalid scheme, control characters and oversized input. Trim input, default to HTTPS, lowercase DNS host, remove default port and trailing slash; reject query/fragment, backslash and URL userinfo in new input. Only the migration parser may extract legacy userinfo. Preserve a normalized nonempty base path, rejecting dot segments and encoded path separators.
+- [x] Add normalization cases for bare host, hostname case, default ports, IPv6, trailing slash, optional base path, invalid scheme, control characters and oversized input. Trim input, default to HTTPS, lowercase DNS host, remove default port and trailing slash; reject query/fragment, backslash and URL userinfo in new input. Only the migration parser may extract legacy userinfo. Preserve a normalized nonempty base path, rejecting dot segments and encoded path separators.
 
 ```text
 " RADIO.EXAMPLE:443/ " -> "https://radio.example"
@@ -204,10 +204,17 @@ playback on an unverified backend or treat this checkpoint as shipping cutover.
 ```
 
 - [ ] Bind a single `Effects(Msg)` to the WebView host using `bindServices`, `bindEnviron`, `bindCredentialsStore` and constrained file access, following SDK `ui_app.zig:1504`. Drain with `drainBoundary`/`takeMsgWithin` at runtime event boundaries; copy borrowed completion data before the next drain. Use bounded request slots and monotonically unique keys. No blocking fetch or keyring call in bridge handlers.
-- [ ] Use SDK `fetch` with `follow_redirects=false`, 8-second timeout, bounded bodies, and host-built paths. A redirect yields `redirect_denied`; instruct the user to enter the final station address. Do not probe HTTP after a bare HTTPS address fails. Explicit HTTP requires consent before sending either kind of secret.
+- [x] Use SDK `fetch` with `follow_redirects=false`, 8-second timeout, bounded bodies, and host-built paths. A redirect yields `redirect_denied`; instruct the user to enter the final station address. Do not probe HTTP after a bare HTTPS address fails. Explicit HTTP requires consent before sending either kind of secret.
 - [ ] Probe `/api/health` before selecting a candidate. A candidate operation reads/validates credentials before replacing the active station. Failure or cancellation leaves current audio and selected station untouched. If two connects race, reject the second as `busy` until cancel/completion; a canceled candidate cannot later activate.
-- [ ] Port bounded decoders from desktop `src/json.zig`, preserving missing/null/unknown-field behavior. Cap input bodies at 256 KiB, decoded track strings at 512 UTF-8 bytes each (project display text to the smaller bridge limits), themes at 32, schedule entries at 64 and recents at eight. Reject over-bound input explicitly, not by truncating an identity or credential.
+- [x] Port bounded decoders from desktop `src/json.zig`, preserving missing/null/unknown-field behavior. Cap input bodies at 256 KiB, decoded track strings at 512 UTF-8 bytes each (project display text to the smaller bridge limits), themes at 32, schedule entries at 64 and recents at eight. Reject over-bound input explicitly, not by truncating an identity or credential.
 - [ ] Test late A health/feed results after B activation, malformed JSON, timeout, independent endpoint failure and rapid cancel/connect. Test that credential bytes, Authorization and native stream URLs are absent from all DTOs. Run native tests and commit this owner before adding retries.
+
+**Request-owner checkpoint:** 35 foundation tests and 14 fixture tests passed.
+The dedicated Linux request probe bound/drained the real SDK effects channel,
+activated generation 1 from the actual health contract, and independently
+received now-playing/state through `effects_wake`. See
+`docs/webview-station-foundation.md`. Candidate credentials and final main-host
+attachment remain open; continue session work against public fixtures.
 
 ## Task 3: One station session, polling and reconnect
 

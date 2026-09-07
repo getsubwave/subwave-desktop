@@ -113,14 +113,16 @@ pub fn build(b: *std.Build) void {
     runner_mod.addImport("relational_migrations", migrations_mod);
 
     const transport_probe = b.option(bool, "transport-probe", "Build the isolated authenticated audio transport probe") orelse false;
-    const app_mod = localModule(b, target, optimize, if (transport_probe) "src/transport_contract.zig" else "src/main.zig");
+    const request_probe = b.option(bool, "request-probe", "Build the native station request wake/drain probe") orelse false;
+    if (transport_probe and request_probe) @panic("Choose only one probe entrypoint");
+    const app_mod = localModule(b, target, optimize, if (transport_probe) "src/transport_contract.zig" else if (request_probe) "src/request_probe.zig" else "src/main.zig");
     app_mod.addImport("native_sdk", native_sdk_mod);
     app_mod.addImport("runner", runner_mod);
     app_mod.addImport("build_options", options_mod);
     if (app_config.sqlite_capability) addSqliteEngine(b, app_mod, native_sdk_path);
     addMacosInfoPlist(b, app_mod, target, app_config);
     const exe = b.addExecutable(.{
-        .name = if (transport_probe) "transport-probe" else app_exe_name,
+        .name = if (transport_probe) "transport-probe" else if (request_probe) "request-probe" else app_exe_name,
         .root_module = app_mod,
         // Zig 0.16.0's self-hosted x86_64 backend (the Debug default)
         // miscompiles the SysV C calling convention for the long
@@ -241,6 +243,14 @@ pub fn build(b: *std.Build) void {
     tests.use_llvm = useLlvmWorkaround(target);
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+
+    const foundation_mod = localModule(b, target, optimize, "src/foundation_tests.zig");
+    foundation_mod.addImport("native_sdk", native_sdk_mod);
+    const foundation_tests = b.addTest(.{ .root_module = foundation_mod });
+    foundation_tests.use_llvm = useLlvmWorkaround(target);
+    const foundation_step = b.step("test-foundation", "Run the station foundation tests");
+    foundation_step.dependOn(&b.addRunArtifact(foundation_tests).step);
+
 }
 
 // Zig 0.16.0's self-hosted x86_64 backend miscompiles the SysV C

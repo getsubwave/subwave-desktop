@@ -123,7 +123,7 @@ function readJson(request, response, action) {
 function publicPayload(pathname, originName) {
   const emptyDay = () => Array(24).fill(null);
   const payloads = {
-    '/api/health': { ok: true },
+    '/api/health': { status: 'on-air' },
     '/api/state': {
       theme: { active: 'fixture-dark' },
       upcoming: [{ title: 'Fixture Next', artist: 'Fixture Artist', requestedBy: null }],
