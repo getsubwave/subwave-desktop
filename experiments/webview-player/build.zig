@@ -112,14 +112,15 @@ pub fn build(b: *std.Build) void {
     migrations_mod.addImport("native_sdk", native_sdk_mod);
     runner_mod.addImport("relational_migrations", migrations_mod);
 
-    const app_mod = localModule(b, target, optimize, "src/main.zig");
+    const transport_probe = b.option(bool, "transport-probe", "Build the isolated authenticated audio transport probe") orelse false;
+    const app_mod = localModule(b, target, optimize, if (transport_probe) "src/transport_contract.zig" else "src/main.zig");
     app_mod.addImport("native_sdk", native_sdk_mod);
     app_mod.addImport("runner", runner_mod);
     app_mod.addImport("build_options", options_mod);
     if (app_config.sqlite_capability) addSqliteEngine(b, app_mod, native_sdk_path);
     addMacosInfoPlist(b, app_mod, target, app_config);
     const exe = b.addExecutable(.{
-        .name = app_exe_name,
+        .name = if (transport_probe) "transport-probe" else app_exe_name,
         .root_module = app_mod,
         // Zig 0.16.0's self-hosted x86_64 backend (the Debug default)
         // miscompiles the SysV C calling convention for the long

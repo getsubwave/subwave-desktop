@@ -129,14 +129,33 @@ An accepted operation is not success. Report completion through authoritative st
 
 ## Task 1: Prove and implement the missing transport contracts
 
+**Execution amendment (2026-09-07):** official-API investigation found that
+macOS/Windows stock URL loaders cannot provide both supported header injection
+and per-load redirect denial. Prototype an app-owned native loopback relay:
+it injects upstream credentials, denies redirects and supplies a private
+capability URL to the native decoder. Keep native event load IDs. The local
+relay never redirects, so the decoder may use its ordinary URL transport;
+credentials never reach that URL. This replaces the requirement for direct
+header support on every native backend, subject to the same authenticated PCM,
+redirect, cancellation and bounded-memory tests. No runtime Node or HTML audio.
+Direct SDK request support stays explicitly unsupported where unavailable;
+platform runtime tests remain required. New file: `src/audio_relay.zig`.
+
+**Review amendment:** use the relay on Linux too. Remove the optional direct
+GStreamer header implementation: source-setup capability and lifetime checks
+create a second authentication boundary with no product benefit. All three
+SDK backends accept only empty headers and `allow_redirects=true`; the relay
+implements the authenticated, redirect-denying remote request. Native callback
+load identity remains platform-owned.
+
 **Files:** `src/transport_contract.zig`, fixture station files and repository SDK patch/script/document above; `build.zig` test imports.
 
 **Produces:** a pinned, verified native transport with per-load event identity, authenticated URL loading and no credential-bearing redirects. This is a prerequisite, not a feature claimed by SDK 0.10.1 today.
 
-- [ ] Extend the controlled fixture with `/api/health`, `/api/state`, `/api/now-playing`, `/api/session`, `/api/themes`, `/api/schedule`, `/api/station-auth` and paced MP3. Add Basic-auth and listener-password modes, configurable response delays/failures and redirects to a second fixture origin. Logs retain authorization-present booleans only, not header/query values. Bind literal loopback by default.
-- [ ] Add HTTP tests that independently prove API auth, stream auth, station listener-password auth, delay/drop controls and redirect destination counters. Keep the existing stream fixture tests.
-- [ ] Make a private SDK working copy selected through the generated build's `-Dnative-sdk-path`; preserve the installed SDK and existing fractional-scale patch. Record SDK commit and patch order. The application patch script must assert its target path/version and support an idempotent check mode.
-- [ ] Implement these **proposed SDK extension contracts**, preserving the old APIs for the shipping app:
+- [x] Extend the controlled fixture with `/api/health`, `/api/state`, `/api/now-playing`, `/api/session`, `/api/themes`, `/api/schedule`, `/api/station-auth` and paced MP3. Add Basic-auth and listener-password modes, configurable response delays/failures and redirects to a second fixture origin. Logs retain authorization-present booleans only, not header/query values. Bind literal loopback by default.
+- [x] Add HTTP tests that independently prove API auth, stream auth, station listener-password auth, delay/drop controls and redirect destination counters. Keep the existing stream fixture tests.
+- [x] Make a private SDK working copy selected through the generated build's `-Dnative-sdk-path`; preserve the installed SDK and existing fractional-scale patch. Record SDK commit and patch order. The application patch script must assert its target path/version and support an idempotent check mode.
+- [x] Implement these **proposed SDK extension contracts**, preserving the old APIs for the shipping app:
 
 ```zig
 // Proposed additions; absent from SDK 0.10.1.
@@ -158,6 +177,15 @@ Capture `load_id` at source/callback creation, including native callbacks, queue
 - [ ] First failing HTTP scenario: authenticated GET to fixture A redirects to fixture B; B must receive zero requests. Host reports `redirect_denied`. Direct authenticated GET to A succeeds. Test HTTPS-to-HTTP redirects and POST redirects too.
 - [ ] Prove credential-free native stream URL plus explicit UTF-8 Basic header on each system backend using synthetic credentials. A backend without a supported implementation remains `unsupported`; do not enable private-station playback there or mark Task 1 complete. If this requires a larger SDK transport redesign, record the exact failing backend/API and revise this prerequisite before dependent private-station work.
 - [ ] Run native tests and fixture tests, then Linux/macOS/Windows builds with trace off. Capture real-host authenticated PCM and stale-load behavior where hosts exist; unavailable hosts stay open gates. Commit only the patch, tests, reproducible script and seam evidence, never a copied SDK tree.
+
+**Available-host checkpoint:** Linux Unicode-authenticated MP3 PCM/FFT,
+redirect refusal, live replacement and actual C stale callbacks passed. SDK
+platform/runtime suites passed (929 passed, 14 skipped); native transport12,
+existing proof13, fixture14 and installer6 passed. Windows transport compiled
+and linked. See `docs/sdk-player-transport.md` for reproduction and open gates.
+The unchecked cross-platform/TLS cases above remain open. Continue the pure
+station foundation and public-station integration; do not enable private
+playback on an unverified backend or treat this checkpoint as shipping cutover.
 
 ## Task 2: Station identity and an asynchronous host request owner
 

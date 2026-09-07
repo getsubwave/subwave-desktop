@@ -1,0 +1,2 @@
+# Unified diff context represents a blank source line with a space.
+patches/native-sdk-player-transport.patch -whitespace
