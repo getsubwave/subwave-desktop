@@ -4,7 +4,22 @@ const identity = @import("station_identity.zig");
 const effects = @import("host_effects.zig");
 const protocol = @import("station_protocol.zig");
 
-pub const HealthFailure = enum { offline, @"auth-required", @"vault-unavailable", health_failed };
+pub const HealthFailure = enum {
+    offline,
+    @"auth-required",
+    @"vault-unavailable",
+    health_failed,
+    credentials_invalid,
+    http_consent_required,
+    listener_auth_required,
+    listener_auth_failed,
+    vault_write_failed,
+    vault_rollback_failed,
+    cancelled,
+    rate_limited,
+    forbidden,
+    redirect_denied,
+};
 pub const HealthOutcome = union(enum) { healthy, failed: HealthFailure };
 
 pub const Activation = struct {
@@ -76,6 +91,17 @@ pub const Coordinator = struct {
         self.candidate = null;
         self.latest_station_operation = .{ .operationId = operation_id, .status = .failed, .errorCode = "cancelled" };
         return .{ .operation_id = operation_id, .request_id = if (candidate.request) |tag| tag.request_id else null };
+    }
+
+    /// Fail an exact candidate before a health request exists, without
+    /// inventing an HTTP identity. Error strings come from this closed enum.
+    pub fn failCandidate(self: *Coordinator, operation_id: u64, reason: HealthFailure) !Resolution {
+        const candidate = self.candidate orelse return error.NoCandidate;
+        if (candidate.operation_id != operation_id) return error.OperationMismatch;
+        self.candidate = null;
+        const status: protocol.OperationStatus = .{ .operationId = operation_id, .status = .failed, .errorCode = @tagName(reason) };
+        self.latest_station_operation = status;
+        return .{ .failed = status };
     }
 
     pub fn resolve(self: *Coordinator, request_tag: effects.RequestTag, outcome: HealthOutcome) Resolution {

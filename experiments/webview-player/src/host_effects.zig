@@ -4,6 +4,7 @@ const sdk = @import("native_sdk");
 const client = @import("station_client.zig");
 const identity = @import("station_identity.zig");
 const decoders = @import("station_decoders.zig");
+const vault = @import("credential_vault.zig");
 
 pub const RequestTag = struct {
     operation_id: u64,
@@ -37,15 +38,53 @@ pub const Completion = struct {
         self.* = undefined;
     }
 };
-const Msg = union(enum) { response: sdk.EffectResponse };
+pub const VaultTag = struct { operation_id: u64, generation: u64, request_id: u64 };
+pub const VaultOperation = sdk.EffectCredentialsOperation;
+pub const VaultCompletion = struct {
+    tag: VaultTag,
+    operation: VaultOperation,
+    outcome: vault.Outcome,
+    cancelled: bool,
+    key_storage: [vault.max_key_bytes]u8,
+    key_len: u16,
+    bytes_storage: [vault.max_secret_bytes]u8,
+    bytes_len: u16,
+
+    pub fn key(self: *const VaultCompletion) []const u8 {
+        return self.key_storage[0..self.key_len];
+    }
+    pub fn bytes(self: *const VaultCompletion) []const u8 {
+        return self.bytes_storage[0..self.bytes_len];
+    }
+    pub fn deinit(self: *VaultCompletion) void {
+        std.crypto.secureZero(u8, &self.bytes_storage);
+        @memset(&self.key_storage, 0);
+        self.bytes_len = 0;
+        self.key_len = 0;
+    }
+};
+const Msg = union(enum) { response: sdk.EffectResponse, vault: sdk.EffectCredentialsResult };
 const Fx = sdk.Effects(Msg);
 const Slot = struct { tag: RequestTag, cancelled: bool = false };
 pub const max_requests = 8;
+pub const max_vault_requests = 8;
+const VaultSlot = struct {
+    tag: VaultTag,
+    operation: VaultOperation,
+    cancelled: bool = false,
+    terminal: bool = false,
+    outcome: vault.Outcome = .rejected,
+    key_storage: [vault.max_key_bytes]u8 = undefined,
+    key_len: u16,
+    bytes_storage: [vault.max_secret_bytes]u8 = undefined,
+    bytes_len: u16 = 0,
+};
 
 pub const Owner = struct {
     allocator: std.mem.Allocator,
     effects: *Fx,
     slots: [max_requests]?Slot = .{null} ** max_requests,
+    vault_slots: [max_vault_requests]?VaultSlot = .{null} ** max_vault_requests,
     next_key: u64 = 1_000_000,
     stopped: bool = false,
 
@@ -76,6 +115,7 @@ pub const Owner = struct {
         self.stopped = true;
         self.effects.deinit();
         self.slots = .{null} ** max_requests;
+        for (&self.vault_slots) |*slot| wipeVaultSlot(slot);
     }
 
     pub fn deinit(self: *Owner) void {
@@ -135,6 +175,61 @@ pub const Owner = struct {
         return .{ .response = response };
     }
 
+    fn onVault(result: sdk.EffectCredentialsResult) Msg {
+        return .{ .vault = result };
+    }
+
+    pub fn vaultGet(self: *Owner, operation_id: u64, generation: u64, account_key: []const u8) !VaultTag {
+        const index = try self.reserveVault(operation_id, generation, account_key, .get);
+        const slot = &self.vault_slots[index].?;
+        self.effects.credentialsGet(.{ .key = slot.tag.request_id, .credential_key = slot.key_storage[0..slot.key_len], .on_result = Fx.credentialsMsg(.vault) });
+        return slot.tag;
+    }
+
+    pub fn vaultSet(self: *Owner, operation_id: u64, generation: u64, account_key: []const u8, secret: []const u8) !VaultTag {
+        if (secret.len > vault.max_secret_bytes) return error.OverBound;
+        const index = try self.reserveVault(operation_id, generation, account_key, .set);
+        const slot = &self.vault_slots[index].?;
+        self.effects.credentialsSet(.{ .key = slot.tag.request_id, .credential_key = slot.key_storage[0..slot.key_len], .secret = secret, .on_result = Fx.credentialsMsg(.vault) });
+        return slot.tag;
+    }
+
+    pub fn vaultDelete(self: *Owner, operation_id: u64, generation: u64, account_key: []const u8) !VaultTag {
+        const index = try self.reserveVault(operation_id, generation, account_key, .delete);
+        const slot = &self.vault_slots[index].?;
+        self.effects.credentialsDelete(.{ .key = slot.tag.request_id, .credential_key = slot.key_storage[0..slot.key_len], .on_result = Fx.credentialsMsg(.vault) });
+        return slot.tag;
+    }
+
+    fn reserveVault(self: *Owner, operation_id: u64, generation: u64, account_key: []const u8, operation: VaultOperation) !usize {
+        if (self.stopped) return error.Stopped;
+        // Import/removal reconciliation runs before a station generation exists.
+        if (operation_id == 0 or account_key.len == 0 or account_key.len > vault.max_key_bytes) return error.InvalidVaultRequest;
+        var free: ?usize = null;
+        for (self.vault_slots, 0..) |maybe, index| {
+            if (maybe) |slot| {
+                if (std.mem.eql(u8, slot.key_storage[0..slot.key_len], account_key)) return error.Busy;
+            } else if (free == null) free = index;
+        }
+        const index = free orelse return error.Busy;
+        if (self.next_key == std.math.maxInt(u64)) return error.IdentityExhausted;
+        var slot: VaultSlot = .{ .tag = .{ .operation_id = operation_id, .generation = generation, .request_id = self.next_key }, .operation = operation, .key_len = @intCast(account_key.len) };
+        @memcpy(slot.key_storage[0..account_key.len], account_key);
+        self.next_key += 1;
+        self.vault_slots[index] = slot;
+        return index;
+    }
+
+    /// Logical cancellation only: an already running set/delete reaches its
+    /// terminal worker result before its stable key slot is released.
+    pub fn cancelVaultOperation(self: *Owner, operation_id: u64) void {
+        for (&self.vault_slots) |*maybe| {
+            if (maybe.*) |*slot| {
+                if (slot.tag.operation_id == operation_id) slot.cancelled = true;
+            }
+        }
+    }
+
     pub fn cancelOperation(self: *Owner, operation_id: u64) void {
         for (&self.slots) |*maybe| if (maybe.*) |*slot| {
             if (slot.tag.operation_id == operation_id and !slot.cancelled) {
@@ -161,7 +256,13 @@ pub const Owner = struct {
     /// consumer owns the returned completion and must deinit it.
     pub fn next(self: *Owner, boundary_value: *Fx.DrainBoundary) ?Completion {
         while (self.effects.takeMsgWithin(boundary_value)) |msg| {
-            const response = msg.response;
+            const response = switch (msg) {
+                .vault => |result| {
+                    self.stageVault(result);
+                    continue;
+                },
+                .response => |value| value,
+            };
             var matched: ?Slot = null;
             for (&self.slots) |*maybe| if (maybe.*) |slot| {
                 if (slot.tag.request_id == response.key) {
@@ -183,7 +284,67 @@ pub const Owner = struct {
         }
         return null;
     }
+
+    fn stageVault(self: *Owner, result: sdk.EffectCredentialsResult) void {
+        for (&self.vault_slots) |*maybe| if (maybe.*) |*slot| {
+            if (slot.tag.request_id != result.key or slot.operation != result.operation or slot.terminal) continue;
+            slot.terminal = true;
+            slot.outcome = vaultOutcome(result.outcome);
+            if (!slot.cancelled and result.operation == .get and result.outcome == .ok) {
+                if (result.bytes.len > slot.bytes_storage.len) {
+                    slot.outcome = .over_bound;
+                } else {
+                    @memcpy(slot.bytes_storage[0..result.bytes.len], result.bytes);
+                    slot.bytes_len = @intCast(result.bytes.len);
+                }
+            }
+            return;
+        };
+    }
+
+    /// Consume a terminal staged during next()'s bounded Effects drain. The
+    /// caller owns the fixed result and must call deinit().
+    pub fn nextVault(self: *Owner) ?VaultCompletion {
+        for (&self.vault_slots) |*maybe| if (maybe.*) |*slot| {
+            if (!slot.terminal) continue;
+            var completion: VaultCompletion = .{
+                .tag = slot.tag,
+                .operation = slot.operation,
+                .outcome = slot.outcome,
+                .cancelled = slot.cancelled,
+                .key_storage = undefined,
+                .key_len = slot.key_len,
+                .bytes_storage = undefined,
+                .bytes_len = slot.bytes_len,
+            };
+            @memcpy(completion.key_storage[0..slot.key_len], slot.key_storage[0..slot.key_len]);
+            @memcpy(completion.bytes_storage[0..slot.bytes_len], slot.bytes_storage[0..slot.bytes_len]);
+            wipeVaultSlot(maybe);
+            return completion;
+        };
+        return null;
+    }
 };
+
+fn wipeVaultSlot(maybe: *?VaultSlot) void {
+    if (maybe.*) |*slot| {
+        std.crypto.secureZero(u8, &slot.bytes_storage);
+        @memset(&slot.key_storage, 0);
+    }
+    maybe.* = null;
+}
+
+fn vaultOutcome(outcome: sdk.EffectCredentialsOutcome) vault.Outcome {
+    return switch (outcome) {
+        .ok => .ok,
+        .miss => .miss,
+        .locked => .locked,
+        .denied => .denied,
+        .io_failed => .io_failed,
+        .over_bound => .over_bound,
+        .rejected => .rejected,
+    };
+}
 
 fn classify(response: sdk.EffectResponse) ?Failure {
     if (response.dropped_before != 0) return .delivery_lost;
@@ -300,4 +461,90 @@ test "listener validation is a consented JSON POST with no listener header" {
     try std.testing.expectEqualStrings("Content-Type", pending.headers[0].name);
     try std.testing.expectEqualStrings("application/json", pending.headers[0].value);
     try std.testing.expect(!pending.follow_redirects);
+}
+
+fn waitVault(owner: *Owner) !VaultCompletion {
+    for (0..100_000) |_| {
+        var boundary_value = owner.boundary();
+        while (owner.next(&boundary_value)) |value| {
+            var completion = value;
+            completion.deinit();
+        }
+        if (owner.nextVault()) |completion| return completion;
+        std.Thread.yield() catch {};
+    }
+    return error.TestExpectedVaultCompletion;
+}
+
+test "vault requests round-trip before station activation through hermetic Effects backing" {
+    var platform = sdk.platform.NullPlatform.init(.{});
+    defer platform.deinit();
+    var binding = platform.platform();
+    var owner = try Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    owner.effects.bindCredentialsStore(.{ .services = &binding.services, .service = "dev.subwave.vault-test", .permitted = true });
+
+    var key: [32]u8 = undefined;
+    @memcpy(key[0..10], "basic:test");
+    const set_tag = try owner.vaultSet(1, 0, key[0..10], "owned-secret");
+    @memset(&key, 'x');
+    var set = try waitVault(&owner);
+    defer set.deinit();
+    try std.testing.expectEqual(set_tag, set.tag);
+    try std.testing.expectEqual(vault.Outcome.ok, set.outcome);
+    try std.testing.expectEqualStrings("basic:test", set.key());
+    try std.testing.expectEqualStrings("basic:test", platform.lastCredentialAccount());
+
+    _ = try owner.vaultGet(2, 0, "basic:test");
+    var get = try waitVault(&owner);
+    try std.testing.expectEqual(vault.Outcome.ok, get.outcome);
+    try std.testing.expectEqualStrings("owned-secret", get.bytes());
+    get.deinit();
+    try std.testing.expect(std.mem.allEqual(u8, &get.bytes_storage, 0));
+
+    _ = try owner.vaultDelete(3, 0, "basic:test");
+    var deleted = try waitVault(&owner);
+    defer deleted.deinit();
+    try std.testing.expectEqual(vault.Outcome.ok, deleted.outcome);
+    _ = try owner.vaultGet(4, 0, "basic:test");
+    var miss = try waitVault(&owner);
+    defer miss.deinit();
+    try std.testing.expectEqual(vault.Outcome.miss, miss.outcome);
+    try std.testing.expectEqual(@as(usize, 0), miss.bytes().len);
+}
+
+test "vault cancellation is logical and write terminal remains observable" {
+    var platform = sdk.platform.NullPlatform.init(.{});
+    defer platform.deinit();
+    var binding = platform.platform();
+    var owner = try Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    owner.effects.bindCredentialsStore(.{ .services = &binding.services, .service = "dev.subwave.vault-cancel-test", .permitted = true });
+    const submitted = try owner.vaultSet(51, 7, "listener:test", "write-finishes");
+    owner.cancelVaultOperation(51);
+    try std.testing.expectError(error.Busy, owner.vaultGet(52, 7, "listener:test"));
+    var terminal = try waitVault(&owner);
+    defer terminal.deinit();
+    try std.testing.expectEqual(submitted, terminal.tag);
+    try std.testing.expect(terminal.cancelled);
+    try std.testing.expectEqual(vault.Outcome.ok, terminal.outcome);
+    _ = try owner.vaultGet(52, 7, "listener:test");
+    var stored = try waitVault(&owner);
+    defer stored.deinit();
+    try std.testing.expectEqualStrings("write-finishes", stored.bytes());
+}
+
+test "vault requests are bounded before Effects submission" {
+    var owner = try Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    try std.testing.expectError(error.InvalidVaultRequest, owner.vaultGet(1, 1, "x" ** (vault.max_key_bytes + 1)));
+    try std.testing.expectError(error.OverBound, owner.vaultSet(1, 1, "basic:test", "x" ** (vault.max_secret_bytes + 1)));
+    for (0..max_vault_requests) |index| {
+        var key: [32]u8 = undefined;
+        const account = try std.fmt.bufPrint(&key, "basic:test-{d}", .{index});
+        _ = try owner.vaultGet(index + 1, 1, account);
+    }
+    try std.testing.expectError(error.Busy, owner.vaultGet(99, 1, "basic:test"));
+    owner.stop();
+    for (owner.vault_slots) |slot| try std.testing.expect(slot == null);
 }

@@ -132,23 +132,51 @@ no missing measurement is replaced with an estimate.
 - OS-driven minimize/occlusion: the current app event surface does not fully
   expose these states. Explicit proof hide controls are the tested boundary;
   all-hidden animation suppression is not established.
-- Native audio events have no load token. Production station switching and
-  reconnect need serialized teardown/load or an SDK event-token extension.
-- A reloaded/ready view waits for the next live FFT frame. Retaining the newest
-  sample for a paused reload remains a defined follow-on requirement.
-- Production credentials, station polling/reconnect, settings migration,
-  tray/notifications/Discord, installer integration and designed UI are future
-  work. The controls here are a diagnostic panel.
-- Production builds must scope development origins to development. This proof
-  allows the exact local Vite origin; automation builds additionally authorize
-  the CLI's `zero://inline` bridge origin. Redirect/navigation adversarial
-  runtime testing remains pending beyond the declared exact-origin policy.
+- The private SDK transport patch adds source-captured audio load IDs on Linux,
+  macOS and Windows. Linux runtime evidence exists for focused transport probes;
+  macOS and Windows still require actual-host verification.
+- The foundation retains the newest FFT frame for a paused/reloaded view;
+  the earlier protocol-1 proof waits for the next live frame.
+- The isolated foundation now contains candidate credential transactions,
+  polling/reconnect, bounded preferences, crash-resumable removal and legacy
+  import. Final integrated platform evidence, real OS vault acceptance,
+  tray/notifications/Discord, installer integration and designed UI remain.
+- Foundation production builds authorize only `zero://app`; the exact Vite
+  origin requires `-Dfrontend-dev=true`, and `zero://inline` requires automation.
+  Navigation adversarial runtime testing remains pending beyond declared policy.
 
 ## Automation caveat
 
 The SDK automation bridge uses a shared response file that live FFT ACKs can
 overwrite. The verification helper matches request IDs and retries only reads;
 mutations are checked against subsequent authoritative state and stream counts.
-A native `snapshot` invocation itself marks its source view ready. Real WebView
-readiness must therefore be checked with `diagnostics` before requesting a
-snapshot; otherwise automation can mask a failed frontend load.
+The older protocol-1 proof marks its source view ready on a native snapshot.
+The foundation excludes `zero://inline` reads from readiness and retained-frame
+initialization. Its checker verifies actual WebView readiness through diagnostics
+before reading a station snapshot. Live spectrum ACKs can still overwrite the
+SDK's shared response file, so mutations are never blindly replayed.
+
+## Tasks 4–6 implementation checkpoint
+
+The foundation model uses one effects owner for HTTP and vault requests. A candidate reads Basic and listener records before health probing, validates a supplied or stored listener password even when listener authentication is optional, and writes changed vault records only after remote confirmation. Cancellation waits for terminal effects and compensates completed writes. Credentials never appear in protocol snapshots or operation replies.
+
+Authenticated media uses an app-owned loopback relay. The relay alone receives the upstream authorization header and listener query, denies redirects and passes a credential-free URL to the platform audio loader. Native audio events carry their source load ID so callbacks from replaced loads cannot drive the current session. Linux credential callbacks are supplied by `patches/native-sdk-credentials-linux.patch`, applied after the transport patch and checked with `scripts/apply-player-credentials-linux-patch.sh --check`.
+
+Version-2 preferences are bounded and atomically replaced with owner-only permissions. The import transaction preserves the exact legacy bytes once, keeps the original file, imports only missing credentials, verifies writes and commits only sanitized station data plus a source digest. Station removal is journaled with `pendingRemoval` before idempotent credential deletes and resumes at startup after interruption.
+
+The automation vault is an opt-in file-backed SDK credential adapter compiled with `-Dautomation=true` and activated only when `SUBWAVE_TEST_VAULT_DIR` names an existing canonical directory beneath `/tmp/subwave-foundation-*`. Its generated synthetic records are an authorized test store. Passing those tests does not establish real Keychain, Credential Manager or Secret Service behavior.
+
+Frontend verification covers 25 unit tests, 6 browser contract tests, type checking and production asset building. The foundation native source suite passed 119 tests.
+
+The integrated Linux automation run passed with binary SHA-256 `bd5905b92b63205dfccaf457003a7eb09d0ac909555bd85c2f57e88b577c3a50`:
+
+```bash
+XDG_RUNTIME_DIR=/run/user/1000 DISPLAY=:0 \
+  python3 scripts/check-player-foundation-linux.py \
+  --binary experiments/webview-player/zig-out/bin/webview-player-foundation \
+  --resources experiments/webview-player/frontend/dist --timeout 25
+```
+
+It established real `zero://app` React bridge readiness before CLI reads, protocol 2 generation changes, public/Basic/listener/combined fixtures, authenticated API and stream requests, native FFT for each private mode, combined-auth PCM at -34.5 dBFS, drop/reconnect, one pending spectrum frame per view, window reload/mini/hide convergence, byte-exact import backup, HTTP consent across restart, and active-station forget with one uninterrupted stream and no extra load. The vault was empty after forget, the station remained absent after restart, the legacy source remained intact and the sentinel scan found no credentials outside the explicit vault/source/backup exceptions. Sanitized counters and operation evidence are in [evidence/linux-foundation.json](evidence/linux-foundation.json).
+
+This closes the Linux integrated foundation gate. It uses the automation-only synthetic vault and therefore does not establish real Secret Service behavior. macOS and Windows integrated runtime remain open; Windows compilation and linking passed but are not runtime evidence.

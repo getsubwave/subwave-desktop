@@ -101,6 +101,7 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "debug_overlay", debug_overlay);
     options.addOption(bool, "automation", automation_enabled);
     options.addOption(bool, "js_bridge", js_bridge_enabled);
+    options.addOption(bool, "frontend_dev", b.option(bool, "frontend-dev", "Allow exact local Vite origin") orelse false);
     options.addOption(bool, "web_layer", web_layer);
     const options_mod = options.createModule();
 
@@ -112,18 +113,21 @@ pub fn build(b: *std.Build) void {
     migrations_mod.addImport("native_sdk", native_sdk_mod);
     runner_mod.addImport("relational_migrations", migrations_mod);
 
+    const foundation = b.option(bool, "foundation", "Build the integrated station player preview") orelse false;
     const transport_probe = b.option(bool, "transport-probe", "Build the isolated authenticated audio transport probe") orelse false;
     const request_probe = b.option(bool, "request-probe", "Build the native station request wake/drain probe") orelse false;
     const session_probe = b.option(bool, "session-probe", "Build public station session runtime probe") orelse false;
     if (@as(u8, @intFromBool(transport_probe)) + @intFromBool(request_probe) + @intFromBool(session_probe) > 1) @panic("Choose only one probe entrypoint");
-    const app_mod = localModule(b, target, optimize, if (transport_probe) "src/transport_contract.zig" else if (request_probe) "src/request_probe.zig" else if (session_probe) "src/session_probe.zig" else "src/main.zig");
+    const app_entry = if (transport_probe) "src/transport_contract.zig" else if (request_probe) "src/request_probe.zig" else if (session_probe) "src/session_probe.zig" else if (foundation) "src/foundation_app.zig" else "src/main.zig";
+    const executable_name = if (transport_probe) "transport-probe" else if (request_probe) "request-probe" else if (session_probe) "session-probe" else if (foundation) "webview-player-foundation" else app_exe_name;
+    const app_mod = localModule(b, target, optimize, app_entry);
     app_mod.addImport("native_sdk", native_sdk_mod);
     app_mod.addImport("runner", runner_mod);
     app_mod.addImport("build_options", options_mod);
     if (app_config.sqlite_capability) addSqliteEngine(b, app_mod, native_sdk_path);
     addMacosInfoPlist(b, app_mod, target, app_config);
     const exe = b.addExecutable(.{
-        .name = if (transport_probe) "transport-probe" else if (request_probe) "request-probe" else if (session_probe) "session-probe" else app_exe_name,
+        .name = executable_name,
         .root_module = app_mod,
         // Zig 0.16.0's self-hosted x86_64 backend (the Debug default)
         // miscompiles the SysV C calling convention for the long
@@ -183,14 +187,14 @@ pub fn build(b: *std.Build) void {
         const package_migrations_mod = b.createModule(.{ .root_source_file = relational_migrations_source, .target = target, .optimize = package_optimize });
         package_migrations_mod.addImport("native_sdk", package_sdk_mod);
         package_runner_mod.addImport("relational_migrations", package_migrations_mod);
-        const package_app_mod = localModule(b, target, package_optimize, "src/main.zig");
+        const package_app_mod = localModule(b, target, package_optimize, app_entry);
         package_app_mod.addImport("native_sdk", package_sdk_mod);
         package_app_mod.addImport("runner", package_runner_mod);
         package_app_mod.addImport("build_options", options_mod);
         if (app_config.sqlite_capability) addSqliteEngine(b, package_app_mod, native_sdk_path);
         addMacosInfoPlist(b, package_app_mod, target, app_config);
         const built = b.addExecutable(.{
-            .name = app_exe_name,
+            .name = executable_name,
             .root_module = package_app_mod,
             // Same self-hosted x86_64 workaround as the dev exe above
             // (only reachable when -Doptimize pins Debug for both roles).
@@ -216,7 +220,7 @@ pub fn build(b: *std.Build) void {
         "--optimize",
         package_optimize_name,
         "--output",
-        b.fmt("zig-out/package/{s}-0.1.0-{s}-{s}{s}", .{ app_exe_name, @tagName(package_target), package_optimize_name, packageSuffix(package_target) }),
+        b.fmt("zig-out/package/{s}-0.1.0-{s}-{s}{s}", .{ executable_name, @tagName(package_target), package_optimize_name, packageSuffix(package_target) }),
         "--binary",
     });
     // The CLI resolves SDK-owned package inputs (the vendored WebView2

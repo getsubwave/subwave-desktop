@@ -8,6 +8,9 @@ pub const ViewDelivery = struct {
     ack_count: u64 = 0,
     max_pending_per_view: u8 = 0,
     next_sequence: u64 = 0,
+    latest_generation: u64 = 0,
+    latest_bands: [32]u8 = @splat(0),
+    latest_valid: bool = false,
 
     pub const SlotDiagnostic = struct {
         window_id: native_sdk.WindowId,
@@ -45,9 +48,11 @@ pub const ViewDelivery = struct {
     }
 
     pub fn clearPending(self: *ViewDelivery) void {
+        self.latest_valid = false;
         for (&self.slots) |*slot| {
             slot.awaiting_ack = false;
             slot.pending_bands = @splat(0);
+            slot.pending_sequence = slot.delivered_sequence;
         }
     }
 
@@ -64,7 +69,24 @@ pub const ViewDelivery = struct {
         };
     }
 
+    pub fn initializeSpectrum(self: *ViewDelivery, runtime: *native_sdk.Runtime, window_id: native_sdk.WindowId) void {
+        if (!self.latest_valid) return;
+        const slot = self.findSlot(window_id) orelse return;
+        if (!slot.ready or !slot.visible or slot.awaiting_ack) return;
+        slot.pending_sequence = self.next_sequence;
+        slot.pending_bands = self.latest_bands;
+        self.deliver(runtime, slot, self.latest_generation);
+    }
+    pub fn pushStationSnapshot(self: *ViewDelivery, runtime: *native_sdk.Runtime, json: []const u8, revision: u64) void {
+        for (&self.slots) |*slot| if (slot.window_id != 0 and slot.ready and slot.visible and slot.last_snapshot_revision != revision) {
+            runtime.emitWindowEvent(slot.window_id, "subwave.player.snapshot", json) catch continue;
+            markSnapshot(slot, revision);
+        };
+    }
     pub fn offerSpectrum(self: *ViewDelivery, runtime: *native_sdk.Runtime, generation: u64, bands: [32]u8) void {
+        self.latest_generation = generation;
+        self.latest_bands = bands;
+        self.latest_valid = true;
         self.sample_received += 1;
         self.next_sequence += 1;
         for (&self.slots) |*slot| {

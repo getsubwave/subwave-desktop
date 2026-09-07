@@ -1,0 +1,262 @@
+{
+  "automationReadNote": "React zero://app readiness was established before automation reads; read-only CLI bridge responses were shape-correlated because the SDK response file is shared with frontend acknowledgements.",
+  "binarySha256": "bd5905b92b63205dfccaf457003a7eb09d0ac909555bd85c2f57e88b577c3a50",
+  "platform": "linux",
+  "result": "passed",
+  "scenarios": [
+    {
+      "combinedPrivatePcmDbfs": -34.5,
+      "firstOperationId": 2,
+      "fixtureRequests": [
+        {
+          "/api/health": {
+            "authorizationPresent": 0,
+            "listenerAuthPresent": 0,
+            "requests": 1,
+            "successes": 1
+          },
+          "/api/now-playing": {
+            "authorizationPresent": 0,
+            "listenerAuthPresent": 0,
+            "requests": 1,
+            "successes": 1
+          },
+          "/api/schedule": {
+            "authorizationPresent": 0,
+            "listenerAuthPresent": 0,
+            "requests": 1,
+            "successes": 1
+          },
+          "/api/session": {
+            "authorizationPresent": 0,
+            "listenerAuthPresent": 0,
+            "requests": 1,
+            "successes": 1
+          },
+          "/api/state": {
+            "authorizationPresent": 0,
+            "listenerAuthPresent": 0,
+            "requests": 2,
+            "successes": 2
+          },
+          "/api/themes": {
+            "authorizationPresent": 0,
+            "listenerAuthPresent": 0,
+            "requests": 1,
+            "successes": 1
+          },
+          "/stream.mp3": {
+            "authorizationPresent": 0,
+            "listenerAuthPresent": 0,
+            "requests": 2,
+            "successes": 2
+          }
+        },
+        {
+          "/api/health": {
+            "authorizationPresent": 0,
+            "listenerAuthPresent": 0,
+            "requests": 2,
+            "successes": 1
+          },
+          "/api/now-playing": {
+            "authorizationPresent": 0,
+            "listenerAuthPresent": 0,
+            "requests": 1,
+            "successes": 1
+          },
+          "/api/schedule": {
+            "authorizationPresent": 0,
+            "listenerAuthPresent": 0,
+            "requests": 1,
+            "successes": 1
+          },
+          "/api/session": {
+            "authorizationPresent": 0,
+            "listenerAuthPresent": 0,
+            "requests": 1,
+            "successes": 1
+          },
+          "/api/state": {
+            "authorizationPresent": 0,
+            "listenerAuthPresent": 0,
+            "requests": 2,
+            "successes": 2
+          },
+          "/api/themes": {
+            "authorizationPresent": 0,
+            "listenerAuthPresent": 0,
+            "requests": 1,
+            "successes": 1
+          },
+          "/stream.mp3": {
+            "authorizationPresent": 0,
+            "listenerAuthPresent": 0,
+            "requests": 1,
+            "successes": 1
+          }
+        }
+      ],
+      "generation": 2,
+      "maxPendingPerView": 1,
+      "privateModes": {
+        "basic": {
+          "/api/health": {
+            "authorizationPresent": 1,
+            "listenerAuthPresent": 0,
+            "requests": 1,
+            "successes": 1
+          },
+          "/api/now-playing": {
+            "authorizationPresent": 1,
+            "listenerAuthPresent": 0,
+            "requests": 1,
+            "successes": 1
+          },
+          "/api/schedule": {
+            "authorizationPresent": 1,
+            "listenerAuthPresent": 0,
+            "requests": 1,
+            "successes": 1
+          },
+          "/api/session": {
+            "authorizationPresent": 1,
+            "listenerAuthPresent": 0,
+            "requests": 1,
+            "successes": 1
+          },
+          "/api/state": {
+            "authorizationPresent": 2,
+            "listenerAuthPresent": 0,
+            "requests": 2,
+            "successes": 2
+          },
+          "/api/themes": {
+            "authorizationPresent": 1,
+            "listenerAuthPresent": 0,
+            "requests": 1,
+            "successes": 1
+          },
+          "/stream.mp3": {
+            "authorizationPresent": 1,
+            "listenerAuthPresent": 0,
+            "requests": 1,
+            "successes": 1
+          }
+        },
+        "combined": {
+          "/api/health": {
+            "authorizationPresent": 1,
+            "listenerAuthPresent": 0,
+            "requests": 1,
+            "successes": 1
+          },
+          "/api/now-playing": {
+            "authorizationPresent": 1,
+            "listenerAuthPresent": 0,
+            "requests": 1,
+            "successes": 1
+          },
+          "/api/schedule": {
+            "authorizationPresent": 1,
+            "listenerAuthPresent": 0,
+            "requests": 1,
+            "successes": 1
+          },
+          "/api/session": {
+            "authorizationPresent": 1,
+            "listenerAuthPresent": 0,
+            "requests": 1,
+            "successes": 1
+          },
+          "/api/state": {
+            "authorizationPresent": 2,
+            "listenerAuthPresent": 0,
+            "requests": 2,
+            "successes": 2
+          },
+          "/api/station-auth": {
+            "authorizationPresent": 1,
+            "listenerAuthPresent": 1,
+            "requests": 1,
+            "successes": 1
+          },
+          "/api/themes": {
+            "authorizationPresent": 1,
+            "listenerAuthPresent": 0,
+            "requests": 1,
+            "successes": 1
+          },
+          "/stream.mp3": {
+            "authorizationPresent": 1,
+            "listenerAuthPresent": 1,
+            "requests": 1,
+            "successes": 1
+          }
+        },
+        "listener": {
+          "/api/health": {
+            "authorizationPresent": 0,
+            "listenerAuthPresent": 0,
+            "requests": 1,
+            "successes": 1
+          },
+          "/api/now-playing": {
+            "authorizationPresent": 0,
+            "listenerAuthPresent": 0,
+            "requests": 1,
+            "successes": 1
+          },
+          "/api/schedule": {
+            "authorizationPresent": 0,
+            "listenerAuthPresent": 0,
+            "requests": 1,
+            "successes": 1
+          },
+          "/api/session": {
+            "authorizationPresent": 0,
+            "listenerAuthPresent": 0,
+            "requests": 1,
+            "successes": 1
+          },
+          "/api/state": {
+            "authorizationPresent": 0,
+            "listenerAuthPresent": 0,
+            "requests": 2,
+            "successes": 2
+          },
+          "/api/station-auth": {
+            "authorizationPresent": 0,
+            "listenerAuthPresent": 1,
+            "requests": 1,
+            "successes": 1
+          },
+          "/api/themes": {
+            "authorizationPresent": 0,
+            "listenerAuthPresent": 0,
+            "requests": 1,
+            "successes": 1
+          },
+          "/stream.mp3": {
+            "authorizationPresent": 0,
+            "listenerAuthPresent": 1,
+            "requests": 1,
+            "successes": 1
+          }
+        }
+      },
+      "protocol": 2,
+      "scenario": "public-foundation"
+    },
+    {
+      "activeLoadPreserved": 1,
+      "activeStreamsDuringForget": 1,
+      "forgetOperationId": 6,
+      "importOperationId": 2,
+      "scenario": "import-consent-forget-restart",
+      "vaultRecordsAfterForget": 0
+    }
+  ],
+  "schemaVersion": 1,
+  "testSourceNote": "Foundation native source suite passed 119 tests before this runtime run."
+}

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { acceptSnapshot, connectSnapshots, nativeBridge, type Bridge, type Command, type Snapshot, type Spectrum, type WindowAction } from "./bridge";
 
-function SpectrumCanvas({ bridge }: { bridge: Bridge }) {
+export function SpectrumCanvas({ bridge }: { bridge: Bridge }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   useEffect(() => bridge.subscribeSpectrum((sample: Spectrum) => {
     const canvas = canvasRef.current;

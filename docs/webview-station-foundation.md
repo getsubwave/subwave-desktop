@@ -1,79 +1,84 @@
 # Station foundation checkpoint
 
-The isolated experiment now owns canonical station identity, protocol-2 command
-parsing and sanitized serialization, independent bounded API requests and a
-candidate health gate. This checkpoint does not attach them to the player UI;
-credentials, session playback and persistence are subsequent integration work.
+The isolated WebView experiment now implements the protocol-2 station core through Tasks 4–6. React sends typed intents and renders sanitized snapshots. One Zig model owns candidate selection, HTTP, native audio, timers, credentials and preferences; views do not own sessions or receive credentials, upstream URLs or raw station responses.
 
-The health decoder follows the actual controller response
-`{"status":"on-air"}`. An accepted candidate becomes active only after its exact
-operation/generation/request/endpoint tag returns healthy. Failed or canceled
-candidates preserve the active identity. The client denies redirects and bounds
-request capacity, headers, bodies and response lifetimes. JSON command parser
-allocations are wiped when released, including malformed input paths.
+The candidate transaction reads both vault records before probing, keeps the active session unchanged until health and listener validation succeed, and serializes credential changes. Failed or cancelled changes compensate completed vault writes before releasing the station-mutation slot. Every HTTP, vault, timer and audio completion carries its operation, generation, request, endpoint or load identity and stale completions are ignored.
 
-## Verification
+Private audio uses the app-owned loopback relay described in `docs/sdk-player-transport.md`. The native player receives a credential-free loopback URL; the relay owns upstream Basic authentication, listener query encoding and redirect denial. The private SDK patch adds per-load native audio identity. It does not use undocumented AVFoundation header options. Linux credential callbacks use the subsequent `patches/native-sdk-credentials-linux.patch`.
 
-From `experiments/webview-player`, with the private SDK prepared as documented
-in `docs/sdk-player-transport.md`:
+Preferences are bounded version-2 JSON written through an owner-only atomic replacement, file sync and parent-directory sync where supported. Saves are serialized and retain the latest dirty revision. Legacy import reads at most 8192 bytes, preserves a byte-exact create-once backup, writes only absent vault records, verifies new records, then commits sanitized preferences and an import digest. The original legacy file is retained. Station removal first persists a `pendingRemoval` marker, performs idempotent vault deletion, then commits the station removal; startup resumes a durable pending removal.
+
+After remote validation and credential commitment, a native device failure is reported as playback error on the confirmed selected station. The station and its validated credentials remain available for Play to retry; this is distinct from a failed candidate validation or vault write, which preserves the previous session. Candidate preferences and removal markers are allocated before their transaction begins, so preparation failure cannot follow a credential or disk commit.
+
+Production bridge commands are restricted to `zero://app`. The exact Vite origin is compiled only with `-Dfrontend-dev=true`; `zero://inline` is compiled only with `-Dautomation=true`. Both windows use bundled asset sources and the same command policy. Snapshots are capped below the SDK bridge limit and omit secrets.
+
+## Build and focused checks
+
+Prepare the private SDK copy as documented in `docs/sdk-player-transport.md`:
 
 ```sh
-zig build test-foundation -Dtrace=off -Dnative-sdk-path=../../.superpowers/player-transport-sdk --summary all
+./scripts/apply-player-transport-patch.sh --sdk-path /abs/private-sdk --prepare-from /abs/sdk-base
+./scripts/apply-player-transport-patch.sh --sdk-path /abs/private-sdk --check
+./scripts/apply-player-credentials-linux-patch.sh --sdk-path /abs/private-sdk
+./scripts/apply-player-credentials-linux-patch.sh --sdk-path /abs/private-sdk --check
+```
+
+Run these four commands from the repository root and in this order. The credential installer requires the prepared transport marker, validates the other transport hashes, checks the installed libsecret ABI with compile-time size/offset assertions, dry-runs, and rolls back a failed apply. The credential `--check` validates the combined final copy.
+
+Then run from `experiments/webview-player`:
+
+```sh
+npm --prefix frontend ci
+npm --prefix frontend run build
+zig build test-foundation -Dtrace=off \
+  -Dnative-sdk-path=../../.superpowers/player-transport-sdk --summary all
 node --test fixtures/station.test.mjs
-zig build -Dtrace=off -Drequest-probe=true -Dnative-sdk-path=../../.superpowers/player-transport-sdk --prefix /tmp/subwave-request-foundation
+zig build -Dfoundation=true -Dtrace=off \
+  -Dnative-sdk-path=../../.superpowers/player-transport-sdk \
+  --prefix /tmp/subwave-foundation-build
 ```
 
-Checkpoint results: **35 native foundation tests and 14 fixture tests passed**.
-The Linux request probe compiled and ran against a temporary literal-loopback
-fixture with its health response delayed 500 ms. All three responses arrived
-through `effects_wake`: health activated generation 1, then now-playing and state
-completed independently. The executable exited successfully after all three.
-No audio, shipping configuration or real credentials were used by this probe.
-
-To reproduce the runtime portion, start `node fixtures/station.mjs` and use its
-printed primary origin as `SUBWAVE_REQUEST_FIXTURE`. Set temporary
-`XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `NATIVE_SDK_LOG_DIR`; run the above probe
-binary in an existing desktop session. Stop the fixture after verification.
-
-## Remaining boundaries
-
-The full foundation plan remains open. The request owner is currently bound by
-a dedicated runtime probe; the main/mini interface still uses the earlier proof
-contract. Private candidate validation and vault persistence must precede its
-activation in the final host. The SDK HTTP effects currently allow 1024 aggregate
-header bytes, while vault entries allow 2560 bytes: transport size is explicitly
-rejected before request admission, and private-station UX must honor that limit
-or use a separately verified SDK expansion. Real macOS/Windows execution is
-still required. See the foundation plan for session, vault, import and UI work.
-
-## Public session integration checkpoint
-
-`session_host.zig` now integrates the station gate, request owner, a single
-relay/native decoder pair, independent feed polling and native retry timers.
-It keeps user intent separate from engine state, rejects old load events, unloads
-when paused during loading, and preserves a healthy stream across pause/resume.
-It restores the ready connection state after the four-false-poll offline state
-recovers. Failed timer creation clears timer ownership and exposes an error;
-it cannot leave a phantom retry pending.
-
-The checkpoint foundation target has **66 passing tests** (preferences and vault
-codecs remain separate work). Public-session Linux reproduction:
+For synthetic GUI automation, create a fresh directory whose canonical path is beneath `/tmp/subwave-foundation-*`, then compile the automation-only origin and vault adapter:
 
 ```sh
-# From experiments/webview-player:
-zig build -Dtrace=off -Dsession-probe=true -Dnative-sdk-path=../../.superpowers/player-transport-sdk --prefix /tmp/subwave-session-foundation
-# From the repository root, in the existing desktop session:
-python3 scripts/check-player-session-linux.py --binary /tmp/subwave-session-foundation/bin/session-probe
+preview_state="$(mktemp -d /tmp/subwave-foundation-preview.XXXXXX)"
+mkdir -p "$preview_state/vault" "$preview_state/config" "$preview_state/cache" "$preview_state/data"
+zig build -Dfoundation=true -Dautomation=true -Dtrace=off \
+  -Dnative-sdk-path=../../.superpowers/player-transport-sdk \
+  --prefix /tmp/subwave-foundation-automation
+env -u SUBWAVE_STATION_URL -u NATIVE_SDK_FRONTEND_URL \
+  XDG_CONFIG_HOME="$preview_state/config" XDG_CACHE_HOME="$preview_state/cache" \
+  XDG_DATA_HOME="$preview_state/data" SUBWAVE_TEST_VAULT_DIR="$preview_state/vault" \
+  /tmp/subwave-foundation-automation/bin/webview-player-foundation
 ```
 
-The script owns two loopback fixtures, temporary configuration/log directories
-and a private null audio sink. It checks three 12-second native runs: steady
-playback loads once and polls each endpoint at its own interval; a stream drop
-recovers under a new load ID and produces new FFT samples; station switching
-activates generation 2, loads exactly twice and produces FFT for the new station.
-Every scenario shuts down with zero active fixture streams. The script cleans
-its processes and sink even if an assertion fails.
+`automation_vault.zig` is a persistent file-backed store for generated test credentials only. Its tests prove SDK callback outcomes, bounds, restart, locking and path containment. They do not test Keychain, Credential Manager or Secret Service. The Linux integrated gate below uses this synthetic vault; real Secret Service behavior remains a release gate.
 
-This still uses a dedicated runtime probe. Main/mini view attachment, retained
-FFT initialization after reload, vault-backed private stations, durable format
-fallback/preferences and transactional import are not closed by these results.
+## Runtime reproduction
+
+The dedicated request and public-session probes remain useful focused checks:
+
+```sh
+zig build -Dtrace=off -Drequest-probe=true \
+  -Dnative-sdk-path=../../.superpowers/player-transport-sdk \
+  --prefix /tmp/subwave-request-foundation
+zig build -Dtrace=off -Dsession-probe=true \
+  -Dnative-sdk-path=../../.superpowers/player-transport-sdk \
+  --prefix /tmp/subwave-session-foundation
+cd ../..
+python3 scripts/check-player-session-linux.py \
+  --binary /tmp/subwave-session-foundation/bin/session-probe
+```
+
+The final integrated Linux run passed with the automation build whose SHA-256 was `bd5905b92b63205dfccaf457003a7eb09d0ac909555bd85c2f57e88b577c3a50`:
+
+```bash
+XDG_RUNTIME_DIR=/run/user/1000 DISPLAY=:0 \
+  python3 scripts/check-player-foundation-linux.py \
+  --binary experiments/webview-player/zig-out/bin/webview-player-foundation \
+  --resources experiments/webview-player/frontend/dist --timeout 25
+```
+
+The checker proved React readiness before automation reads, protocol 2, public and private station switching, Basic and listener authentication on APIs and native audio, native FFT, combined-auth PCM at -34.5 dBFS, drop/reconnect, bounded per-view spectrum delivery, mini/open/hide/reload, import consent and restart, and active-station forget without replacing its live stream. It also scanned temporary artifacts for credential sentinels and verified shutdown cleanup. The sanitized result is [linux-foundation.json](../experiments/webview-player/evidence/linux-foundation.json).
+
+macOS and Windows runtime validation remain open gates. The Windows foundation compiles and links, which is build evidence only. Real Linux Secret Service behavior also remains open because the integrated credential run intentionally uses the hermetic synthetic vault.

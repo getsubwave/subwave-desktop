@@ -19,6 +19,18 @@ npm --prefix frontend run build
 zig build -Dtrace=off -Dautomation=true -Djs-bridge=true
 ```
 
+The integrated station foundation is a separate build selection and requires the prepared private SDK copy:
+
+```bash
+zig build test-foundation -Dtrace=off \
+  -Dnative-sdk-path=../../.superpowers/player-transport-sdk --summary all
+zig build -Dfoundation=true -Dtrace=off \
+  -Dnative-sdk-path=../../.superpowers/player-transport-sdk \
+  --prefix /tmp/subwave-foundation-build
+```
+
+Use `-Dfrontend-dev=true` only with the exact loopback Vite origin. Use `-Dautomation=true` only for synthetic automation; it adds `zero://inline` to the bridge policy. Production foundation builds authorize only `zero://app`.
+
 The scaffold also exposes `-Dnative-sdk-path=/absolute/path/to/sdk` for a
 locally installed SDK. Run `zig build --help` for the complete build surface.
 The frontend is built into `frontend/dist`; no dev server is needed to launch
@@ -56,13 +68,24 @@ Native automation inspects windows and invokes host commands. It does not
 capture WebView pixels or test React DOM interactions. Frontend browser tests
 use a fake host and establish frontend contract behavior only.
 
+Foundation automation can opt into a persistent synthetic vault. The harness must create an existing canonical directory beneath `/tmp/subwave-foundation-*` and export it only to the automation build:
+
+```bash
+zig build -Dfoundation=true -Dautomation=true -Dtrace=off \
+  -Dnative-sdk-path=../../.superpowers/player-transport-sdk \
+  --prefix /tmp/subwave-foundation-automation
+python3 ../../scripts/check-player-foundation-linux.py \
+  --binary /tmp/subwave-foundation-automation/bin/webview-player-foundation
+```
+
+This store contains generated fixture secrets and exists to test restart and transaction behavior. It is distinct from real Keychain, Credential Manager and Secret Service validation. Remove the temporary directory after the run.
+
 ## Evidence and scope
 
 See [EVIDENCE.md](EVIDENCE.md) for the measured results and outstanding platform
 gates. Native sound output, FFT samples, independent window lifecycle, and
 packaged assets require real-host verification. Do not infer them from browser
-unit tests. Production authentication, station migration, visual design, tray,
-notifications and Discord integration are subsequent milestones.
+unit tests. The foundation implements private-station transactions and legacy import in the isolated experiment. Real OS vault acceptance, final platform runtime evidence, visual design, tray, notifications and Discord integration remain separate.
 
 ## Checks
 
@@ -75,6 +98,14 @@ npm --prefix frontend run test:e2e
 npm --prefix frontend run build
 native validate app.json
 ```
+
+The final integrated Linux checker is owned by the repository root:
+
+```bash
+python3 ../../scripts/check-player-foundation-linux.py --help
+```
+
+Do not treat a successful compile, browser test or synthetic vault test as real native credential or audio proof.
 
 ## Linux package
 

@@ -11,12 +11,17 @@ const effects_mod = @import("host_effects.zig");
 const audio_mod = @import("audio_owner.zig");
 const decoders = @import("station_decoders.zig");
 const formats = @import("stream_formats.zig");
+const vault = @import("credential_vault.zig");
+const station_client = @import("station_client.zig");
 
 pub const poll_timer_id: u64 = 0x1000_0000;
 const PollRequest = struct { key: session_mod.PollKey, tag: effects_mod.RequestTag };
 
 pub const Host = struct {
     allocator: std.mem.Allocator,
+    basic: ?vault.BasicRecord = null,
+    listener: ?vault.ListenerRecord = null,
+    allow_insecure_http: bool = false,
     http: effects_mod.Owner,
     audio: audio_mod.Owner,
     selection: selection_mod.Coordinator = .{},
@@ -59,6 +64,7 @@ pub const Host = struct {
         std.debug.assert(self.audio.relay == null);
         self.clearFeeds();
         self.http.deinit();
+        self.clearCredentials();
     }
 
     /// Public candidate only. Task4 attaches vault lookup/validation before
@@ -85,6 +91,7 @@ pub const Host = struct {
         self.cancelRecovery(services);
         try self.execute(services, self.session.disconnect(), now_ms);
         self.selection.active_station = null;
+        self.clearCredentials();
         self.polls = @splat(null);
         self.clearFeeds();
         self.flags = null;
@@ -135,11 +142,19 @@ pub const Host = struct {
         self.revision += 1;
     }
 
+    pub const Interceptor = struct {
+        context: *anyopaque,
+        consume: *const fn (*anyopaque, *effects_mod.Completion) anyerror!bool,
+    };
     pub fn drain(self: *Host, services: sdk.platform.PlatformServices, now_ms: u64) !void {
+        return self.drainIntercept(services, now_ms, null);
+    }
+    pub fn drainIntercept(self: *Host, services: sdk.platform.PlatformServices, now_ms: u64, interceptor: ?Interceptor) !void {
         var boundary = self.http.boundary();
         while (self.http.next(&boundary)) |value| {
             var completion = value;
             defer completion.deinit();
+            if (interceptor) |hook| if (try hook.consume(hook.context, &completion)) continue;
             if (completion.tag.kind == .health) {
                 const outcome: selection_mod.HealthOutcome = if (completion.result == .data and completion.result.data.payload.health.isHealthy()) .healthy else .{ .failed = if (completion.result == .failure and completion.result.failure == .auth_required) .@"auth-required" else .health_failed };
                 switch (self.selection.resolve(completion.tag, outcome)) {
@@ -149,19 +164,8 @@ pub const Host = struct {
                         self.revision += 1;
                     },
                     .activated => |activation| {
-                        self.http.cancelGeneration(activation.old_generation);
-                        self.cancelRecovery(services);
-                        self.polls = @splat(null);
-                        self.clearFeeds();
-                        self.flags = null;
-                        self.format = .mp3;
-                        self.format_dirty = false;
-                        self.connection = .ready;
-                        self.error_code = null;
-                        self.recovery = reconnect.Policy.init(activation.new_generation, 0);
-                        try self.execute(services, self.session.activate(activation.new_generation, now_ms, true), now_ms);
-                        try self.execute(services, self.session.pollDue(now_ms), now_ms);
-                        self.revision += 1;
+                        self.clearCredentials();
+                        try self.activate(services, activation, now_ms);
                     },
                 }
                 continue;
@@ -197,6 +201,40 @@ pub const Host = struct {
                 self.revision += 1;
             }
         }
+    }
+
+    pub fn activate(self: *Host, services: sdk.platform.PlatformServices, activation: selection_mod.Activation, now_ms: u64) !void {
+        return self.activateWithFormat(services, activation, .mp3, now_ms);
+    }
+    pub fn activateWithFormat(self: *Host, services: sdk.platform.PlatformServices, activation: selection_mod.Activation, format: protocol.StreamFormat, now_ms: u64) !void {
+        self.http.cancelGeneration(activation.old_generation);
+        self.cancelRecovery(services);
+        self.polls = @splat(null);
+        self.clearFeeds();
+        self.flags = null;
+        self.format = if (formats.platformSupports(builtin.os.tag, format)) format else .mp3;
+        self.format_dirty = false;
+        self.connection = .ready;
+        self.error_code = null;
+        self.recovery = reconnect.Policy.init(activation.new_generation, 0);
+        // Selection and remote credential validation have already committed.
+        // A device failure is playback state for that selected station; it
+        // must not relabel the confirmed credential transaction as failed.
+        self.execute(services, self.session.activate(activation.new_generation, now_ms, true), now_ms) catch
+            self.transportUnavailable(services, "audio_activation_failed");
+        self.execute(services, self.session.pollDue(now_ms), now_ms) catch
+            self.transportUnavailable(services, "station_effects_failed");
+        self.revision += 1;
+    }
+    pub fn clearCredentials(self: *Host) void {
+        if (self.basic) |*value| value.deinit();
+        if (self.listener) |*value| value.deinit();
+        self.basic = null;
+        self.listener = null;
+        self.allow_insecure_http = false;
+    }
+    fn apiAuth(self: *Host, output: []u8) !station_client.Auth {
+        return .{ .authorization = if (self.basic) |*value| try vault.writeAuthorization(value, output) else null, .allow_insecure_http = self.allow_insecure_http };
     }
 
     pub fn onAudio(self: *Host, services: sdk.platform.PlatformServices, event: sdk.platform.AudioEvent, now_ms: u64) !void {
@@ -263,10 +301,20 @@ pub const Host = struct {
                 self.cancelTimers(services, self.recovery.replaceLoad(self.session.generation, load_id));
                 self.spectrum = @splat(0);
                 self.buffering = false;
-                var url: [512]u8 = undefined;
+                var url: [8192]u8 = undefined;
+                defer std.crypto.secureZero(u8, &url);
+                var authorization: [1024]u8 = undefined;
+                defer std.crypto.secureZero(u8, &authorization);
+                const auth = try self.apiAuth(&authorization);
                 const station = &(self.selection.active_station orelse return error.NoStation);
-                const upstream = try std.fmt.bufPrint(&url, "{s}{s}", .{ station.base(), formats.mount(self.format) });
-                self.audio.load(services, load_id, .{ .upstream_url = upstream }) catch {
+                var base_url = try std.fmt.bufPrint(&url, "{s}{s}", .{ station.base(), formats.mount(self.format) });
+                if ((self.basic != null or self.listener != null) and std.mem.startsWith(u8, station.base(), "http://") and !self.allow_insecure_http) return error.InsecureCredentials;
+                if (self.listener) |*value| {
+                    url[base_url.len] = '?';
+                    const query = try vault.writeListenerQuery(value, url[base_url.len + 1 ..]);
+                    base_url = url[0 .. base_url.len + 1 + query.len];
+                }
+                self.audio.load(services, load_id, .{ .upstream_url = base_url, .authorization = auth.authorization }) catch {
                     try self.execute(services, self.session.onAudio(self.session.generation, load_id, .failed), now_ms);
                     continue;
                 };
@@ -309,7 +357,10 @@ pub const Host = struct {
             .cancel_retry => |timer| services.cancelTimer(timer.timer_id) catch {},
             .poll => |key| {
                 const station = &(self.selection.active_station orelse continue);
-                const tag = self.http.request(station, 0, key.generation, key.endpoint, .{}, null) catch {
+                var authorization: [1024]u8 = undefined;
+                defer std.crypto.secureZero(u8, &authorization);
+                const auth = try self.apiAuth(&authorization);
+                const tag = self.http.request(station, 0, key.generation, key.endpoint, auth, null) catch {
                     _ = self.session.onPollComplete(key, now_ms);
                     continue;
                 };
@@ -332,6 +383,7 @@ pub const Host = struct {
         self.cancelRecovery(services);
         self.session.retry = null;
         self.session.load_id = null;
+        self.session.intent = .stopped;
         self.session.playback = .@"error";
         self.audio.stop(services) catch {};
         self.buffering = false;
@@ -393,6 +445,7 @@ const Fake = struct {
     loads: u64 = 0,
     plays: u64 = 0,
     fail_timer: bool = false,
+    fail_volume: bool = false,
     fn services(self: *Fake) sdk.platform.PlatformServices {
         return .{ .context = self, .audio_load_request_fn = load, .audio_play_fn = play, .audio_pause_fn = nothing, .audio_stop_fn = nothing, .audio_set_volume_fn = volume, .start_timer_fn = timer, .cancel_timer_fn = cancel };
     }
@@ -407,7 +460,10 @@ const Fake = struct {
         self.plays += 1;
     }
     fn nothing(_: ?*anyopaque) !void {}
-    fn volume(_: ?*anyopaque, _: f32) !void {}
+    fn volume(context: ?*anyopaque, _: f32) !void {
+        const self: *Fake = @ptrCast(@alignCast(context.?));
+        if (self.fail_volume) return error.AudioDeviceUnavailable;
+    }
     fn timer(context: ?*anyopaque, _: u64, _: u64, _: bool) !void {
         const self: *Fake = @ptrCast(@alignCast(context.?));
         if (self.fail_timer) return error.TimerFailed;
@@ -453,6 +509,26 @@ test "host failed candidate preserves active audio and late load cannot drive re
     var buffer: [protocol.max_snapshot_bytes]u8 = undefined;
     const encoded = try protocol.writeSnapshot(host.snapshot(5), &buffer);
     try std.testing.expect(std.mem.indexOf(u8, encoded, "stream.mp3") == null);
+}
+
+test "confirmed station survives device activation failure and Play retries it" {
+    var host = try Host.init(std.testing.allocator);
+    var fake: Fake = .{ .fail_volume = true };
+    defer host.deinit();
+    defer host.stop(fake.services());
+    host.http.effects.executor = .fake;
+    try activateTest(&host, fake.services(), "http://127.0.0.1:43127", 0);
+    const snapshot = host.snapshot(0);
+    try std.testing.expectEqualStrings("http://127.0.0.1:43127", snapshot.station.?.base);
+    try std.testing.expectEqual(protocol.OperationState.succeeded, snapshot.operations.station.?.status);
+    try std.testing.expectEqual(protocol.Playback.@"error", snapshot.playback);
+    try std.testing.expectEqual(protocol.Intent.stopped, snapshot.intent);
+    try std.testing.expectEqualStrings("audio_activation_failed", snapshot.@"error".?.code);
+    try std.testing.expect(host.audio.relay == null);
+    fake.fail_volume = false;
+    try host.command(fake.services(), .play, 1);
+    try host.onAudio(fake.services(), .{ .kind = .loaded, .load_id = fake.load_id }, 2);
+    try std.testing.expectEqual(protocol.Playback.playing, host.snapshot(2).playback);
 }
 
 test "host watchdog is not postponed by repeated buffering and pause cancels retry" {
