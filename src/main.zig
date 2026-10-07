@@ -476,8 +476,10 @@ pub fn main(init: std.process.Init) !void {
         .on_lifecycle = onLifecycle,
         .on_chrome = onChrome,
         .sync = syncModel,
-        .status_item = .{ .tooltip = "SUB/WAVE Player" },
-        .status_item_fn = statusItem,
+        // GTK has no tray service. Registering one makes each model rebuild
+        // retry installation and log UnsupportedService (including FFT frames).
+        .status_item = if (builtin.os.tag == .linux) null else .{ .tooltip = "SUB/WAVE Player" },
+        .status_item_fn = if (builtin.os.tag == .linux) null else statusItem,
     });
     defer app_state.destroy();
     app_state.model = model.initialModel();

@@ -77,6 +77,9 @@ jobs:
         if: runner.os == 'Linux'
         run: ./scripts/check-release-flags.sh
 
+      - name: Test SDK patch installer
+        run: bash scripts/test-sdk-patches.sh
+
       - name: Check markup and manifest
         run: native check
 
