@@ -52,38 +52,24 @@ if [ "$installed_version" != "$patch_sdk_version" ]; then
     exit 1
 fi
 
-# marker<TAB>file<TAB>description — one row per patch in native-sdk-local.patch.
-# (The 0.5.x canonicalizeComptime-quota and close-hides-window patches are gone:
-# both shipped upstream in SDK 0.6.0. See docs/sdk-notes.md.)
-patches=$(cat <<'ROWS'
-native_sdk_surface_device_scale	src/platform/linux/gtk_host.c	fractional HiDPI scale (Linux)
-ROWS
-)
-
-applied=0
-total=0
-missing=""
-while IFS=$'\t' read -r marker file desc; do
-    [ -n "$marker" ] || continue
-    total=$((total + 1))
-    if grep -q "$marker" "$sdk/$file" 2>/dev/null; then
-        applied=$((applied + 1))
-    else
-        missing="$missing  - $desc ($file)"$'\n'
-    fi
-done <<<"$patches"
-
-if [ "$applied" -eq "$total" ]; then
-    echo "already applied, $applied/$total ($(native --version))"
+# Check every hunk before changing anything. A helper-name marker alone cannot
+# distinguish a complete patch from one whose rendering call sites reverted.
+# --force prevents patch from guessing the direction; --fuzz=0 and the offset
+# check require the exact version/layout this patch was generated against.
+if reverse_check="$(LC_ALL=C patch --batch --force --reverse --dry-run --fuzz=0 -p1 -d "$sdk" < "$patch_file" 2>&1)" &&
+    [[ "$reverse_check" != *offset* ]]; then
+    echo "already applied, every hunk verified ($(native --version))"
     exit 0
 fi
-if [ "$applied" -ne 0 ]; then
-    echo "error: patches partially applied ($applied/$total). Missing:" >&2
-    printf '%s' "$missing" >&2
-    echo "re-install the SDK (npm i -g @native-sdk/cli), then re-run this script" >&2
+
+if ! forward_check="$(LC_ALL=C patch --batch --force --forward --dry-run --fuzz=0 -p1 -d "$sdk" < "$patch_file" 2>&1)" ||
+    [[ "$forward_check" == *offset* ]]; then
+    echo "error: SDK patch is incomplete or its source layout has drifted; no files changed." >&2
+    printf '%s\n' "$forward_check" >&2
+    echo "re-install @native-sdk/cli@$patch_sdk_version, then re-run this script" >&2
     exit 1
 fi
 
-patch -p1 -d "$sdk" < "$patch_file"
+LC_ALL=C patch --batch --force --forward --fuzz=0 -p1 -d "$sdk" < "$patch_file"
 echo "applied to $sdk ($(native --version))"
 echo "verify with: native test"

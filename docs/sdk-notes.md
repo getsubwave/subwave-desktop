@@ -3,8 +3,8 @@
 **Quick re-apply after any SDK upgrade** (idempotent):
 
 ```bash
-./scripts/apply-sdk-patches.sh
-native test   # verify
+mise exec -- ./scripts/apply-sdk-patches.sh
+mise exec -- native test   # verify
 ```
 
 The unified diff lives at `patches/native-sdk-local.patch`, generated against
@@ -14,6 +14,13 @@ patch body never moved at all; 0.9.0 and 0.10.1 each added 60 lines before the
 patched regions, so the eight `@@` hunk headers were re-cut for each release.
 Every `+`/`-` line remains unchanged and the hunks still land with zero fuzz.
 Symptom of a lost patch: pixelated text on a fractional-scale Linux display.
+
+The installer checks the complete patch with a reverse dry run to recognize
+an already-patched tree, then a forward dry run before modifying a pristine
+tree. Both reject fuzz and offsets. A helper marker alone used to let a
+partially reverted rendering call site pass as fully patched; every hunk is
+now required. `mise exec -- bash scripts/test-sdk-patches.sh` checks pristine,
+complete, partial, version-mismatched, and shifted trees in disposable copies.
 
 ## Two version pins, and they must agree
 

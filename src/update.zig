@@ -26,6 +26,12 @@ fn parseTag(tag: []const u8) ?Semver {
     const b = it.next() orelse return null;
     const c = it.next() orelse return null;
     if (it.next() != null) return null;
+    // parseInt also accepts signs and underscores; release tags must use
+    // decimal digits only, with no leading zeroes (SemVer core grammar).
+    for ([_][]const u8{ a, b, c }) |part| {
+        if (part.len == 0 or (part.len > 1 and part[0] == '0')) return null;
+        for (part) |ch| if (!std.ascii.isDigit(ch)) return null;
+    }
     return .{
         .major = std.fmt.parseInt(u32, a, 10) catch return null,
         .minor = std.fmt.parseInt(u32, b, 10) catch return null,
@@ -79,6 +85,12 @@ test "isNewer: junk and prerelease tags never arm" {
     try testing.expect(!isNewer("v99.0"));
     try testing.expect(!isNewer("v99.0.0.0"));
     try testing.expect(!isNewer("v99.0.0-rc1"));
+}
+
+test "isNewer: malformed numeric components never arm" {
+    inline for (.{ "v99.+1.0", "v+99.0.0", "v99.0.+1", "v99.1_0.0", "v099.0.0", "v99.01.0", "v99.0.01", "v99..0", "v99.0.", "v4294967296.0.0" }) |tag| {
+        try testing.expect(!isNewer(tag));
+    }
 }
 
 test "version constant parses" {
