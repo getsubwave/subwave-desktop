@@ -118,13 +118,24 @@ ones appear.
 
 ## Build & run
 
-Requires **Zig 0.16.0** and `@native-sdk/cli` **0.10.1**
-(`npm i -g @native-sdk/cli`) — **plus one local SDK patch**. After every SDK
-install/upgrade:
+Requires **Zig 0.16.0**, **Node 24.21.0** (pinned in `mise.toml` and CI),
+and `@native-sdk/cli` **0.10.1** — **plus one local SDK patch**. Install the
+SDK under the repo's Node version so `native` and `npm root -g` agree:
 
 ```bash
-./scripts/apply-sdk-patches.sh && native test
+mise install
+mise exec -- npm i -g @native-sdk/cli@0.10.1
+mise exec -- ./scripts/apply-sdk-patches.sh
+mise exec -- native test
 ```
+
+Re-apply the patch after every SDK install/upgrade. The installer verifies
+every hunk and rejects partial application, offsets, and fuzz before writing.
+`mise exec -- bash scripts/test-sdk-patches.sh` exercises it on disposable SDK
+copies; CI runs that check on every platform.
+
+The [October dependency audit](docs/dependency-audit-2026-10-07.md) records the
+current package inventory, fixes, and validation limits.
 
 The remaining patch fixes fractional-HiDPI text rendering on Linux
 ([vercel-labs/native#156](https://github.com/vercel-labs/native/issues/156));

@@ -1336,6 +1336,9 @@ pub const Model = struct {
         "energy_buf",         "ctx_show_buf",        "ctx_vibe_buf",        "ctx_cond_buf",
         "req_ack_buf",        "req_track_title_buf", "req_track_artist_buf",
         "ob_target_url_buf",  "ob_target_name_buf",  "ob_diag_buf",
+        // update notice is bound through has_update/update_label; opener state
+        // only serializes browser launches in update/fx.
+        "update_tag_buf",     "update_tag",          "opener_inflight",
         // internal / derived-source state
         "phase",              "transport",           "volume",              "muted",
         "volume_widget_seen",
@@ -1354,7 +1357,7 @@ pub const Model = struct {
         "ob_steps",           "ob_done",             "chrome_top",
         // heartbeat bookkeeping consumed only by the .tick_feed arm, never
         // by markup (see src/diag.zig and issue #23)
-        "hb_tick_count",
+        "hb_tick_count",      "hb_audio_events",
         // stream-format state (bound via format_rows/format_value)
         "format_pref",        "stream_flags_known",  "stream_opus",
         "stream_flac",        "stream_aac",          "stationEnables",      "effectiveFormat",
@@ -2173,13 +2176,22 @@ fn retune(model: *Model, fx: *Effects) void {
 // The one writer of track_elapsed_ms — see the field docs. The wall clock
 // arrives as a parameter so tests can pin it.
 fn refreshTrackElapsed(model: *Model, now_wall_ms: i64) void {
+    // Station timestamps/durations are untrusted i64 values. Saturate their
+    // millisecond arithmetic so malformed metadata cannot overflow the loop.
     var e: i64 = if (model.track_started_at_s > 0)
-        now_wall_ms - model.track_started_at_s * 1000
+        now_wall_ms -| (model.track_started_at_s *| 1000)
     else
-        model.elapsed_ms - model.track_anchor_ms;
+        model.elapsed_ms -| model.track_anchor_ms;
     if (e < 0) e = 0; // clock skew / a play session younger than the anchor
-    if (model.track_duration_s > 0) e = @min(e, model.track_duration_s * 1000);
+    if (model.track_duration_s > 0) e = @min(e, model.track_duration_s *| 1000);
     model.track_elapsed_ms = e;
+}
+
+// f64 rounds maxInt(i64) up to 2^63, so the upper bound must be exclusive.
+// Invalid station numbers retain the field's existing unknown-value sentinel.
+fn displayInteger(value: f64, fallback: i64) i64 {
+    if (!std.math.isFinite(value) or value < -0x1p63 or value >= 0x1p63) return fallback;
+    return @intFromFloat(value);
 }
 
 // "Title — Artist" + "0:52 · on air · 2 listening" — the tray's two
@@ -2396,11 +2408,11 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 if (t.album) |v| setStr(&model.album_buf, &model.album, v);
                 if (t.genre) |v| setStr(&model.genre_buf, &model.genre, v);
                 model.track_year = t.year orelse 0;
-                model.track_duration_s = if (t.duration) |d| @intFromFloat(@max(0, d)) else 0;
+                model.track_duration_s = if (t.duration) |d| displayInteger(@max(0, d), 0) else 0;
                 model.track_started_at_s = t.timestamp orelse 0;
                 if (track_changed) model.track_anchor_ms = model.elapsed_ms;
                 refreshTrackElapsed(model, native_sdk.nowMs());
-                model.track_bpm = if (t.bpm) |b| @intFromFloat(@round(b)) else 0;
+                model.track_bpm = if (t.bpm) |b| displayInteger(@round(b), 0) else 0;
                 if (t.musicalKey) |v| setStr(&model.key_buf, &model.musical_key, v) else model.musical_key = "";
                 if (t.energy) |v| setStr(&model.energy_buf, &model.energy, v) else model.energy = "";
                 if (t.moods) |list| {
@@ -2443,7 +2455,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 }
                 if (ctx.weather) |wc| {
                     if (wc.condition) |v| setStr(&model.ctx_cond_buf, &model.ctx_cond, v);
-                    if (wc.temp) |v| model.ctx_temp = @intFromFloat(@round(v));
+                    if (wc.temp) |v| model.ctx_temp = displayInteger(@round(v), -999);
                 }
             }
             if (np.dj) |d| {
@@ -3535,6 +3547,38 @@ test "now-playing timestamp lands in the model as the track start" {
     var m: Model = .{};
     update(&m, .{ .got_np = .{ .key = keys.fetch_np, .outcome = .ok, .status = 200, .body = "{\"nowPlaying\":{\"title\":\"Inspiring Chill\",\"artist\":\"Sergey Gulevich\",\"timestamp\":1785497431,\"duration\":137}}" } }, &fx);
     try testing.expectEqual(@as(i64, 1_785_497_431), m.track_started_at_s);
+}
+
+test "now-playing ignores numbers outside the display integer range" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    update(&m, .{ .got_np = .{ .key = keys.fetch_np, .outcome = .ok, .status = 200, .body = "{\"nowPlaying\":{\"title\":\"Still alive\",\"duration\":1e300,\"bpm\":-1e300},\"context\":{\"weather\":{\"temp\":1e300}}}" } }, &fx);
+    try testing.expectEqualStrings("Still alive", m.title);
+    try testing.expectEqual(@as(i64, 0), m.track_duration_s);
+    try testing.expectEqual(@as(i64, 0), m.track_bpm);
+    try testing.expectEqual(@as(i64, -999), m.ctx_temp);
+}
+
+test "track elapsed tolerates extreme station timestamps and durations" {
+    var m: Model = .{};
+    m.track_started_at_s = std.math.maxInt(i64);
+    refreshTrackElapsed(&m, 1_101_000);
+    try testing.expectEqual(@as(i64, 0), m.track_elapsed_ms);
+    m.track_started_at_s = 1000;
+    m.track_duration_s = std.math.maxInt(i64);
+    refreshTrackElapsed(&m, 1_101_000);
+    try testing.expectEqual(@as(i64, 101_000), m.track_elapsed_ms);
+}
+
+test "display integers preserve normal values and reject nonfinite boundaries" {
+    try testing.expectEqual(@as(i64, 137), displayInteger(137.75, 0));
+    try testing.expectEqual(@as(i64, -12), displayInteger(-12, -999));
+    try testing.expectEqual(std.math.minInt(i64), displayInteger(-0x1p63, 0));
+    inline for (.{ 0x1p63, -0x1p64, std.math.inf(f64), -std.math.inf(f64), std.math.nan(f64) }) |value| {
+        try testing.expectEqual(@as(i64, -999), displayInteger(value, -999));
+    }
 }
 
 test "initials take the artist's first two letters, with a fallback" {

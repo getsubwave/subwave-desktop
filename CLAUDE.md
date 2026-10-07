@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A native desktop player (macOS + Linux + Windows) for the SUB/WAVE internet radio station, built on the **Vercel Native SDK**: declarative `.native` markup + Zig logic, rendered by the SDK's own engine — no browser, no WebView. Requires **Zig 0.16.0** and a global `@native-sdk/cli` **0.10.1** (`npm i -g @native-sdk/cli`).
+A native desktop player (macOS + Linux + Windows) for the SUB/WAVE internet radio station, built on the **Vercel Native SDK**: declarative `.native` markup + Zig logic, rendered by the SDK's own engine — no browser, no WebView. Requires **Zig 0.16.0**, **Node 24.21.0** (mise + CI), and a global `@native-sdk/cli` **0.10.1** (`mise exec -- npm i -g @native-sdk/cli@0.10.1`). Use `mise exec --` for toolchain commands in shells that have not activated mise.
 
 ## Commands
 
@@ -48,7 +48,7 @@ SDK 0.6.0 absorbed the other two patches (comptime quota; close-hides-window + r
 
 Elm-style app: a single `Model`, a `Msg` union, and an `update` reducer. All side effects (HTTP, timers, audio, file writes) flow through the SDK **effects channel** — `update` receives `fx: *Effects` and schedules work; results come back as typed `Msg`s. No view code touches I/O.
 
-- `src/main.zig` — thin entry point: shell/window config, `App.create` wiring (`update_fx`, `init_fx`, `tokens_fn`, `view`, `windows_fn`, …), app-level keyboard fallback (`onKey`), tray menu (`statusItem` / `onCommand`), model-declared mini-player window (`windowsFn`), and slider→model sync. Settings load synchronously here *before* the window opens so a saved station skips onboarding.
+- `src/main.zig` — thin entry point: shell/window config, `App.create` wiring (`update_fx`, `init_fx`, `tokens_fn`, `view`, `windows_fn`, …), app-level keyboard fallback (`onKey`), tray menu (`statusItem` / `onCommand`, disabled on Linux because GTK has no tray service), model-declared mini-player window (`windowsFn`), and slider→model sync. Settings load synchronously here *before* the window opens so a saved station skips onboarding.
 - `src/model.zig` — the heart (~2300 lines): `Model`, `Msg`, `boot` (init effects), `update` (the reducer, wires every effect), effect keys, settings JSON apply/save. All strings the model keeps are **copied into fixed `*_store` buffers on the Model** — row structs hold slices into those buffers. No heap ownership in the model.
 - `src/views.zig` — view registry + composition, and nothing else. The main window dispatches on `model.phase` (onboarding → player); the player is **composed** from six markup fragments (`views/player-top/-sidebar/-stage/-panel/-deck/-sheets.native`), and this file only decides which conditional ones appear. The LIVE stage was hand-built Zig until SDK 0.6.0 added markup's `<image>` leaf (it needs a square runtime image for cover art); there is no Zig view code left. The mini player (`views/mini.native`) is a model-declared secondary window.
 - `src/views/*.native` — markup fragments compiled at comptime via `CompiledMarkupView`; a Model field drift is a compile error.
