@@ -56,13 +56,15 @@ fi
 # distinguish a complete patch from one whose rendering call sites reverted.
 # --force prevents patch from guessing the direction; --fuzz=0 and the offset
 # check require the exact version/layout this patch was generated against.
-if reverse_check="$(LC_ALL=C patch --batch --force --reverse --dry-run --fuzz=0 -p1 -d "$sdk" < "$patch_file" 2>&1)" &&
+# macOS patch is quiet by default, including about offsets. Request verbose
+# dry runs explicitly so the offset check works with both BSD and GNU patch.
+if reverse_check="$(LC_ALL=C patch --verbose --batch --force --reverse --dry-run --fuzz=0 -p1 -d "$sdk" < "$patch_file" 2>&1)" &&
     [[ "$reverse_check" != *offset* ]]; then
     echo "already applied, every hunk verified ($(native --version))"
     exit 0
 fi
 
-if ! forward_check="$(LC_ALL=C patch --batch --force --forward --dry-run --fuzz=0 -p1 -d "$sdk" < "$patch_file" 2>&1)" ||
+if ! forward_check="$(LC_ALL=C patch --verbose --batch --force --forward --dry-run --fuzz=0 -p1 -d "$sdk" < "$patch_file" 2>&1)" ||
     [[ "$forward_check" == *offset* ]]; then
     echo "error: SDK patch is incomplete or its source layout has drifted; no files changed." >&2
     printf '%s\n' "$forward_check" >&2

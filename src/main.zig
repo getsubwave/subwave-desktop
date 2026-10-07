@@ -59,9 +59,18 @@ pub const app_icons = [_]canvas.icons.Entry{
 // ------------------------------------------------------- OS integration seams
 // App-level key fallback — consulted only for keys no focused widget consumed
 // (typing in the request/station fields is never stolen). Space = tune toggle,
-// arrows = volume, M = mute, cmd/ctrl+K = stations, cmd/ctrl+shift+M = mini
+// [ / ] = volume, M = mute, cmd/ctrl+K = stations, cmd/ctrl+shift+M = mini
 // player (plain cmd+M is the macOS system minimize), Esc = back to LIVE,
-// 1–5 = dial stops. The masthead's mini button and the tray item reach mini
+// 1–5 = dial stops.
+//
+// Volume is NOT on the arrow keys. The SDK claims bare arrows for spatial
+// focus movement (canvasWidgetSpatialFocusDirection) before this fallback
+// ever runs, so an arrow here only ever fired when nothing was focused —
+// and silently did nothing the rest of the time. Bracket keys are
+// unclaimed, and leaving the arrows to focus movement is what lets a
+// d-pad walk the station list. Shift is NOT an escape hatch: the SDK's
+// spatial-focus check bails on ctrl/alt/cmd but not shift, so shift+arrow
+// would be swallowed the same way. The masthead's mini button and the tray item reach mini
 // mode too; on Linux the button and the shortcut are the only routes, since
 // the GTK host has no tray to offer the menu item.
 fn onKey(keyboard: canvas.WidgetKeyboardEvent) ?Msg {
@@ -75,8 +84,8 @@ fn onKey(keyboard: canvas.WidgetKeyboardEvent) ?Msg {
     }
     if (mods.alt) return null;
     if (std.ascii.eqlIgnoreCase(key, "space")) return .toggle_play;
-    if (std.ascii.eqlIgnoreCase(key, "arrowup") or std.ascii.eqlIgnoreCase(key, "up")) return .vol_up;
-    if (std.ascii.eqlIgnoreCase(key, "arrowdown") or std.ascii.eqlIgnoreCase(key, "down")) return .vol_down;
+    if (std.mem.eql(u8, key, "]")) return .vol_up;
+    if (std.mem.eql(u8, key, "[")) return .vol_down;
     if (std.ascii.eqlIgnoreCase(key, "m")) return .toggle_mute;
     if (std.ascii.eqlIgnoreCase(key, "l")) return .press_like;
     if (std.ascii.eqlIgnoreCase(key, "escape")) return .escape;
@@ -410,7 +419,7 @@ fn syncModel(m: *Model, layout: canvas.WidgetLayoutTree) void {
     for (layout.nodes) |node| {
         if (node.widget.kind != .slider) continue;
         if (std.mem.eql(u8, node.widget.semantics.label, "Volume")) {
-            m.volume = std.math.clamp(node.widget.value, 0.0, 1.0);
+            m.reconcileVolumeFromWidget(node.widget.value);
         }
     }
 }
@@ -565,8 +574,11 @@ const testing = std.testing;
 
 test "key fallback maps transport, navigation, and dial keys" {
     try testing.expect(onKey(.{ .phase = .key_down, .key = "space" }).? == .toggle_play);
-    try testing.expect(onKey(.{ .phase = .key_down, .key = "ArrowUp" }).? == .vol_up);
-    try testing.expect(onKey(.{ .phase = .key_down, .key = "arrowdown" }).? == .vol_down);
+    try testing.expect(onKey(.{ .phase = .key_down, .key = "]" }).? == .vol_up);
+    try testing.expect(onKey(.{ .phase = .key_down, .key = "[" }).? == .vol_down);
+    // Arrows belong to the SDK's spatial focus movement, not to volume.
+    try testing.expect(onKey(.{ .phase = .key_down, .key = "ArrowUp" }) == null);
+    try testing.expect(onKey(.{ .phase = .key_down, .key = "arrowdown" }) == null);
     try testing.expect(onKey(.{ .phase = .key_down, .key = "M" }).? == .toggle_mute);
     try testing.expect(onKey(.{ .phase = .key_down, .key = "L" }).? == .press_like);
     try testing.expect(onKey(.{ .phase = .key_down, .key = "Escape" }).? == .escape);

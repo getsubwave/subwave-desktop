@@ -288,6 +288,12 @@ pub const Model = struct {
     // Mute is session-only and orthogonal to volume: the intended `volume`
     // is preserved so unmute restores it; while muted the audio output is 0.
     muted: bool = false,
+    // Last slider value accepted by syncModel. Lets the sync
+    // tell a genuine drag (the widget moved on its own) apart from the widget
+    // replaying a value a model-side write has already moved past. null until
+    // the first observation. Rejected noise leaves this baseline unchanged
+    // so small drag movements can accumulate. See reconcileVolumeFromWidget.
+    volume_widget_seen: ?f32 = null,
     buffering: bool = false,
     stream_failed: bool = false,
     elapsed_ms: i64 = 0,
@@ -699,6 +705,34 @@ pub const Model = struct {
     }
     pub fn mute_label(self: *const Model) []const u8 {
         return if (self.muted) "Unmute" else "Mute";
+    }
+
+    // Widget-reported slider values carry float noise (0.39999992 for 0.4),
+    // ~1e-6 off. This threshold filters rounding noise; smaller pointer
+    // movements accumulate against the last accepted value.
+    const volume_widget_epsilon: f32 = 5e-4;
+
+    /// `Options.sync` runs before every build, and it used to mirror the
+    /// slider's value into `volume` unconditionally — which meant a model-side
+    /// write (vol_up/vol_down, a settings load) was overwritten by the
+    /// slider's still-stale value before any build could render the move, so
+    /// keyboard volume silently did nothing. Adopt the widget's value only
+    /// when the WIDGET moved past the last accepted value; otherwise leave
+    /// `volume` alone and let the build push it out to the slider, which the SDK
+    /// documents as following its bound source whenever that source moves.
+    ///
+    /// Pure, and takes a plain f32 rather than the layout tree, so the
+    /// decision is unit-testable without building a canvas.WidgetLayoutTree.
+    pub fn reconcileVolumeFromWidget(self: *Model, widget_value: f32) void {
+        const w = std.math.clamp(widget_value, 0.0, 1.0);
+        const moved = if (self.volume_widget_seen) |seen|
+            @abs(seen - w) > volume_widget_epsilon
+        else
+            true;
+        if (moved) {
+            self.volume = w;
+            self.volume_widget_seen = w;
+        }
     }
 
     // Track-elapsed as m:ss, rolling to h:mm:ss past the hour (long mixes).
@@ -1307,6 +1341,7 @@ pub const Model = struct {
         "update_tag_buf",     "update_tag",          "opener_inflight",
         // internal / derived-source state
         "phase",              "transport",           "volume",              "muted",
+        "volume_widget_seen",
         "buffering",          "elapsed_ms",          "band_levels",         "req_buffer",
         "req_name_buffer",    "retry",               "offline_streak",      "stream_failed",
         "stream_online",      "cover_sid",           "next_cover_id",       "req_id",
@@ -3612,6 +3647,82 @@ test "mute preserves the intended volume; a volume nudge unmutes" {
     try testing.expect(!m.muted);
     try testing.expect(m.volume > 0.65);
     try testing.expectEqualStrings("70%", m.vol_display(arena));
+}
+
+test "the volume sync adopts a real drag but never clobbers a model-side nudge" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+
+    // First observation has nothing to compare against: the widget wins.
+    m.volume = 0.2;
+    m.reconcileVolumeFromWidget(0.8);
+    try testing.expectEqual(@as(f32, 0.8), m.volume);
+
+    // A genuine drag moves the widget, so the sync adopts it.
+    m.reconcileVolumeFromWidget(0.5);
+    try testing.expectEqual(@as(f32, 0.5), m.volume);
+
+    // Float noise on a replayed value is not a drag.
+    m.reconcileVolumeFromWidget(0.5 + 1e-6);
+    try testing.expectEqual(@as(f32, 0.5), m.volume);
+
+    // THE REGRESSION: a model-side nudge, then a sync pass carrying the
+    // slider's still-stale pre-nudge value. The nudge must survive - this is
+    // exactly what used to revert and made keyboard volume do nothing.
+    update(&m, .vol_up, &fx);
+    try testing.expect(m.volume > 0.55);
+    const nudged = m.volume;
+    m.reconcileVolumeFromWidget(0.5); // stale: the build has not rendered yet
+    try testing.expectEqual(nudged, m.volume);
+
+    // Once the build pushes the moved value out, the widget catches up and
+    // the sync settles on it rather than oscillating.
+    m.reconcileVolumeFromWidget(nudged);
+    try testing.expectEqual(nudged, m.volume);
+}
+
+test "the volume sync accumulates small slider movements in both directions" {
+    var m: Model = .{};
+    m.reconcileVolumeFromWidget(0.5);
+
+    // Individual sub-pixel moves are below the noise threshold, but their
+    // cumulative travel must still reach the model instead of being lost.
+    for (1..101) |step| {
+        const value = 0.5 + @as(f32, @floatFromInt(step)) * 0.0003;
+        m.reconcileVolumeFromWidget(value);
+        try testing.expectApproxEqAbs(value, m.volume, Model.volume_widget_epsilon);
+    }
+    try testing.expectApproxEqAbs(@as(f32, 0.53), m.volume, 1e-6);
+
+    for (1..101) |step| {
+        const value = 0.53 - @as(f32, @floatFromInt(step)) * 0.0003;
+        m.reconcileVolumeFromWidget(value);
+        try testing.expectApproxEqAbs(value, m.volume, Model.volume_widget_epsilon);
+    }
+    try testing.expectApproxEqAbs(@as(f32, 0.5), m.volume, 1e-6);
+}
+
+test "a nudge while muted survives the sync, so unmute restores the nudged level" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.volume = 0.4;
+    m.reconcileVolumeFromWidget(0.4); // seed the observed value
+    update(&m, .toggle_mute, &fx);
+    try testing.expect(m.muted);
+
+    update(&m, .vol_down, &fx); // nudging unmutes and lowers
+    try testing.expect(!m.muted);
+    const nudged = m.volume;
+    try testing.expect(nudged < 0.35);
+
+    // Stale sync must not restore the pre-nudge level behind toggle_mute's
+    // back - otherwise a later unmute would push the wrong volume to output.
+    m.reconcileVolumeFromWidget(0.4);
+    try testing.expectEqual(nudged, m.volume);
 }
 
 test "tune_station reports an invalid address instead of failing silently" {
