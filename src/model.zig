@@ -288,10 +288,11 @@ pub const Model = struct {
     // Mute is session-only and orthogonal to volume: the intended `volume`
     // is preserved so unmute restores it; while muted the audio output is 0.
     muted: bool = false,
-    // Slider value observed by syncModel on the previous pass. Lets the sync
+    // Last slider value accepted by syncModel. Lets the sync
     // tell a genuine drag (the widget moved on its own) apart from the widget
     // replaying a value a model-side write has already moved past. null until
-    // the first observation. See reconcileVolumeFromWidget.
+    // the first observation. Rejected noise leaves this baseline unchanged
+    // so small drag movements can accumulate. See reconcileVolumeFromWidget.
     volume_widget_seen: ?f32 = null,
     buffering: bool = false,
     stream_failed: bool = false,
@@ -707,9 +708,8 @@ pub const Model = struct {
     }
 
     // Widget-reported slider values carry float noise (0.39999992 for 0.4),
-    // ~1e-6 off. One pixel of travel on the deck's slider is ~0.0033 and the
-    // smallest model-side step is 0.1, so this sits ~500x above the noise and
-    // ~7x below the finest real drag.
+    // ~1e-6 off. This threshold filters rounding noise; smaller pointer
+    // movements accumulate against the last accepted value.
     const volume_widget_epsilon: f32 = 5e-4;
 
     /// `Options.sync` runs before every build, and it used to mirror the
@@ -717,8 +717,8 @@ pub const Model = struct {
     /// write (vol_up/vol_down, a settings load) was overwritten by the
     /// slider's still-stale value before any build could render the move, so
     /// keyboard volume silently did nothing. Adopt the widget's value only
-    /// when the WIDGET moved since the last pass; otherwise leave `volume`
-    /// alone and let the build push it out to the slider, which the SDK
+    /// when the WIDGET moved past the last accepted value; otherwise leave
+    /// `volume` alone and let the build push it out to the slider, which the SDK
     /// documents as following its bound source whenever that source moves.
     ///
     /// Pure, and takes a plain f32 rather than the layout tree, so the
@@ -729,8 +729,10 @@ pub const Model = struct {
             @abs(seen - w) > volume_widget_epsilon
         else
             true;
-        if (moved) self.volume = w;
-        self.volume_widget_seen = w;
+        if (moved) {
+            self.volume = w;
+            self.volume_widget_seen = w;
+        }
     }
 
     // Track-elapsed as m:ss, rolling to h:mm:ss past the hour (long mixes).
@@ -3635,6 +3637,27 @@ test "the volume sync adopts a real drag but never clobbers a model-side nudge" 
     // the sync settles on it rather than oscillating.
     m.reconcileVolumeFromWidget(nudged);
     try testing.expectEqual(nudged, m.volume);
+}
+
+test "the volume sync accumulates small slider movements in both directions" {
+    var m: Model = .{};
+    m.reconcileVolumeFromWidget(0.5);
+
+    // Individual sub-pixel moves are below the noise threshold, but their
+    // cumulative travel must still reach the model instead of being lost.
+    for (1..101) |step| {
+        const value = 0.5 + @as(f32, @floatFromInt(step)) * 0.0003;
+        m.reconcileVolumeFromWidget(value);
+        try testing.expectApproxEqAbs(value, m.volume, Model.volume_widget_epsilon);
+    }
+    try testing.expectApproxEqAbs(@as(f32, 0.53), m.volume, 1e-6);
+
+    for (1..101) |step| {
+        const value = 0.53 - @as(f32, @floatFromInt(step)) * 0.0003;
+        m.reconcileVolumeFromWidget(value);
+        try testing.expectApproxEqAbs(value, m.volume, Model.volume_widget_epsilon);
+    }
+    try testing.expectApproxEqAbs(@as(f32, 0.5), m.volume, 1e-6);
 }
 
 test "a nudge while muted survives the sync, so unmute restores the nudged level" {

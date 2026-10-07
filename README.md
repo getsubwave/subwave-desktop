@@ -71,10 +71,10 @@ bottom.](docs/images/player-booth.png)
   window (SDK 0.9.1). This is the nearest thing to a Now Playing surface the
   SDK offers — there is still no MPRIS / MPNowPlayingInfoCenter / SMTC
   integration.
-- **Keyboard transport** — space play/pause, ↑/↓ volume, M mute, L like the
-  current track, Esc back to LIVE, Cmd/Ctrl+K stations, Cmd/Ctrl+Shift+M mini
-  player, 1–5 dial stops (app-level fallback; never steals typing from the
-  text fields).
+- **Keyboard transport** — space play/pause, `[` volume down, `]` volume up,
+  M mute, L like the current track, Esc back to LIVE, Cmd/Ctrl+K stations,
+  Cmd/Ctrl+Shift+M mini player, 1–5 dial stops (app-level fallback; never steals
+  typing from the text fields).
 - **Private stations** — when `/api/state` reports a privacy lock
   (`privatePlayer` / `listenerAuth`), a members-only gate replaces the player
   until the shared station password validates against `POST /api/station-auth`
