@@ -67,3 +67,12 @@ reset_fixture
 { printf '\n'; cat "$fixture/$host"; } > "$work/offset.c"
 cp "$work/offset.c" "$fixture/$host"
 expect_rejected "hunks shifted by an offset"
+
+# The already-applied check must reject offsets too, rather than declaring a
+# drifted tree complete. Exercise BSD patch with its verbosity disabled by
+# the environment; the installer's explicit --verbose must still report it.
+export PATCH_VERBOSE=0
+cp "$work/patched.c" "$fixture/$host"
+{ printf '\n'; cat "$fixture/$host"; } > "$work/offset.c"
+cp "$work/offset.c" "$fixture/$host"
+expect_rejected "a fully applied patch shifted by an offset"
