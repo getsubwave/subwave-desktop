@@ -16,6 +16,8 @@ const discord_rpc = @import("discord_rpc.zig");
 const updater = @import("update.zig");
 const links = @import("links.zig");
 const diag = @import("diag.zig");
+const station_time = @import("station_time.zig");
+const station_schedule = @import("station_schedule.zig");
 pub const StreamFormat = stream_format.StreamFormat;
 
 // Default listening volume on tune-in. (Decode/position/spectrum report
@@ -64,10 +66,13 @@ pub const keys = struct {
     // load and, say, the now-playing poll would collide on one key. 1000 leaves
     // room for the keys to grow without anyone having to remember this.
     pub const cover_image_base: u64 = 1000;
+    // Persona ids stay above the cover range; its counter wraps below this
+    // boundary. Avatar loads mint a new slot id so late results cannot alias.
+    pub const persona_image_base: u64 = 1_000_000_000;
 };
 
 pub const max_themes = 12;
-pub const max_shows = 16;
+pub const max_shows = 32;
 pub const max_recents = 8;
 pub const max_discover = 8;
 pub const max_upcoming = 8;
@@ -116,10 +121,13 @@ pub const StepState = enum { wait, run, ok, fail };
 // One row in the schedule list. Slices point into the parallel *_store
 // buffers on the model.
 pub const ShowRow = struct {
+    id: []const u8 = "",
     name: []const u8 = "",
     topic: []const u8 = "",
     persona: []const u8 = "",
     live: bool = false,
+    persona_slot: ?usize = null,
+    guests: []const u8 = "",
 };
 
 pub const QueueRow = struct {
@@ -127,6 +135,8 @@ pub const QueueRow = struct {
     artist: []const u8 = "",
     req_by: []const u8 = "", // UP NEXT only: requester name, "" = station pick
     hhmm: []const u8 = "", // PLAYED only: aired-at clock
+    played_at_s: ?i64 = null,
+    ago: []const u8 = "",
 };
 
 pub const BoothTurn = struct {
@@ -135,6 +145,8 @@ pub const BoothTurn = struct {
     kind: []const u8 = "", // "VOICE" | "PICK" | "TRACK"
     is_voice: bool = false, // spoken on-air
     is_track: bool = false, // an aired track line
+    stamp_epoch_s: ?i64 = null,
+    station_stamp: []const u8 = "",
 };
 
 pub const StationRef = struct {
@@ -345,7 +357,7 @@ pub const Model = struct {
     // sleep timer (wall-clock deadline; 0 = off)
     sleep_deadline_ms: i64 = 0,
     sleep_minutes: i64 = 0,
-    now_wall_ms: i64 = 0, // refreshed by the 1s tick while armed
+    now_wall_ms: i64 = 0, // refreshed by the shared panel/sleep tick
 
     // theme (read live by theme.tokensFn)
     station_colors: color.StationColors = color.defaults(.light),
@@ -458,9 +470,32 @@ pub const Model = struct {
     like_count: u32 = 0,
 
     // schedule / station guide
-    show_names_store: [max_shows][48]u8 = undefined,
-    show_topics_store: [max_shows][140]u8 = undefined,
-    show_personas_store: [max_shows][40]u8 = undefined,
+    timezone_store: [96]u8 = undefined,
+    timezone: []const u8 = "",
+    station_locale: station_time.Locale = .en_gb,
+    station_offset_minutes: i64 = 0,
+    station_clock: native_sdk.Clock = .system,
+    station_second_timer_active: bool = false,
+    day_picked: bool = false,
+    slot_topic_open: [24]bool = [_]bool{false} ** 24,
+    slot_host_open: [24]bool = [_]bool{false} ** 24,
+    now_topic_open: bool = false,
+    now_host_open: bool = false,
+    host_id_store: [128]u8 = undefined,
+    host_id: []const u8 = "",
+    now_guests_store: [384]u8 = undefined,
+    now_guests: []const u8 = "",
+    persona_roster: station_schedule.Roster = .{},
+    persona_images: [station_schedule.max_personas]u64 = [_]u64{0} ** station_schedule.max_personas,
+    persona_loading: [station_schedule.max_personas]u64 = [_]u64{0} ** station_schedule.max_personas,
+    next_persona_id: u64 = keys.persona_image_base,
+    persona_url_store: [station_schedule.max_personas][512]u8 = undefined,
+    persona_cache_store: [station_schedule.max_personas][832]u8 = undefined,
+    show_ids_store: [max_shows][128]u8 = undefined,
+    show_guests_store: [max_shows][384]u8 = undefined,
+    show_names_store: [max_shows][96]u8 = undefined,
+    show_topics_store: [max_shows][2048]u8 = undefined,
+    show_personas_store: [max_shows][96]u8 = undefined,
     show_rows: [max_shows]ShowRow = [_]ShowRow{.{}} ** max_shows,
     show_count: usize = 0,
     // 7x24 grid of show indexes (+1; 0 = autopilot/none) + selected day tab
@@ -945,18 +980,50 @@ pub const Model = struct {
 
     // ------------------------------------------------------------- schedule
     pub const SlotRow = struct {
+        hour: i64 = 0,
         range: []const u8 = "",
         show_name: []const u8 = "",
         persona: []const u8 = "",
         initials: []const u8 = "", // persona initials for the row avatar
         has_host: bool = false,
-        on_air: bool = false, // the active show, on today's column
+        on_air: bool = false, // this range contains the station's current hour
         autopilot: bool = false,
+        avatar_id: u64 = 0,
+        topic: []const u8 = "",
+        has_topic: bool = false,
+        topic_long: bool = false,
+        topic_action: []const u8 = "MORE",
+        tagline: []const u8 = "",
+        soul: []const u8 = "",
+        has_tagline: bool = false,
+        has_soul: bool = false,
+        host_open: bool = false,
+        host_action: []const u8 = "ABOUT",
+        guests: []const u8 = "",
+        has_guests: bool = false,
     };
+
+    pub fn stationClock(self: *const Model, arena: std.mem.Allocator) []const u8 {
+        return formatStationStamp(arena, @divFloor(self.station_clock.wallMs(), 1000), self.station_offset_minutes, self.station_locale, true);
+    }
+
+    pub fn stationDay(self: *const Model) i64 {
+        return station_time.parts(self.station_clock.wallMs(), self.station_offset_minutes).day;
+    }
+
+    pub fn selectedDay(self: *const Model) i64 {
+        return if (self.day_picked) self.day_sel else self.stationDay();
+    }
+
+    pub fn has_timezone(self: *const Model) bool {
+        return self.timezone.len > 0;
+    }
 
     /// The selected day's grid compressed to contiguous ranges.
     pub fn day_slots(self: *const Model, arena: std.mem.Allocator) []const SlotRow {
-        const d: usize = @intCast(std.math.clamp(self.day_sel, 0, 6));
+        const wall_ms = self.station_clock.wallMs();
+        const selected_day = if (self.day_picked) self.day_sel else station_time.parts(wall_ms, self.station_offset_minutes).day;
+        const d: usize = @intCast(std.math.clamp(selected_day, 0, 6));
         const grid = self.sched_grid[d];
         var out: std.ArrayList(SlotRow) = .empty;
         var h: usize = 0;
@@ -964,26 +1031,100 @@ pub const Model = struct {
             const v = grid[h];
             var end = h + 1;
             while (end < 24 and grid[end] == v) end += 1;
-            const range = std.fmt.allocPrint(arena, "{d:0>2}:00 – {d:0>2}:00", .{ h, end % 24 }) catch "";
+            var range_buf: [48]u8 = undefined;
+            const range = arena.dupe(u8, station_time.hourRange(&range_buf, h, end, self.station_locale)) catch "";
+            const on_air = station_time.isNow(wall_ms, self.station_offset_minutes, @intCast(d), h, end);
             if (v == 0) {
-                out.append(arena, .{ .range = range, .show_name = "Autopilot", .autopilot = true }) catch return out.items;
+                out.append(arena, .{ .hour = @intCast(h), .range = range, .show_name = "Autopilot", .autopilot = true, .on_air = on_air }) catch return out.items;
             } else {
                 const idx: usize = v - 1;
                 if (idx < self.show_count) {
                     const row = self.show_rows[idx];
+                    const p: station_schedule.Persona = if (row.persona_slot) |pi| self.persona_roster.rows[pi] else .{};
                     out.append(arena, .{
+                        .hour = @intCast(h),
                         .range = range,
                         .show_name = row.name,
                         .persona = row.persona,
                         .initials = wordInitials(arena, row.persona),
                         .has_host = row.persona.len > 0,
-                        .on_air = row.live,
+                        .on_air = on_air,
+                        .avatar_id = if (row.persona_slot) |pi| self.persona_images[pi] else 0,
+                        .topic = if (self.slot_topic_open[h]) row.topic else station_schedule.preview(row.topic, 120),
+                        .has_topic = row.topic.len > 0,
+                        .topic_long = row.topic.len > 120,
+                        .topic_action = if (self.slot_topic_open[h]) "LESS" else "MORE",
+                        .tagline = p.tagline,
+                        .soul = p.soul,
+                        .has_tagline = p.tagline.len > 0,
+                        .has_soul = p.soul.len > 0,
+                        .host_open = self.slot_host_open[h],
+                        .host_action = if (self.slot_host_open[h]) "LESS ABOUT" else "ABOUT",
+                        .guests = row.guests,
+                        .has_guests = row.guests.len > 0,
                     }) catch return out.items;
                 }
             }
             h = end;
         }
         return out.items;
+    }
+
+    pub const NowShow = struct {
+        topic: []const u8 = "",
+        has_topic: bool = false,
+        topic_long: bool = false,
+        topic_action: []const u8 = "MORE",
+        tagline: []const u8 = "",
+        soul: []const u8 = "",
+        has_tagline: bool = false,
+        has_soul: bool = false,
+        host_open: bool = false,
+        host_action: []const u8 = "ABOUT",
+        guests: []const u8 = "",
+        has_guests: bool = false,
+        avatar_id: u64 = 0,
+        initials: []const u8 = "",
+    };
+
+    pub fn nowShow(self: *const Model, arena: std.mem.Allocator) NowShow {
+        var topic: []const u8 = "";
+        const time = station_time.parts(self.station_clock.wallMs(), self.station_offset_minutes);
+        const slot = self.sched_grid[@intCast(time.day)][@intCast(time.hour)];
+        if (slot > 0 and slot <= self.show_count and std.mem.eql(u8, self.show_rows[slot - 1].name, self.show)) {
+            topic = self.show_rows[slot - 1].topic;
+        } else {
+            for (self.show_rows[0..self.show_count]) |row| {
+                if (std.mem.eql(u8, row.name, self.show)) {
+                    topic = row.topic;
+                    break;
+                }
+            }
+        }
+        const pi = self.persona_roster.find(self.host_id);
+        const p: station_schedule.Persona = if (pi) |i| self.persona_roster.rows[i] else .{};
+        return .{
+            .topic = if (self.now_topic_open) topic else station_schedule.preview(topic, 180),
+            .has_topic = topic.len > 0,
+            .topic_long = topic.len > 180,
+            .topic_action = if (self.now_topic_open) "LESS" else "MORE",
+            .tagline = p.tagline,
+            .soul = p.soul,
+            .has_tagline = p.tagline.len > 0,
+            .has_soul = p.soul.len > 0,
+            .host_open = self.now_host_open,
+            .host_action = if (self.now_host_open) "LESS ABOUT" else "ABOUT",
+            .guests = self.now_guests,
+            .has_guests = self.now_guests.len > 0,
+            .avatar_id = if (pi) |i| self.persona_images[i] else 0,
+            .initials = wordInitials(arena, self.host),
+        };
+    }
+
+    pub fn now_show_list(self: *const Model, arena: std.mem.Allocator) []const NowShow {
+        const out = arena.alloc(NowShow, 1) catch return &.{};
+        out[0] = self.nowShow(arena);
+        return out;
     }
 
     pub fn has_station_loc(self: *const Model) bool {
@@ -1021,8 +1162,16 @@ pub const Model = struct {
         }
         return out;
     }
-    pub fn history_list(self: *const Model) []const QueueRow {
-        return self.history_rows[0..self.history_count];
+    pub fn history_list(self: *const Model, arena: std.mem.Allocator) []const QueueRow {
+        const out = arena.dupe(QueueRow, self.history_rows[0..self.history_count]) catch return &.{};
+        for (out) |*row| {
+            row.hhmm = formatStationStamp(arena, row.played_at_s, self.station_offset_minutes, self.station_locale, false);
+            if (row.played_at_s) |at| {
+                var buf: [48]u8 = undefined;
+                row.ago = arena.dupe(u8, station_time.ago(&buf, self.station_clock.wallMs(), at)) catch "";
+            }
+        }
+        return out;
     }
 
     // ---------------------------------------------------------------- booth
@@ -1046,7 +1195,11 @@ pub const Model = struct {
                 .dj => !t.is_track,
                 .tracks => t.is_track,
             };
-            if (keep) out.append(arena, t) catch break;
+            if (keep) {
+                var row = t;
+                row.station_stamp = formatStationStamp(arena, row.stamp_epoch_s, self.station_offset_minutes, self.station_locale, true);
+                out.append(arena, row) catch break;
+            }
         }
         return out.items;
     }
@@ -1328,6 +1481,12 @@ pub const Model = struct {
     // Names read/dispatched only by update/fx (never bound in markup) — opt out
     // of the dead-state lint.
     pub const view_unbound = .{
+        "timezone_store", "station_locale", "station_offset_minutes", "station_clock", "station_second_timer_active",
+        "stationDay", "nowShow", "day_picked", "slot_topic_open", "slot_host_open",
+        "now_topic_open", "now_host_open", "host_id_store", "host_id",
+        "now_guests_store", "now_guests", "persona_roster", "persona_images",
+        "persona_loading", "next_persona_id", "persona_url_store", "persona_cache_store",
+        "show_ids_store", "show_guests_store",
         // fixed backing buffers behind the bound slice fields
         "title_buf",          "artist_buf",          "album_buf",           "genre_buf",
         "dj_buf",             "show_buf",            "host_buf",            "cover_sid_buf",
@@ -1422,6 +1581,7 @@ pub const Msg = union(enum) {
     got_state: native_sdk.EffectResponse,
     got_themes: native_sdk.EffectResponse,
     got_cover: native_sdk.EffectImageResult,
+    got_persona: native_sdk.EffectImageResult,
     got_session: native_sdk.EffectResponse,
     got_schedule: native_sdk.EffectResponse,
     got_health: native_sdk.EffectResponse,
@@ -1487,6 +1647,10 @@ pub const Msg = union(enum) {
     // booth / schedule
     set_booth_filter: BoothFilter,
     pick_day: i64,
+    toggle_slot_topic: i64,
+    toggle_slot_host: i64,
+    toggle_now_topic,
+    toggle_now_host,
 
     // request slip
     req_edit: canvas.TextInputEvent,
@@ -1536,6 +1700,7 @@ pub const Msg = union(enum) {
 
     // Effect-result Msgs dispatched by the runtime/fx, not markup.
     pub const view_unbound = .{
+        "got_persona",
         "tick_feed",     "tick_reconnect", "tick_theme",  "tick_reqpoll",
         "tick_signal",   "tick_second",    "tick_ob_step", "got_np",
         "got_state",     "got_themes",     "got_cover",   "got_session",
@@ -1615,10 +1780,12 @@ fn isoToHhmm(iso: []const u8) []const u8 {
     return "";
 }
 
-// UTC weekday for an epoch-ms timestamp (0 = Sunday; 1970-01-01 was Thursday).
-fn utcWeekday(wall_ms: i64) i64 {
-    const days = @divFloor(wall_ms, 86_400_000);
-    return @mod(days + 4, 7);
+// Shared with booth boundaries: the caller supplies the airing epoch, while
+// the model owns the station's current offset and display locale.
+pub fn formatStationStamp(arena: std.mem.Allocator, at_s: ?i64, offset_minutes: i64, display_locale: station_time.Locale, seconds: bool) []const u8 {
+    const at = at_s orelse return "";
+    var buf: [32]u8 = undefined;
+    return arena.dupe(u8, station_time.clock(&buf, at *| 1000, offset_minutes, display_locale, seconds)) catch "";
 }
 
 fn startStream(model: *Model, fx: *Effects) void {
@@ -2063,7 +2230,7 @@ fn loadCover(model: *Model, fx: *Effects, sid: []const u8) void {
     dropCover(model, fx);
     const url = api.coverUrl(&model.cover_url_buf, model.base, sid) catch return;
     const id = model.next_cover_id;
-    model.next_cover_id += 1;
+    model.next_cover_id = if (id + 1 >= keys.persona_image_base) keys.cover_image_base else id + 1;
     // Cache into the OS caches dir when we know where that is. An unresolved
     // cache_dir (or a path that will not fit the buffer) just means this load
     // goes to the network like it always did — never a reason to skip the art.
@@ -2080,11 +2247,53 @@ fn loadCover(model: *Model, fx: *Effects, sid: []const u8) void {
     model.cover_loading_id = id;
 }
 
+fn resetScheduleDisclosures(model: *Model) void {
+    model.slot_topic_open = [_]bool{false} ** 24;
+    model.slot_host_open = [_]bool{false} ** 24;
+    model.now_topic_open = false;
+    model.now_host_open = false;
+}
+
+fn dropPersonas(model: *Model, fx: *Effects) void {
+    for (0..station_schedule.max_personas) |i| {
+        if (model.persona_loading[i] != 0) fx.cancel(model.persona_loading[i]);
+        if (model.persona_images[i] != 0) _ = fx.unregisterImage(model.persona_images[i]);
+        model.persona_loading[i] = 0;
+        model.persona_images[i] = 0;
+    }
+}
+
+fn loadPersonas(model: *Model, fx: *Effects) void {
+    for (model.persona_roster.rows[0..model.persona_roster.count], 0..) |p, i| {
+        if (p.avatar.len == 0) continue;
+        const url = api.personaAvatarUrl(&model.persona_url_store[i], model.base, p.avatar) catch continue;
+        const id = model.next_persona_id;
+        model.next_persona_id += 1;
+        const cache_path: []const u8 = if (model.cache_dir.len > 0)
+            native_sdk.imageCachePath(&model.persona_cache_store[i], model.cache_dir, url) catch ""
+        else
+            "";
+        fx.loadImage(.{ .id = id, .url = url, .cache_path = cache_path, .on_result = Effects.imageMsg(.got_persona) });
+        model.persona_loading[i] = id;
+    }
+}
+
 // Re-point everything at a (possibly new) station base: fresh stream + feeds,
 // nothing left over from the old one. `url` must already be normalized into
 // model.base by the caller.
 fn retune(model: *Model, fx: *Effects) void {
     dropCover(model, fx);
+    dropPersonas(model, fx);
+    model.persona_roster.count = 0;
+    model.timezone = "";
+    model.station_locale = .en_gb;
+    model.station_offset_minutes = 0;
+    model.day_picked = false;
+    model.day_sel = model.stationDay();
+    resetScheduleDisclosures(model);
+    model.host_id = "";
+    model.now_guests = "";
+    model.station_loc = "";
     model.cover_sid = "";
     model.title = "Tuning in…";
     model.artist = "";
@@ -2223,17 +2432,29 @@ fn startPlayerTimers(fx: *Effects) void {
     fx.startTimer(.{ .key = keys.signal_timer, .interval_ms = 5000, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_signal) });
 }
 
+fn syncSecondTimer(model: *Model, fx: *Effects) void {
+    const needed = model.sleep_deadline_ms > 0 or
+        (model.phase == .player and model.app_active and !model.mini_open and (model.active_tab == .schedule or model.active_tab == .timeline));
+    if (needed == model.station_second_timer_active) return;
+    model.station_second_timer_active = needed;
+    if (needed)
+        fx.startTimer(.{ .key = keys.second_timer, .interval_ms = 1000, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_second) })
+    else
+        fx.cancelTimer(keys.second_timer);
+}
+
 fn armSleep(model: *Model, fx: *Effects, minutes: i64) void {
     model.sleep_minutes = minutes;
     model.now_wall_ms = native_sdk.nowMs();
     model.sleep_deadline_ms = model.now_wall_ms + minutes * 60_000;
     fx.startTimer(.{ .key = keys.second_timer, .interval_ms = 1000, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_second) });
+    model.station_second_timer_active = true;
 }
 
 fn disarmSleep(model: *Model, fx: *Effects) void {
     model.sleep_deadline_ms = 0;
     model.sleep_minutes = 0;
-    fx.cancelTimer(keys.second_timer);
+    syncSecondTimer(model, fx);
 }
 
 fn tuneOut(model: *Model, fx: *Effects) void {
@@ -2279,7 +2500,8 @@ pub fn boot(model: *Model, fx: *Effects) void {
         fetchDj(model, fx);
         postBeacon(model, fx);
         startPlayerTimers(fx);
-        model.day_sel = utcWeekday(native_sdk.nowMs());
+        model.day_sel = model.stationDay();
+        syncSecondTimer(model, fx);
     } else {
         model.transport = .stopped;
     }
@@ -2379,6 +2601,10 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .tick_second => |t| {
             if (t.outcome != .fired) return;
             model.now_wall_ms = native_sdk.nowMs();
+            if (!model.day_picked and model.day_sel != model.stationDay()) {
+                model.day_sel = model.stationDay();
+                resetScheduleDisclosures(model);
+            }
             if (model.sleep_deadline_ms > 0 and model.now_wall_ms >= model.sleep_deadline_ms) {
                 disarmSleep(model, fx);
                 tuneOut(model, fx);
@@ -2389,6 +2615,15 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             const parsed = json.parse(json.NowPlaying, std.heap.page_allocator, r.body) catch return;
             defer parsed.deinit();
             const np = parsed.value;
+            if (np.timezone) |v| setStr(&model.timezone_store, &model.timezone, v);
+            if (np.locale) |v| model.station_locale = station_time.locale(v);
+            const ctx_clock = if (np.context) |c| c.clock else null;
+            const ctx_date = if (np.context) |c| c.date else null;
+            model.station_offset_minutes = station_time.offset(model.station_clock.wallMs(), if (ctx_clock) |c| c.hhmm else null, if (ctx_date) |d| d.dayOfWeek else null);
+            if (!model.day_picked and model.day_sel != model.stationDay()) {
+                model.day_sel = model.stationDay();
+                resetScheduleDisclosures(model);
+            }
             // Declared out here, not inside the nowPlaying block, because the
             // track-change notification below fires only once the show name
             // has been filled too — otherwise the toast would pair the new
@@ -2456,19 +2691,40 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 if (ctx.weather) |wc| {
                     if (wc.condition) |v| setStr(&model.ctx_cond_buf, &model.ctx_cond, v);
                     if (wc.temp) |v| model.ctx_temp = displayInteger(@round(v), -999);
+                    if (wc.location) |v| setStr(&model.station_loc_buf, &model.station_loc, v);
                 }
             }
             if (np.dj) |d| {
                 if (d.name) |v| setStr(&model.dj_buf, &model.dj, v);
             }
             if (np.activeShow) |s| {
+                if (!std.mem.eql(u8, s.name orelse "", model.show) or !std.mem.eql(u8, if (s.persona) |p| p.id orelse "" else "", model.host_id)) {
+                    model.now_topic_open = false;
+                    model.now_host_open = false;
+                }
+                model.host_id = "";
+                model.now_guests = "";
                 if (s.name) |v| setStr(&model.show_buf, &model.show, v);
                 if (s.persona) |p| {
                     if (p.name) |v| setStr(&model.host_buf, &model.host, v);
+                    if (p.id) |v| setStr(&model.host_id_store, &model.host_id, v);
                 } else model.host = "";
+                if (s.guests) |guests| {
+                    var writer = std.Io.Writer.fixed(&model.now_guests_store);
+                    var count: usize = 0;
+                    for (guests) |g| {
+                        const name = g.name orelse continue;
+                        if (name.len == 0) continue;
+                        writer.print("{s}{s}", .{ if (count > 0) @as([]const u8, " & ") else "", name }) catch break;
+                        count += 1;
+                    }
+                    model.now_guests = writer.buffered();
+                }
             } else {
                 model.show = "";
                 model.host = "";
+                model.host_id = "";
+                model.now_guests = "";
             }
             if (np.listeners) |l| {
                 if (l.current) |c| model.listeners = c;
@@ -2567,7 +2823,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     const i = model.history_count;
                     setStr(&model.hist_title_store[i], &model.history_rows[i].title, e.title orelse continue);
                     setStr(&model.hist_artist_store[i], &model.history_rows[i].artist, e.artist orelse "");
-                    setStr(&model.hist_time_store[i], &model.history_rows[i].hhmm, isoToHhmm(e.t orelse ""));
+                    model.history_rows[i].played_at_s = station_time.playedAt(e.startedAt, e.t, e.queuedAt);
                     model.history_count += 1;
                 }
             }
@@ -2644,6 +2900,15 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (model.cover_id != 0) _ = fx.unregisterImage(model.cover_id);
             model.cover_id = r.id;
         },
+        .got_persona => |r| {
+            for (model.persona_loading[0..model.persona_roster.count], 0..) |id, i| {
+                if (id == 0 or id != r.id) continue;
+                model.persona_loading[i] = 0;
+                if (r.outcome == .loaded) model.persona_images[i] = r.id;
+                return;
+            }
+            if (r.outcome == .loaded) _ = fx.unregisterImage(r.id);
+        },
         .got_session => |r| {
             if (r.outcome != .ok or r.status != 200) return;
             const parsed = json.parse(json.Session, std.heap.page_allocator, r.body) catch return;
@@ -2688,6 +2953,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     turn.kind = "TRACK";
                 } else continue; // system/event turns stay internal
                 const k = model.booth_count;
+                model.booth_turns[k].stamp_epoch_s = station_time.timestamp(m.t);
                 var hhmm: []const u8 = "";
                 if (m.t) |tv| {
                     if (tv == .string) hhmm = isoToHhmm(tv.string);
@@ -2711,25 +2977,30 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             defer parsed.deinit();
             const shows = parsed.value.shows orelse return;
             const personas = parsed.value.personas orelse &[_]json.SchedPersona{};
+            if (parsed.value.timezone) |v| setStr(&model.timezone_store, &model.timezone, v);
+            if (parsed.value.locale) |v| model.station_locale = station_time.locale(v);
+            dropPersonas(model, fx);
+            model.persona_roster.apply(personas, parsed.value.soulsPublished orelse false);
+            loadPersonas(model, fx);
+            resetScheduleDisclosures(model);
             model.show_count = 0;
             for (shows) |s| {
                 if (model.show_count >= max_shows) break;
                 const i = model.show_count;
                 const name = s.name orelse continue;
+                model.show_rows[i] = .{};
+                setStr(&model.show_ids_store[i], &model.show_rows[i].id, s.id orelse "");
                 setStr(&model.show_names_store[i], &model.show_rows[i].name, name);
-                setStr(&model.show_topics_store[i], &model.show_rows[i].topic, s.topic orelse "");
+                setStr(&model.show_topics_store[i], &model.show_rows[i].topic, station_schedule.preview(s.topic orelse "", model.show_topics_store[i].len));
                 var persona_name: []const u8 = "";
                 if (s.personaId) |pid| {
-                    for (personas) |p| {
-                        if (p.id) |id| {
-                            if (std.mem.eql(u8, id, pid)) {
-                                persona_name = p.name orelse "";
-                                break;
-                            }
-                        }
+                    if (model.persona_roster.find(pid)) |pi| {
+                        persona_name = model.persona_roster.rows[pi].name;
+                        model.show_rows[i].persona_slot = pi;
                     }
                 }
                 setStr(&model.show_personas_store[i], &model.show_rows[i].persona, persona_name);
+                model.show_rows[i].guests = model.persona_roster.guests(&model.show_guests_store[i], s.guestPersonaIds orelse &.{});
                 model.show_count += 1;
             }
             // Grid: showId per day/hour → show index (+1) in sched_grid.
@@ -2743,14 +3014,11 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                         // Resolve the show id against the catalogue we kept.
                         var idx: usize = 0;
                         var found = false;
-                        for (shows, 0..) |s, si| {
-                            if (si >= max_shows) break;
-                            if (s.id) |id| {
-                                if (std.mem.eql(u8, id, sid)) {
-                                    idx = si;
-                                    found = true;
-                                    break;
-                                }
+                        for (model.show_rows[0..model.show_count], 0..) |s, si| {
+                            if (std.mem.eql(u8, s.id, sid)) {
+                                idx = si;
+                                found = true;
+                                break;
                             }
                         }
                         if (found) model.sched_grid[d][h] = @intCast(idx + 1);
@@ -3046,7 +3314,11 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         // -------------------------------------------------------- navigation
         .pick_tab => |tab| {
             model.active_tab = tab;
-            if (tab == .schedule) model.day_sel = utcWeekday(native_sdk.nowMs());
+            if (tab == .schedule) {
+                model.day_picked = false;
+                model.day_sel = model.stationDay();
+                resetScheduleDisclosures(model);
+            }
         },
         .open_timeline => model.active_tab = .timeline,
         .open_booth => model.active_tab = .booth,
@@ -3148,7 +3420,19 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
 
         // --------------------------------------------------- booth / schedule
         .set_booth_filter => |f| model.booth_filter = f,
-        .pick_day => |d| model.day_sel = std.math.clamp(d, 0, 6),
+        .pick_day => |d| {
+            model.day_sel = std.math.clamp(d, 0, 6);
+            model.day_picked = true;
+            resetScheduleDisclosures(model);
+        },
+        .toggle_slot_topic => |h| {
+            if (h >= 0 and h < 24) model.slot_topic_open[@intCast(h)] = !model.slot_topic_open[@intCast(h)];
+        },
+        .toggle_slot_host => |h| {
+            if (h >= 0 and h < 24) model.slot_host_open[@intCast(h)] = !model.slot_host_open[@intCast(h)];
+        },
+        .toggle_now_topic => model.now_topic_open = !model.now_topic_open,
+        .toggle_now_host => model.now_host_open = !model.now_host_open,
 
         // ------------------------------------------------ private-station gate
         .pw_edit => |edit| {
@@ -3474,12 +3758,13 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 model.phase = .player;
                 diag.print("phase player (onboarding complete)", .{});
                 model.ob_checking = false;
-                model.day_sel = utcWeekday(native_sdk.nowMs());
+                model.day_sel = model.stationDay();
                 startPlayerTimers(fx);
                 retune(model, fx);
             } else |_| {}
         },
     }
+    syncSecondTimer(model, fx);
 }
 
 pub fn initialModel() Model {
@@ -3921,6 +4206,7 @@ test "day_slots compresses the grid into contiguous ranges" {
     m.show_count = 1;
     m.show_rows[0] = .{ .name = "Night Static", .persona = "NOVA" };
     m.day_sel = 2;
+    m.day_picked = true;
     // Hours 0-4 show 1; rest autopilot.
     for (0..5) |h| m.sched_grid[2][h] = 1;
     const slots = m.day_slots(arena);
@@ -4690,4 +4976,147 @@ test "fetchFeed's fetch keys occupy their slots on the very first fired tick_fee
     try testing.expectEqual(@as(usize, 0), fx.pendingFetchCount());
     update(&m, .{ .tick_feed = .{ .key = keys.feed_timer, .outcome = .fired, .timestamp_ns = 0 } }, &fx);
     try testing.expectEqual(@as(usize, 3), fx.pendingFetchCount());
+}
+
+test "station polls derive the offset and reset it when context disappears" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    var clock: native_sdk.TestClock = .{};
+    clock.setWallMs((station_time.isoSeconds("2026-10-13T23:50:00Z") orelse unreachable) * 1000);
+    m.station_clock = clock.clock();
+    update(&m, .{ .got_np = .{ .key = keys.fetch_np, .outcome = .ok, .status = 200, .body = "{\"timezone\":\"Asia/Kathmandu\",\"locale\":\"en-US\",\"context\":{\"clock\":{\"hhmm\":\"05:35\"},\"date\":{\"dayOfWeek\":3,\"iso\":\"2026-10-14\"}}}" } }, &fx);
+    try testing.expectEqual(@as(i64, 345), m.station_offset_minutes);
+    try testing.expectEqual(@as(i64, 3), m.selectedDay());
+    try testing.expectEqualStrings("Asia/Kathmandu", m.timezone);
+    try testing.expectEqual(station_time.Locale.en_us, m.station_locale);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqualStrings("05:35:00 am", m.stationClock(arena.allocator()));
+    clock.advanceMs(1000);
+    try testing.expectEqualStrings("05:35:01 am", m.stationClock(arena.allocator()));
+    update(&m, .{ .pick_day = 1 }, &fx);
+    update(&m, .{ .got_np = .{ .key = keys.fetch_np, .outcome = .ok, .status = 200, .body = "{}" } }, &fx);
+    try testing.expectEqual(@as(i64, 0), m.station_offset_minutes);
+    try testing.expectEqual(@as(i64, 1), m.selectedDay());
+    update(&m, .{ .pick_tab = .schedule }, &fx);
+    try testing.expectEqual(@as(i64, 2), m.selectedDay());
+}
+
+test "NOW marks only the current range and follows station midnight" {
+    var m: Model = .{};
+    var clock: native_sdk.TestClock = .{};
+    clock.setWallMs((station_time.isoSeconds("2026-10-13T23:59:00Z") orelse unreachable) * 1000);
+    m.station_clock = clock.clock();
+    m.show_count = 1;
+    m.show_rows[0] = .{ .name = "Repeated show", .live = true };
+    m.sched_grid[2][23] = 1;
+    m.sched_grid[3][0] = 1;
+    m.sched_grid[3][12] = 1;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var slots = m.day_slots(arena.allocator());
+    try testing.expect(!slots[0].on_air);
+    try testing.expect(slots[1].on_air);
+    clock.advanceMs(60000);
+    try testing.expectEqual(@as(i64, 3), m.selectedDay());
+    slots = m.day_slots(arena.allocator());
+    try testing.expect(slots[0].on_air);
+    for (slots[1..]) |row| try testing.expect(!row.on_air);
+    m.day_picked = true;
+    m.day_sel = 2;
+    for (m.day_slots(arena.allocator())) |row| try testing.expect(!row.on_air);
+}
+
+test "history selects the aired timestamp and booth formats ISO or epoch in station time" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.station_offset_minutes = 330;
+    m.station_locale = .en_us;
+    update(&m, .{ .got_state = .{ .key = keys.fetch_state, .outcome = .ok, .status = 200, .body = "{\"history\":[{\"title\":\"Started\",\"startedAt\":\"2026-10-13T23:00:00Z\",\"t\":\"2026-10-13T22:00:00Z\"},{\"title\":\"Legacy\",\"startedAt\":\"bad\",\"t\":\"2026-10-13T22:00:00Z\"},{\"title\":\"Queued\",\"queuedAt\":\"2026-10-13T21:00:00Z\"},{\"title\":\"Missing\"}]}" } }, &fx);
+    update(&m, .{ .got_session = .{ .key = keys.fetch_session, .outcome = .ok, .status = 200, .body = "{\"messages\":[{\"role\":\"segment\",\"text\":\"ISO\",\"t\":\"1970-01-01T00:00:01Z\"},{\"role\":\"track\",\"text\":\"Epoch\",\"t\":1000},{\"role\":\"dj\",\"text\":\"No time\"}]}" } }, &fx);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const history = m.history_list(arena.allocator());
+    try testing.expectEqualStrings("04:30 am", history[0].hhmm);
+    try testing.expectEqualStrings("03:30 am", history[1].hhmm);
+    try testing.expectEqualStrings("02:30 am", history[2].hhmm);
+    try testing.expectEqualStrings("", history[3].hhmm);
+    const turns = m.booth_list(arena.allocator());
+    try testing.expectEqualStrings("", turns[0].station_stamp);
+    try testing.expectEqualStrings("05:46:40 am", turns[1].station_stamp);
+    try testing.expectEqualStrings("05:30:01 am", turns[2].station_stamp);
+}
+
+test "schedule retains guests and public biographies and maps only kept shows" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.base = "https://station.test";
+    update(&m, .{ .got_schedule = .{ .key = keys.fetch_schedule, .outcome = .ok, .status = 200, .body = "{\"timezone\":\"Europe/London\",\"locale\":\"en-US\",\"soulsPublished\":false,\"personas\":[{\"id\":\"h\",\"name\":\"Heer\",\"tagline\":\"After dark\",\"soul\":\"Do not publish\",\"avatar\":\"/persona-avatar/h\"},{\"id\":\"g\",\"name\":\"Sol\"}],\"shows\":[{\"id\":\"skip\"},{\"id\":\"keep\",\"name\":\"Night Static\",\"topic\":\"Records to keep you company\",\"personaId\":\"h\",\"guestPersonaIds\":[\"g\",\"deleted\"]}],\"schedule\":{\"0\":[\"keep\",\"keep\"]}}" } }, &fx);
+    try testing.expectEqual(@as(usize, 1), m.show_count);
+    try testing.expectEqual(@as(u8, 1), m.sched_grid[0][0]);
+    try testing.expectEqualStrings("Sol", m.show_rows[0].guests);
+    try testing.expectEqualStrings("", m.persona_roster.rows[0].soul);
+    try testing.expectEqualStrings("After dark", m.persona_roster.rows[0].tagline);
+    try testing.expectEqual(@as(u64, 0), m.persona_images[0]);
+    const id = m.persona_loading[0];
+    try testing.expect(id >= keys.persona_image_base);
+    try testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
+    try testing.expectEqualStrings("https://station.test/api/persona-avatar/h", fx.pendingImageLoadAt(0).?.url);
+    update(&m, .{ .got_persona = .{ .id = id, .outcome = .loaded } }, &fx);
+    try testing.expectEqual(id, m.persona_images[0]);
+    m.day_picked = true;
+    m.day_sel = 0;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const slot = m.day_slots(arena.allocator())[0];
+    try testing.expectEqualStrings("Records to keep you company", slot.topic);
+    try testing.expectEqual(id, slot.avatar_id);
+    update(&m, .{ .toggle_slot_topic = 0 }, &fx);
+    try testing.expect(m.slot_topic_open[0]);
+    update(&m, .{ .pick_day = 1 }, &fx);
+    try testing.expect(!m.slot_topic_open[0]);
+    // Switching stations clears pixels and clock metadata. A previous load's
+    // terminal result must not attach its portrait to the fresh station.
+    retune(&m, &fx);
+    try testing.expectEqual(@as(usize, 0), m.persona_roster.count);
+    try testing.expectEqual(@as(u64, 0), m.persona_images[0]);
+    try testing.expectEqualStrings("", m.timezone);
+    update(&m, .{ .got_persona = .{ .id = id, .outcome = .loaded } }, &fx);
+    try testing.expectEqual(@as(u64, 0), m.persona_images[0]);
+}
+
+test "second timer serves visible station panels and survives sleep cancellation" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.phase = .player;
+    update(&m, .{ .pick_tab = .schedule }, &fx);
+    try testing.expect(m.station_second_timer_active);
+    try testing.expectEqual(@as(usize, 1), fx.pendingTimerCount());
+    try testing.expectEqual(keys.second_timer, fx.pendingTimerAt(0).?.key);
+    try testing.expectEqual(@as(u32, 1000), fx.pendingTimerAt(0).?.interval_ms);
+    update(&m, .{ .sleep_pick = 15 }, &fx);
+    update(&m, .cancel_sleep, &fx);
+    try testing.expect(m.station_second_timer_active);
+    update(&m, .close_panel, &fx);
+    try testing.expect(!m.station_second_timer_active);
+    try testing.expectEqual(@as(usize, 0), fx.pendingTimerCount());
+    update(&m, .open_timeline, &fx);
+    try testing.expect(m.station_second_timer_active);
+    update(&m, .app_deactivated, &fx);
+    try testing.expect(!m.station_second_timer_active);
+    try testing.expectEqual(@as(usize, 0), fx.pendingTimerCount());
+    update(&m, .{ .sleep_pick = 15 }, &fx);
+    try testing.expect(m.station_second_timer_active);
+    update(&m, .cancel_sleep, &fx);
+    try testing.expect(!m.station_second_timer_active);
+    update(&m, .app_activated, &fx);
+    try testing.expect(m.station_second_timer_active);
 }
