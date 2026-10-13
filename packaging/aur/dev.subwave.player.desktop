@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=SUBWAVE Player
+GenericName=Internet Radio Player
+Comment=Native desktop player for SUB/WAVE internet radio stations
+Exec=subwave-desktop
+Icon=dev.subwave.player
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=radio;stream;icecast;music;subwave;
+StartupNotify=true
+StartupWMClass=subwave-desktop
+SingleMainWindow=true

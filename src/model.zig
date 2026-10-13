@@ -19,6 +19,7 @@ const discord_rpc = @import("discord_rpc.zig");
 // `update` is the reducer below, so the self-update module needs an alias.
 const updater = @import("update.zig");
 const links = @import("links.zig");
+const distribution = @import("distribution.zig");
 const diag = @import("diag.zig");
 const station_time = @import("station_time.zig");
 const station_schedule = @import("station_schedule.zig");
@@ -257,6 +258,11 @@ pub const Model = struct {
     update_tag_buf: [24]u8 = undefined,
     update_tag: []const u8 = "",
     opener_inflight: bool = false,
+    // What this build's distribution channel allows (distribution.zig). Fields
+    // rather than direct constant reads so the suite can drive the store build
+    // without rewriting the channel.
+    update_checks: bool = distribution.checks_for_updates,
+    support_link: bool = distribution.offers_support_link,
 
     title_buf: [512]u8 = undefined,
     artist_buf: [256]u8 = undefined,
@@ -1594,6 +1600,7 @@ pub const Model = struct {
         // update notice is bound through has_update/update_label; opener state
         // only serializes browser launches in update/fx.
         "update_tag_buf",     "update_tag",          "opener_inflight",
+        "update_checks",
         // internal / derived-source state
         "phase",              "transport",           "volume",              "muted",
         "volume_widget_seen",
@@ -3104,8 +3111,11 @@ pub fn boot(model: *Model, fx: *Effects) void {
     } else saveSettings(model, fx);
     // Station-independent, so it runs in both phases; the repeating timer
     // matters because close_policy = hide keeps the app resident for weeks.
-    checkForUpdate(fx);
-    fx.startTimer(.{ .key = keys.update_timer, .interval_ms = 86_400_000, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_update) });
+    // A store build never starts it: the store delivers updates itself.
+    if (model.update_checks) {
+        checkForUpdate(fx);
+        fx.startTimer(.{ .key = keys.update_timer, .interval_ms = 86_400_000, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_update) });
+    }
     fetchDirectory(fx); // Discover rows for onboarding + sidebar
     if (model.phase == .player) {
         startStream(model, fx);
@@ -6156,6 +6166,25 @@ test "update check: newer tag arms the notice, older clears it, failures keep st
     update(&m, .{ .got_update = .{ .key = keys.fetch_update, .outcome = .ok, .status = 403, .body = "rate limited" } }, &fx);
     update(&m, .{ .got_update = .{ .key = keys.fetch_update, .outcome = .ok, .status = 200, .body = "not json" } }, &fx);
     try testing.expect(m.update_available());
+}
+
+test "a store build never polls GitHub for releases" {
+    inline for (.{ true, false }) |checks| {
+        var fx = Effects.init(testing.allocator);
+        defer fx.deinit();
+        fx.executor = .fake;
+        var m: Model = .{};
+        m.use_secure_credentials = false;
+        m.settings_path = "/tmp/distribution-test-settings.json";
+        m.update_checks = checks;
+        boot(&m, &fx);
+        var fetched = false;
+        for (0..fx.pendingFetchCount()) |i| {
+            if (fx.pendingFetchAt(i).?.key == keys.fetch_update) fetched = true;
+        }
+        try testing.expectEqual(checks, fetched);
+        try testing.expectEqual(checks, timerInterval(&fx, keys.update_timer) != null);
+    }
 }
 
 test "chrome insets land on both edges, so the masthead clears controls on any platform" {
