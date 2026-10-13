@@ -7,6 +7,7 @@
 const std = @import("std");
 const native_sdk = @import("native_sdk");
 const model_mod = @import("model.zig");
+const station_access = @import("station_access.zig");
 const Model = model_mod.Model;
 
 // Resolve <config>/subwave-player/settings.json and the per-app cache dir into
@@ -36,7 +37,7 @@ pub fn loadFromDisk(model: *Model, io: std.Io) void {
     if (model.settings_path.len == 0) return;
     const alloc = std.heap.page_allocator;
     const cwd = std.Io.Dir.cwd();
-    const bytes = cwd.readFileAlloc(io, model.settings_path, alloc, .limited(@import("station_access.zig").settings_bytes)) catch return;
+    const bytes = cwd.readFileAlloc(io, model.settings_path, alloc, .limited(station_access.settings_bytes)) catch return;
     defer alloc.free(bytes);
     model_mod.applySettingsJson(model, bytes);
 }

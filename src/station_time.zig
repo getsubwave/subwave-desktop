@@ -1,6 +1,7 @@
 //! Station clocks without a platform timezone database. The public context
 //! supplies the local weekday and minute; each poll also picks up DST changes.
 const std = @import("std");
+const iso8601 = @import("iso8601.zig");
 
 pub const Locale = enum { en_gb, en_us };
 
@@ -24,8 +25,8 @@ pub fn offset(wall_ms: i64, hhmm: ?[]const u8, weekday: ?i64) i64 {
     const local_clock = hhmm orelse return 0;
     const day = weekday orelse return 0;
     if (local_clock.len != 5 or local_clock[2] != ':' or day < 0 or day > 6) return 0;
-    const h = digits(local_clock[0..2]) orelse return 0;
-    const m = digits(local_clock[3..5]) orelse return 0;
+    const h = iso8601.digits(local_clock[0..2]) orelse return 0;
+    const m = iso8601.digits(local_clock[3..5]) orelse return 0;
     if (h > 23 or m > 59) return 0;
     const utc = parts(wall_ms, 0);
     const delta = @mod((day - utc.day) * 1440 + h * 60 + m - utc.hour * 60 - utc.minute + 5040, 10080) - 5040;
@@ -67,51 +68,9 @@ pub fn isNow(wall_ms: i64, offset_minutes: i64, day: i64, start: usize, end: usi
     return day == p.day and p.hour >= start and p.hour < end;
 }
 
-fn digits(s: []const u8) ?i64 {
-    if (s.len == 0) return null;
-    for (s) |c| if (!std.ascii.isDigit(c)) return null;
-    return std.fmt.parseInt(i64, s, 10) catch null;
-}
-
 pub fn isoSeconds(s: []const u8) ?i64 {
-    if (s.len < 19 or s[4] != '-' or s[7] != '-' or s[10] != 'T' or s[13] != ':' or s[16] != ':') return null;
-    const year = digits(s[0..4]) orelse return null;
-    const month = digits(s[5..7]) orelse return null;
-    const day = digits(s[8..10]) orelse return null;
-    const hour = digits(s[11..13]) orelse return null;
-    const minute = digits(s[14..16]) orelse return null;
-    const second = digits(s[17..19]) orelse return null;
-    if (month < 1 or month > 12 or hour > 23 or minute > 59 or second > 59) return null;
-    const leap = @mod(year, 4) == 0 and (@mod(year, 100) != 0 or @mod(year, 400) == 0);
-    const lengths = [_]i64{ 31, if (leap) 29 else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-    if (day < 1 or day > lengths[@intCast(month - 1)]) return null;
-    var zone: i64 = 0;
-    var pos: usize = 19;
-    if (pos < s.len and s[pos] == '.') {
-        pos += 1;
-        const begin = pos;
-        while (pos < s.len and std.ascii.isDigit(s[pos])) : (pos += 1) {}
-        if (pos == begin) return null;
-    }
-    if (pos < s.len) {
-        if (s[pos] == 'Z') {
-            if (pos + 1 != s.len) return null;
-        } else {
-            if (s.len - pos != 6 or (s[pos] != '+' and s[pos] != '-') or s[pos + 3] != ':') return null;
-            const zh = digits(s[pos + 1 .. pos + 3]) orelse return null;
-            const zm = digits(s[pos + 4 ..]) orelse return null;
-            if (zh > 23 or zm > 59) return null;
-            zone = (zh * 60 + zm) * (if (s[pos] == '-') @as(i64, -1) else 1);
-        }
-    }
-    // Gregorian civil date to days since 1970, also valid before the epoch.
-    const y = year - @as(i64, if (month <= 2) 1 else 0);
-    const era = @divFloor(y, 400);
-    const yo = y - era * 400;
-    const mp = month + @as(i64, if (month > 2) -3 else 9);
-    const doy = @divFloor(153 * mp + 2, 5) + day - 1;
-    const days = era * 146097 + yo * 365 + @divFloor(yo, 4) - @divFloor(yo, 100) + doy - 719468;
-    return days * 86400 + hour * 3600 + minute * 60 + second - zone * 60;
+    const ms = iso8601.parseMs(s) orelse return null;
+    return @divFloor(ms, 1000);
 }
 
 pub fn timestamp(value: ?std.json.Value) ?i64 {

@@ -3,6 +3,7 @@
 //! the API shape (mirrors app/src/lib/api.ts in the subwave monorepo).
 
 const std = @import("std");
+const station_access = @import("station_access.zig");
 
 pub const default_base = "https://www.getsubwave.com";
 
@@ -94,8 +95,10 @@ pub fn requestStatus(buf: []u8, base: []const u8, id: []const u8) ![]const u8 {
 
 // Normalize an operator-entered station address into a base URL: trim spaces,
 // default to https:// when no scheme, drop any trailing slash. Writes into buf.
+// Station addresses are normalized in station_access, which also classifies
+// hosts for the insecure-HTTP warning; URL builders take its output.
 pub fn normalizeBase(buf: []u8, raw: []const u8) ![]const u8 {
-    return @import("station_access.zig").normalizeBase(buf, raw);
+    return station_access.normalizeBase(buf, raw);
 }
 
 const testing = std.testing;

@@ -1,5 +1,6 @@
 //! Fixed station persona catalogue, shared by slots and the ON NOW card.
 const std = @import("std");
+const utf8 = @import("utf8.zig");
 const json = @import("json.zig");
 pub const max_personas = 32;
 
@@ -50,24 +51,23 @@ pub const Roster = struct {
         var count: usize = 0;
         for (ids) |id| {
             const p = self.rows[self.find(id) orelse continue];
-            if (p.name.len == 0) continue;
-            w.print("{s}{s}", .{ if (count > 0) @as([]const u8, " & ") else "", p.name }) catch break;
-            count += 1;
+            if (!appendGuest(&w, &count, p.name)) break;
         }
         return w.buffered();
     }
 };
 
-pub fn preview(text: []const u8, limit: usize) []const u8 {
-    var n = @min(text.len, limit);
-    while (n > 0 and n < text.len and text[n] & 0xc0 == 0x80) n -= 1;
-    return text[0..n];
+/// Appends `name` to a " & "-joined guest line, skipping blanks. False once
+/// `w` is full, so callers stop rather than emit a cut name.
+pub fn appendGuest(w: *std.Io.Writer, count: *usize, name: []const u8) bool {
+    if (name.len == 0) return true;
+    w.print("{s}{s}", .{ if (count.* > 0) @as([]const u8, " & ") else "", name }) catch return false;
+    count.* += 1;
+    return true;
 }
 
 fn copy(buf: []u8, raw: []const u8) []const u8 {
-    const text = preview(std.mem.trim(u8, raw, " \t\r\n"), buf.len);
-    @memcpy(buf[0..text.len], text);
-    return buf[0..text.len];
+    return utf8.copyInto(buf, std.mem.trim(u8, raw, " \t\r\n"));
 }
 
 test "roster copies public blurbs, gates souls and resolves guests" {
@@ -86,9 +86,4 @@ test "roster copies public blurbs, gates souls and resolves guests" {
     try std.testing.expectEqualStrings("Private prompt", roster.rows[0].soul);
     roster.apply(&.{}, true);
     try std.testing.expectEqual(@as(?usize, null), roster.find("host"));
-}
-
-test "previews keep UTF-8 code points intact" {
-    try std.testing.expectEqualStrings("ab", preview("abé", 3));
-    try std.testing.expectEqualStrings("abé", preview("abé", 4));
 }
