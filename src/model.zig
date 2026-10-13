@@ -2294,7 +2294,7 @@ fn settingsSnapshot(model: *Model) ![]const u8 {
         if (i > 0) try w.writeByte(',');
         try std.json.Stringify.value(entry.base(), .{}, &w);
         try w.print(":{{\"streamFormat\":\"{s}\"", .{entry.format.id()});
-        if (!model.use_secure_credentials and entry.password_len > 0) {
+        if (passwordsInSettingsFile(model) and entry.password_len > 0) {
             try w.writeAll(",\"stationPassword\":");
             try std.json.Stringify.value(entry.password(), .{}, &w);
         }
@@ -2304,17 +2304,25 @@ fn settingsSnapshot(model: *Model) ![]const u8 {
     return w.buffered();
 }
 
+// Linux has no working vault, and after a vault failure the settings file
+// stays the password store for the session: a legacy secret is never scrubbed
+// and a newly validated one still survives a restart.
+fn passwordsInSettingsFile(model: *const Model) bool {
+    return !model.use_secure_credentials or model.credentials_blocked;
+}
+
 fn saveSettings(model: *Model, fx: *Effects) void {
     pruneStationSettings(model);
     rememberStationSettings(model);
     if (!model.use_secure_credentials) model.credentials_dirty = false;
-    // Never overwrite a vault we could not read, or scrub an imported secret
-    // before the OS confirms its replacement. Retain the legacy file on error.
-    if (!model.credentials_ready or model.credentials_blocked or model.credentials_saving) {
+    // Wait for the vault read (so an imported secret isn't scrubbed before its
+    // replacement is known) and for an in-flight vault write to confirm.
+    if (!model.credentials_ready or model.credentials_saving) {
         model.save_dirty = true;
         return;
     }
-    if (model.credentials_dirty) {
+    // A vault we could not read or write is never overwritten.
+    if (model.credentials_dirty and !model.credentials_blocked) {
         var vault_buf: [station_access.vault_bytes]u8 = undefined;
         const secret = model.station_memory.vaultSnapshot(&vault_buf) catch return;
         model.credentials_dirty = false;
@@ -4103,8 +4111,10 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                         saveSettings(model, fx);
                     }
                 } else model.credentials_blocked = true;
-                if (model.credentials_blocked)
-                    model.station_status = "Couldn't read secure storage. Unlock the system keyring and restart to restore saved passwords. Settings were kept.";
+                if (model.credentials_blocked) {
+                    model.station_status = "Couldn't read secure storage. Unlock the system keyring and restart to restore saved passwords; other settings still save.";
+                    if (model.save_dirty) saveSettings(model, fx);
+                }
                 if (model.auth_gate == .checking) model.auth_gate = .idle;
                 syncStationGate(model, fx);
                 // A password loaded after the initial anonymous stream must
@@ -4121,7 +4131,8 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 } else {
                     model.credentials_blocked = true;
                     model.credentials_dirty = true;
-                    model.station_status = "Couldn't save the station password securely. Unlock the system keyring and restart. Settings were kept.";
+                    model.station_status = "Couldn't save the station password securely, so it stays in the settings file for now. Unlock the system keyring and restart to move it.";
+                    saveSettings(model, fx);
                 }
             }
         },
@@ -5514,12 +5525,17 @@ test "vault migration commits secrets before scrubbing settings and preserves le
     failed.settings_path = m.settings_path;
     applySettingsJson(&failed, "{\"stationPassword\":\"retain-secret\"}");
     failed.credentials_ready = false;
+    // Both models share one channel; clear the first save's key.
+    fx.cancel(keys.save_settings);
     const before = fx.pendingFileCount();
     update(&failed, .{ .got_station_credentials = .{ .key = keys.station_credentials, .operation = .get, .outcome = .locked } }, &fx);
     update(&failed, .toggle_notify, &fx);
     try testing.expect(failed.credentials_blocked);
     try testing.expectEqualStrings("retain-secret", failed.station_pw);
-    try testing.expectEqual(before, fx.pendingFileCount());
+    // An unreadable vault no longer stalls settings: the save goes through and
+    // keeps the legacy secret in the file instead of scrubbing it.
+    try testing.expectEqual(before + 1, fx.pendingFileCount());
+    try testing.expect(std.mem.indexOf(u8, fx.pendingFileAt(before).?.bytes, "retain-secret") != null);
 }
 
 test "Linux fallback avoids the crashing SDK credential calls and round-trips station passwords" {
@@ -5611,8 +5627,11 @@ test "vault saves coalesce later password changes and failures never write plain
     fx.cancel(keys.station_credentials);
     update(&m, .{ .got_station_credentials = .{ .key = keys.station_credentials, .operation = .set, .outcome = .locked } }, &fx);
     try testing.expect(m.credentials_blocked);
-    try testing.expectEqual(@as(usize, 0), fx.pendingFileCount());
     try testing.expectEqualStrings("last-secret", m.station_pw);
+    // The failed vault write falls back to the settings file, so the newest
+    // password survives a restart.
+    try testing.expectEqual(@as(usize, 1), fx.pendingFileCount());
+    try testing.expect(std.mem.indexOf(u8, fx.pendingFileAt(0).?.bytes, "last-secret") != null);
 }
 
 test "stored-password network failures do not erase credentials" {
