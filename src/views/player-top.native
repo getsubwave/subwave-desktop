@@ -23,7 +23,7 @@
     </if>
     <stack>
       <button variant="ghost" icon="app:mini" label="Mini player" on-press="toggle_mini"/>
-      <tooltip anchor="below">Mini player · Cmd/Ctrl+Shift+M</tooltip>
+      <tooltip anchor="below">Mini player · {mini_shortcut}</tooltip>
     </stack>
     <!-- `settings` read as preferences-only; the back panel is SHOWS,
          TIMELINE, BOOTH and REQUEST as well, and it opens as a right-hand

@@ -248,7 +248,10 @@
                 <use template="section-label" title="ON THE WIRE"/>
                 <grid columns="2" gap="6">
                   <for each="chips" as="c">
-                    <button variant="outline" size="sm" on-press="chip_pick:{c.t}">{c.t}</button>
+                    <stack>
+                      <button variant="outline" size="sm" on-press="chip_pick:{c.t}">{c.t}</button>
+                      <tooltip anchor="above">{c.a}</tooltip>
+                    </stack>
                   </for>
                 </grid>
                 <button variant="primary" on-press="submit_req">Send to the booth</button>

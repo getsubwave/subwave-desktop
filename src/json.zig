@@ -59,12 +59,16 @@ pub const WeatherCtx = struct {
 };
 pub const ClockCtx = struct { hhmm: ?[]const u8 = null };
 pub const DateCtx = struct { dayOfWeek: ?i64 = null, iso: ?[]const u8 = null };
+pub const FestivalCtx = struct {
+    name: ?[]const u8 = null,
+};
 pub const Context = struct {
     time: ?TimeCtx = null,
     weather: ?WeatherCtx = null,
     dominantMood: ?[]const u8 = null,
     clock: ?ClockCtx = null,
     date: ?DateCtx = null,
+    festival: ?FestivalCtx = null,
 };
 
 // The station's stream description on /now-playing: which extra mounts it
