@@ -51,13 +51,20 @@ pub const Roster = struct {
         var count: usize = 0;
         for (ids) |id| {
             const p = self.rows[self.find(id) orelse continue];
-            if (p.name.len == 0) continue;
-            w.print("{s}{s}", .{ if (count > 0) @as([]const u8, " & ") else "", p.name }) catch break;
-            count += 1;
+            if (!appendGuest(&w, &count, p.name)) break;
         }
         return w.buffered();
     }
 };
+
+/// Appends `name` to a " & "-joined guest line, skipping blanks. False once
+/// `w` is full, so callers stop rather than emit a cut name.
+pub fn appendGuest(w: *std.Io.Writer, count: *usize, name: []const u8) bool {
+    if (name.len == 0) return true;
+    w.print("{s}{s}", .{ if (count.* > 0) @as([]const u8, " & ") else "", name }) catch return false;
+    count.* += 1;
+    return true;
+}
 
 fn copy(buf: []u8, raw: []const u8) []const u8 {
     return utf8.copyInto(buf, std.mem.trim(u8, raw, " \t\r\n"));

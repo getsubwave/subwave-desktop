@@ -25,7 +25,7 @@ comptime {
     _ = @import("utf8.zig");
     _ = @import("request_suggestions.zig");
     _ = @import("polling.zig");
-    _ = @import("station_status.zig");
+    _ = @import("directory_status.zig");
 }
 
 const AppUi = main.AppUi;

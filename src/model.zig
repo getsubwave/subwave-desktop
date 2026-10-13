@@ -12,7 +12,7 @@ const color = @import("color.zig");
 const spectrum = @import("spectrum.zig");
 const request_suggestions = @import("request_suggestions.zig");
 const polling = @import("polling.zig");
-const station_status = @import("station_status.zig");
+const directory_status = @import("directory_status.zig");
 const stream_format = @import("stream_format.zig");
 const station_access = @import("station_access.zig");
 const discord_rpc = @import("discord_rpc.zig");
@@ -99,7 +99,7 @@ pub const keys = struct {
 // One directory probe key per cache slot: a capacity bump must not spill past
 // the 80–99 window these keys share with the request and polling timers.
 comptime {
-    std.debug.assert(keys.directory_status_base + station_status.capacity - 1 <= 99);
+    std.debug.assert(keys.directory_status_base + directory_status.capacity - 1 <= 99);
 }
 
 pub const max_themes = 12;
@@ -502,7 +502,7 @@ pub const Model = struct {
     discover_sub_store: [max_discover][64]u8 = undefined,
     discover_rows: [max_discover]DiscoverRow = [_]DiscoverRow{.{}} ** max_discover,
     discover_count: usize = 0,
-    directory_status: station_status.Cache = .{},
+    directory_status: directory_status.Cache = .{},
 
     // Listener like for the current airing (mirrors web useTrackLike): the
     // heart stays hidden until GET /api/like confirms the station has likes
@@ -2053,7 +2053,7 @@ fn syncDirectoryStatus(model: *Model, fx: *Effects, force: bool) void {
     }
     fx.cancelTimer(keys.directory_status_timer);
     if (visible) {
-        fx.startTimer(.{ .key = keys.directory_status_timer, .interval_ms = station_status.interval_ms, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_directory_status) });
+        fx.startTimer(.{ .key = keys.directory_status_timer, .interval_ms = directory_status.interval_ms, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_directory_status) });
         pumpDirectoryStatus(model, fx);
     }
 }
@@ -3176,7 +3176,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             pumpDirectoryStatus(model, fx);
         },
         .got_directory_status => |r| {
-            if (r.key < keys.directory_status_base or r.key >= keys.directory_status_base + station_status.capacity) return;
+            if (r.key < keys.directory_status_base or r.key >= keys.directory_status_base + directory_status.capacity) return;
             const entry = &model.directory_status.entries[r.key - keys.directory_status_base];
             if (!entry.pending) return;
             entry.pending = false;
@@ -3331,10 +3331,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     var writer = std.Io.Writer.fixed(&model.now_guests_store);
                     var count: usize = 0;
                     for (guests) |g| {
-                        const name = g.name orelse continue;
-                        if (name.len == 0) continue;
-                        writer.print("{s}{s}", .{ if (count > 0) @as([]const u8, " & ") else "", name }) catch break;
-                        count += 1;
+                        if (!station_schedule.appendGuest(&writer, &count, g.name orelse "")) break;
                     }
                     model.now_guests = writer.buffered();
                 }
