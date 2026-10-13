@@ -71,7 +71,7 @@
               </stack>
             </row>
             <if test="{station_status}">
-              <text size="sm" foreground="accent">{station_status}</text>
+              <text size="sm" foreground="accent" wrap="true">{station_status}</text>
             </if>
           </column>
         </scroll>

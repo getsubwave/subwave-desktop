@@ -11,13 +11,13 @@
     // "notifications": the model posts a desktop toast when the track changes
     // while the app is in the background (model.shouldNotifyTrack). Added at
     // the SDK 0.8.4 upgrade, which is where fx.showNotification landed.
-    .permissions = .{ "view", "command", "notifications" },
+    .permissions = .{ "view", "command", "notifications", "credentials", "filesystem" },
     // "tray": the app installs a status item (main.zig statusItem), which macOS
     // and Windows both honor. Declaring it is also what makes the SDK accept
     // close_policy "hide" on Windows — hiding there removes the taskbar entry,
     // so a status item is the only way back. The GTK host has no tray, so
     // main.zig leaves tray callbacks disabled on Linux.
-    .capabilities = .{ "native_views", "gpu_surfaces", "tray" },
+    .capabilities = .{ "native_views", "gpu_surfaces", "tray", "credentials" },
     .shell = .{
         .windows = .{
             .{

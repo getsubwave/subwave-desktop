@@ -247,15 +247,22 @@ pub const SettingsRecent = struct {
     name: ?[]const u8 = null,
     url: ?[]const u8 = null,
 };
+pub const SettingsStation = struct {
+    streamFormat: ?[]const u8 = null,
+    stationPassword: ?[]const u8 = null, // Linux fallback; other hosts import into the vault
+};
+pub const Health = struct {
+    status: ?[]const u8 = null,
+};
 pub const Settings = struct {
     volume: ?f32 = null,
     themeOverride: ?[]const u8 = null,
     streamFormat: ?[]const u8 = null,
     station: ?[]const u8 = null,
     stationName: ?[]const u8 = null,
-    // Shared station password for private stations (plaintext, like the web
-    // player's localStorage token); "" / absent = none stored.
+    // Legacy single-station password, imported on load and never written.
     stationPassword: ?[]const u8 = null,
+    stationSettings: ?std.json.ArrayHashMap(SettingsStation) = null,
     recents: ?[]SettingsRecent = null,
     discordEnabled: ?bool = null,
     // Listener-entered Discord application ID (public identifier, not a

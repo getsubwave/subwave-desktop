@@ -443,7 +443,9 @@ fn windowsFn(m: *const Model, scratch: *model.App.WindowsScratch) []const model.
     return scratch.windows[0..count];
 }
 
-const app_permissions = [_][]const u8{ native_sdk.security.permission_command, native_sdk.security.permission_view };
+// Legacy settings/cache live under subwave-player, outside the runner's
+// bundle-id app directories, so its file effects need the filesystem grant.
+const app_permissions = [_][]const u8{ native_sdk.security.permission_command, native_sdk.security.permission_view, native_sdk.security.permission_credentials, native_sdk.security.permission_filesystem };
 const shell_views = [_]native_sdk.ShellView{
     .{ .label = canvas_label, .kind = .gpu_surface, .fill = true, .role = "Player canvas", .accessibility_label = "Player", .gpu_backend = .metal, .gpu_pixel_format = .bgra8_unorm, .gpu_present_mode = .timer, .gpu_alpha_mode = .@"opaque", .gpu_color_space = .srgb, .gpu_vsync = true },
 };
@@ -525,6 +527,7 @@ pub fn main(init: std.process.Init) !void {
         if (env_station.len > 0) {
             if (api.normalizeBase(&app_state.model.base_buf, env_station)) |b| {
                 app_state.model.base = b;
+                model.restoreStationSettings(&app_state.model);
                 app_state.model.phase = .player;
             } else |_| {}
         }
