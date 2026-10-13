@@ -179,27 +179,43 @@
               <column gap="0">
                 <for each="booth_list" as="t">
                   <column gap="4" padding="8">
-                    <row gap="8" cross="center">
-                      <text size="sm" foreground="text_muted" wrap="false">{t.station_stamp}</text>
-                      <if test="{t.is_voice}">
-                        <badge background="accent" foreground="accent_text">{t.kind}</badge>
-                      </if>
-                      <else>
-                        <badge background="surface" foreground="text_muted">{t.kind}</badge>
-                      </else>
-                    </row>
-                    <if test="{t.is_track}">
-                      <row gap="6" cross="center">
-                        <icon name="music" width="14" height="14" foreground="text_muted"/>
-                        <text foreground="text_muted" wrap="false" overflow="ellipsis">{t.text}</text>
-                      </row>
+                    <if test="{t.is_boundary}">
+                      <text size="sm" foreground="text_muted" wrap="true">{t.text}</text>
                     </if>
                     <else>
-                      <if test="{t.is_voice}">
-                        <text><span italic="true">{t.text}</span></text>
+                      <row gap="8" cross="center">
+                        <text size="sm" foreground="text_muted" wrap="false">{t.station_stamp}</text>
+                        <if test="{t.is_carried}">
+                          <text size="sm" foreground="text_muted">{t.kind}</text>
+                        </if>
+                        <else>
+                          <if test="{t.is_voice}">
+                            <badge background="accent" foreground="accent_text">{t.kind}</badge>
+                          </if>
+                          <else>
+                            <badge background="surface" foreground="text_muted">{t.kind}</badge>
+                          </else>
+                        </else>
+                      </row>
+                      <if test="{t.is_carried}">
+                        <text size="sm" foreground="text_muted">PREVIOUS SHOW · {t.persona}</text>
+                        <text foreground="text_muted" wrap="true">{t.text}</text>
                       </if>
                       <else>
-                        <text size="sm" foreground="text_muted" wrap="true">{t.text}</text>
+                        <if test="{t.is_track}">
+                          <row gap="6" cross="center">
+                            <icon name="music" width="14" height="14" foreground="text_muted"/>
+                            <text foreground="text_muted" wrap="false" overflow="ellipsis">{t.text}</text>
+                          </row>
+                        </if>
+                        <else>
+                          <if test="{t.is_voice}">
+                            <text><span italic="true">{t.text}</span></text>
+                          </if>
+                          <else>
+                            <text size="sm" foreground="text_muted" wrap="true">{t.text}</text>
+                          </else>
+                        </else>
                       </else>
                     </else>
                   </column>

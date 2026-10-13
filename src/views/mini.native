@@ -45,7 +45,7 @@
            window is fixed at 168pt, so single-line elision beats the bold
            weight and the ink/muted split — size carries the hierarchy. -->
       <text wrap="false" overflow="ellipsis">{title}</text>
-      <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{artist}{album_line}</text>
+      <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{presentation_artist}{album_line}</text>
       <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{np_head}</text>
     </column>
     <if test="{like_available}">

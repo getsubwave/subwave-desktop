@@ -20,6 +20,7 @@ comptime {
     _ = @import("discord_rpc.zig");
     _ = @import("station_time.zig");
     _ = @import("station_schedule.zig");
+    _ = @import("listener_time.zig");
 }
 
 const AppUi = main.AppUi;
@@ -403,4 +404,30 @@ test "mini view builds and lays out" {
     var arena3 = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena3.deinit();
     try buildAndLayout(arena3.allocator(), mini_markup, &model, 420, 168);
+
+    model.dj_talking = true;
+    model.host = "Heer";
+    var arena4 = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena4.deinit();
+    try buildAndLayout(arena4.allocator(), mini_markup, &model, 420, 168);
+}
+
+test "booth carried tail and boundary branches build and lay out in every filter" {
+    var model: Model = .{};
+    model.phase = .player;
+    model.active_tab = .booth;
+    model.booth_turns[0] = .{ .hhmm = "20:02", .text = "Welcome in.", .kind = "VOICE", .is_voice = true };
+    model.booth_turns[1] = .{ .text = "20:00 · Blue Hour", .is_boundary = true };
+    model.booth_turns[2] = .{ .hhmm = "19:59", .text = "Goodnight from Bob.", .kind = "VOICE", .is_voice = true, .is_carried = true, .persona = "Bob" };
+    model.booth_turns[3] = .{ .hhmm = "19:58", .text = "Last pick.", .kind = "PICK", .is_carried = true, .persona = "Bob" };
+    model.booth_turns[4] = .{ .hhmm = "19:57", .text = "Song · Artist", .kind = "TRACK", .is_track = true, .is_carried = true, .persona = "Bob" };
+    model.booth_turns[5] = .{ .hhmm = "20:01", .text = "Song · Artist", .kind = "TRACK", .is_track = true };
+    model.booth_turns[6] = .{ .hhmm = "20:01", .text = "Picked this.", .kind = "PICK" };
+    model.booth_count = 7;
+    inline for (.{ .all, .dj, .tracks }) |filter| {
+        model.booth_filter = filter;
+        var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena_state.deinit();
+        try buildAndLayout(arena_state.allocator(), player_panel_markup, &model, 880, 560);
+    }
 }

@@ -19,6 +19,7 @@ const links = @import("links.zig");
 const diag = @import("diag.zig");
 const station_time = @import("station_time.zig");
 const station_schedule = @import("station_schedule.zig");
+const listener_time = @import("listener_time.zig");
 pub const StreamFormat = stream_format.StreamFormat;
 
 // Default listening volume on tune-in. (Decode/position/spectrum report
@@ -65,6 +66,15 @@ pub const keys = struct {
     pub const auth_recheck_timer: u64 = 71;
     pub const post_auth_recheck: u64 = 72;
     pub const fetch_ob_fallback: u64 = 73;
+    pub const listener_timer: u64 = 50;
+    pub const listener_np_a: u64 = 51;
+    pub const listener_state_a: u64 = 52;
+    pub const listener_np_b: u64 = 53;
+    pub const listener_state_b: u64 = 54;
+    pub const listener_session_a: u64 = 55;
+    pub const listener_session_b: u64 = 56;
+    pub const listener_like_a: u64 = 57;
+    pub const listener_like_b: u64 = 58;
 
     // Cover art loads through `fx.loadImage`, where the ImageId IS the effect
     // key — so the id counter has to start clear of every key above or a cover
@@ -152,6 +162,9 @@ pub const BoothTurn = struct {
     is_track: bool = false, // an aired track line
     stamp_epoch_s: ?i64 = null,
     station_stamp: []const u8 = "",
+    is_carried: bool = false,
+    is_boundary: bool = false,
+    persona: []const u8 = "",
 };
 
 pub const StationRef = struct {
@@ -446,20 +459,23 @@ pub const Model = struct {
     // url/duration, no elapsed_ms) used to decide whether to respawn — not
     // the full stdin content actually sent. See updateDiscordPresence.
     discord_last_payload: []const u8 = "",
-    // model.elapsed_ms is the raw audio-decoder stream position -- it never
-    // resets at track boundaries, since this is one continuous Icecast byte
-    // stream with no per-track structure at the decode level (title/artist
-    // come from a wholly separate now-playing poll). track_elapsed_ms is the
-    // user-facing "how far into this track" value everything shows instead
-    // (stage head, mini player, tray, Discord): wall-clock time since the
-    // station-reported track start when the poll carries one (matching the
-    // web player, so tuning in mid-track lands at the true position), else
-    // the decoder delta since the title/artist last changed. Only
-    // refreshTrackElapsed writes it — on every position event and
-    // now-playing poll.
+    // The decoder position belongs to the endless stream. Displayed elapsed
+    // uses the listener start from /state (or the legacy NP timestamp), then
+    // falls back to the decoder delta only when neither stamp is available.
     track_started_at_s: i64 = 0, // nowPlaying.timestamp, 0 = not sent
     track_anchor_ms: i64 = 0, // elapsed_ms snapshot at the last track change
     track_elapsed_ms: i64 = 0,
+    listener: listener_time.Controller = .{},
+    listener_np_key: u64 = keys.fetch_np,
+    listener_state_key: u64 = keys.fetch_state,
+    listener_session_key: u64 = keys.fetch_session,
+    listener_like_key: u64 = keys.fetch_like,
+    listener_fetches: listener_time.FetchSlots = .{},
+    listener_generation: u64 = 0,
+    listener_like_generation: u64 = 0,
+    listener_feed_deferred: bool = false,
+    listener_like_deferred: bool = false,
+    dj_talking: bool = false,
 
     // recents (persisted) + discover (community directory)
     recents_name_store: [max_recents][48]u8 = undefined,
@@ -542,6 +558,9 @@ pub const Model = struct {
     booth_text_store: [max_booth][240]u8 = undefined,
     booth_turns: [max_booth]BoothTurn = [_]BoothTurn{.{}} ** max_booth,
     booth_count: usize = 0,
+    booth_persona_store: [max_booth][128]u8 = undefined,
+    raw_booth: [listener_time.max_session_turns]listener_time.Turn = [_]listener_time.Turn{.{}} ** listener_time.max_session_turns,
+    raw_booth_count: usize = 0,
     booth_filter: BoothFilter = .all,
     booth_buf: [280]u8 = undefined,
     booth_line: []const u8 = "",
@@ -1208,13 +1227,21 @@ pub const Model = struct {
         out[2] = .{ .label = "TRACKS", .val = .tracks, .on = self.booth_filter == .tracks };
         return out;
     }
+    pub fn presentation_artist(self: *const Model) []const u8 {
+        if (self.dj_talking) {
+            if (self.host.len > 0) return self.host;
+            if (self.dj.len > 0) return self.dj;
+        }
+        return self.artist;
+    }
+
     pub fn booth_list(self: *const Model, arena: std.mem.Allocator) []const BoothTurn {
         var out: std.ArrayList(BoothTurn) = .empty;
         for (self.booth_turns[0..self.booth_count]) |t| {
             const keep = switch (self.booth_filter) {
                 .all => true,
-                .dj => !t.is_track,
-                .tracks => t.is_track,
+                .dj => !t.is_track or t.is_boundary,
+                .tracks => t.is_track or t.is_boundary,
             };
             if (keep) {
                 var row = t;
@@ -1590,6 +1617,10 @@ pub const Model = struct {
         "effectiveDiscordClientId",
         // per-track elapsed plumbing (surfaced via elapsed_str/np_head)
         "track_started_at_s", "track_anchor_ms",     "track_elapsed_ms",
+        "listener", "listener_np_key", "listener_state_key", "listener_session_key",
+        "listener_like_key", "listener_fetches", "listener_generation",
+        "listener_like_generation", "listener_feed_deferred", "listener_like_deferred",
+        "raw_booth", "raw_booth_count", "booth_persona_store", "dj_talking",
     };
 };
 
@@ -1603,6 +1634,7 @@ pub const Msg = union(enum) {
     tick_theme: native_sdk.EffectTimer,
     tick_signal: native_sdk.EffectTimer,
     tick_second: native_sdk.EffectTimer,
+    tick_listener: native_sdk.EffectTimer,
     tick_ob_step: native_sdk.EffectTimer,
     got_np: native_sdk.EffectResponse,
     got_state: native_sdk.EffectResponse,
@@ -1745,6 +1777,7 @@ pub const Msg = union(enum) {
         "discord_line",  "discord_exited", "tick_discord_retry",
         "show_player",   "quit_app",       "app_activated", "app_deactivated",
         "got_update",    "tick_update",    "opener_exited",
+        "tick_listener",
         "got_station_auth",
         "got_station_credentials", "tick_auth_recheck", "got_auth_recheck",
     };
@@ -1856,9 +1889,27 @@ fn fetchFeed(model: *Model, fx: *Effects) void {
     var b1: [256]u8 = undefined;
     var b2: [256]u8 = undefined;
     var b3: [256]u8 = undefined;
-    if (api.nowPlaying(&b1, model.base)) |u| fx.fetch(.{ .key = keys.fetch_np, .url = u, .on_response = Effects.responseMsg(.got_np) }) else |_| {}
-    if (api.state(&b2, model.base)) |u| fx.fetch(.{ .key = keys.fetch_state, .url = u, .on_response = Effects.responseMsg(.got_state) }) else |_| {}
-    if (api.session(&b3, model.base)) |u| fx.fetch(.{ .key = keys.fetch_session, .url = u, .on_response = Effects.responseMsg(.got_session) }) else |_| {}
+    if (!model.listener.waiting_np and !model.listener.waiting_state and
+        (!model.listener_fetches.available(model.listener_np_key) or !model.listener_fetches.available(model.listener_state_key)))
+        model.listener_feed_deferred = true;
+    if (model.listener_fetches.available(model.listener_np_key) and model.listener_fetches.available(model.listener_state_key) and model.listener.beginPoll()) {
+        model.listener_feed_deferred = false;
+        _ = model.listener_fetches.start(model.listener_np_key, model.listener_generation);
+        _ = model.listener_fetches.start(model.listener_state_key, model.listener_generation);
+        if (api.nowPlaying(&b1, model.base)) |u| fx.fetch(.{ .key = model.listener_np_key, .url = u, .on_response = Effects.responseMsg(.got_np) }) else |_| {
+            _ = model.listener_fetches.finish(model.listener_np_key, model.listener_generation);
+            model.listener.failTrack();
+        }
+        if (api.state(&b2, model.base)) |u| fx.fetch(.{ .key = model.listener_state_key, .url = u, .on_response = Effects.responseMsg(.got_state) }) else |_| {
+            _ = model.listener_fetches.finish(model.listener_state_key, model.listener_generation);
+            model.listener.receiveCurrent(null);
+        }
+    }
+    if (model.listener_fetches.start(model.listener_session_key, model.listener_generation)) {
+        if (api.session(&b3, model.base)) |u| fx.fetch(.{ .key = model.listener_session_key, .url = u, .on_response = Effects.responseMsg(.got_session) }) else |_| {
+            _ = model.listener_fetches.finish(model.listener_session_key, model.listener_generation);
+        }
+    }
 }
 
 // Minimal JSON string escape (quotes/backslashes/newlines; drops other
@@ -2223,7 +2274,12 @@ fn armAuthRecheck(model: *Model, fx: *Effects) void {
 fn fetchLikeStatus(model: *Model, fx: *Effects) void {
     var b: [256]u8 = undefined;
     if (api.like(&b, model.base)) |u| {
-        fx.fetch(.{ .key = keys.fetch_like, .url = u, .on_response = Effects.responseMsg(.got_like_status) });
+        if (!model.listener_fetches.start(model.listener_like_key, model.listener_like_generation)) {
+            model.listener_like_deferred = true;
+            return;
+        }
+        model.listener_like_deferred = false;
+        fx.fetch(.{ .key = model.listener_like_key, .url = u, .on_response = Effects.responseMsg(.got_like_status) });
     } else |_| {}
 }
 
@@ -2248,7 +2304,7 @@ fn updateDiscordPresence(model: *Model, fx: *Effects) void {
     const req: discord_rpc.ActivityRequest = .{
         .client_id = model.effectiveDiscordClientId(),
         .details = model.title,
-        .state = model.artist,
+        .state = model.presentation_artist(),
         .url = model.base,
         .cover_url = cover_url,
         .duration_s = model.track_duration_s,
@@ -2429,6 +2485,23 @@ fn loadPersonas(model: *Model, fx: *Effects) void {
 // nothing left over from the old one. `url` must already be normalized into
 // model.base by the caller.
 fn retune(model: *Model, fx: *Effects) void {
+    fx.cancel(model.listener_np_key);
+    fx.cancel(model.listener_state_key);
+    fx.cancel(model.listener_session_key);
+    fx.cancel(model.listener_like_key);
+    model.listener_generation +%= 1;
+    model.listener_like_generation +%= 1;
+    model.listener_feed_deferred = false;
+    model.listener_like_deferred = false;
+    // Old terminal responses can already be queued when cancellation runs.
+    // Each station uses the other pair so they cannot complete its feed join.
+    const use_a = model.listener_np_key != keys.listener_np_a;
+    model.listener_np_key = if (use_a) keys.listener_np_a else keys.listener_np_b;
+    model.listener_state_key = if (use_a) keys.listener_state_a else keys.listener_state_b;
+    model.listener_session_key = if (use_a) keys.listener_session_a else keys.listener_session_b;
+    model.listener.reset();
+    model.raw_booth_count = 0;
+    model.dj_talking = false;
     dropCover(model, fx);
     dropPersonas(model, fx);
     model.persona_roster.count = 0;
@@ -2530,15 +2603,184 @@ fn retune(model: *Model, fx: *Effects) void {
 // The one writer of track_elapsed_ms — see the field docs. The wall clock
 // arrives as a parameter so tests can pin it.
 fn refreshTrackElapsed(model: *Model, now_wall_ms: i64) void {
-    // Station timestamps/durations are untrusted i64 values. Saturate their
-    // millisecond arithmetic so malformed metadata cannot overflow the loop.
-    var e: i64 = if (model.track_started_at_s > 0)
-        now_wall_ms -| (model.track_started_at_s *| 1000)
-    else
-        model.elapsed_ms -| model.track_anchor_ms;
-    if (e < 0) e = 0; // clock skew / a play session younger than the anchor
-    if (model.track_duration_s > 0) e = @min(e, model.track_duration_s *| 1000);
-    model.track_elapsed_ms = e;
+    const audible_at = (if (model.listener.clock_from_server) model.listener.audible_at_ms else null) orelse
+        if (model.track_started_at_s > 0) (model.track_started_at_s *| 1000) +| model.listener.lead_ms else null;
+    model.track_elapsed_ms = listener_time.elapsedMs(
+        if (audible_at != null) now_wall_ms else model.elapsed_ms,
+        audible_at orelse model.track_anchor_ms,
+        model.track_duration_s *| 1000,
+    );
+}
+
+fn trackInput(track: json.Track, moods: *[96]u8) listener_time.Track {
+    var length: usize = 0;
+    for (track.moods orelse &.{}, 0..) |mood, i| {
+        if (i >= 3) break;
+        const sep: []const u8 = if (i > 0) " · " else "";
+        if (length + sep.len + mood.len > moods.len) break;
+        @memcpy(moods[length..][0..sep.len], sep);
+        length += sep.len;
+        @memcpy(moods[length..][0..mood.len], mood);
+        length += mood.len;
+    }
+    return .{
+        .title = track.title orelse "",
+        .artist = track.artist orelse "",
+        .album = track.album orelse "",
+        .genre = track.genre orelse "",
+        .song_id = track.subsonic_id orelse "",
+        .musical_key = track.musicalKey orelse "",
+        .moods = moods[0..length],
+        .energy = track.energy orelse "",
+        .year = track.year orelse 0,
+        .duration_s = if (track.duration) |d| displayInteger(@max(0, d), 0) else 0,
+        .bpm = if (track.bpm) |b| displayInteger(@round(b), 0) else 0,
+        .legacy_start_ms = if (track.timestamp) |stamp| stamp *| 1000 else null,
+    };
+}
+
+fn publishTrack(model: *Model, fx: *Effects, publication: listener_time.Publication) void {
+    const track = publication.track orelse listener_time.Track{};
+    const changed = !std.mem.eql(u8, model.title, track.title) or !std.mem.eql(u8, model.artist, track.artist);
+    setStr(&model.title_buf, &model.title, track.title);
+    setStr(&model.artist_buf, &model.artist, track.artist);
+    setStr(&model.album_buf, &model.album, track.album);
+    setStr(&model.genre_buf, &model.genre, track.genre);
+    setStr(&model.key_buf, &model.musical_key, track.musical_key);
+    setStr(&model.moods_buf, &model.moods, track.moods);
+    setStr(&model.energy_buf, &model.energy, track.energy);
+    model.track_year = track.year;
+    model.track_duration_s = track.duration_s;
+    model.track_bpm = track.bpm;
+    model.track_started_at_s = if (track.legacy_start_ms) |stamp| @divTrunc(stamp, 1000) else 0;
+    if (changed) model.track_anchor_ms = model.elapsed_ms;
+    if (!std.mem.eql(u8, track.song_id, model.cover_sid)) {
+        setStr(&model.cover_sid_buf, &model.cover_sid, track.song_id);
+        if (track.song_id.len > 0) loadCover(model, fx, track.song_id) else dropCover(model, fx);
+    }
+    if (!std.mem.eql(u8, track.song_id, model.like_song) or (changed and publication.changed)) {
+        fx.cancel(model.listener_like_key);
+        model.listener_like_generation +%= 1;
+        model.listener_like_deferred = false;
+        model.listener_like_key = if (model.listener_like_key == keys.listener_like_a) keys.listener_like_b else keys.listener_like_a;
+        fx.cancel(keys.post_like);
+        setStr(&model.like_song_buf, &model.like_song, track.song_id);
+        model.like_available = false;
+        model.like_liked = false;
+        model.like_pending = false;
+        model.like_count = 0;
+        if (track.song_id.len > 0) fetchLikeStatus(model, fx);
+    }
+    if (publication.changed and !publication.first and model.shouldNotifyTrack())
+        fx.showNotification(model.trackNotification());
+}
+
+fn numberValue(value: ?std.json.Value) ?f64 {
+    return switch (value orelse return null) {
+        .integer => |number| @floatFromInt(number),
+        .float => |number| number,
+        else => null,
+    };
+}
+
+fn decodeBoothTurn(turn: *listener_time.Turn, message: json.SessionMsg) void {
+    turn.* = .{};
+    const role = message.role orelse "";
+    const kind = message.kind orelse "";
+    const text = message.text orelse "";
+    const meta = message.meta orelse json.SessionMeta{};
+    turn.class = listener_time.turnClass(role);
+    turn.voice = listener_time.isVoice(role, kind);
+    turn.boundary = std.mem.eql(u8, role, "event") and std.mem.eql(u8, kind, "show-boundary");
+    if (meta.carried) |carried| turn.carried = carried == .bool and carried.bool;
+    turn.text.set(text);
+    turn.persona.set(meta.personaName orelse "");
+    turn.track_id.set(meta.trackId orelse "");
+    turn.duration_ms = listener_time.lineMs(numberValue(meta.durationMs), text);
+    if (message.t) |stamp| switch (stamp) {
+        .string => |value| {
+            turn.stamp.set(value);
+            turn.stamp_ms = listener_time.isoMs(value);
+        },
+        .integer => |value| turn.stamp_ms = value,
+        .float => |value| {
+            if (std.math.isFinite(value) and value >= -0x1p63 and value < 0x1p63)
+                turn.stamp_ms = @intFromFloat(value);
+        },
+        else => {},
+    };
+    if (meta.airedAt) |stamp| {
+        if (stamp == .string) turn.aired_at_ms = listener_time.isoMs(stamp.string);
+    }
+    if (meta.boundary) |boundary| {
+        turn.boundary_at.set(boundary.at orelse "");
+        const show = boundary.show orelse "";
+        const persona = boundary.persona orelse "";
+        turn.boundary_name.set(if (show.len > 0) show else if (persona.len > 0) persona else "On air");
+    }
+}
+
+// Legacy UTC hh:mm kept on the row; the panel renders station_stamp.
+fn boothStamp(stamp: []const u8) []const u8 {
+    return isoToHhmm(stamp);
+}
+
+fn refreshBooth(model: *Model, now_ms: i64) void {
+    model.booth_line = "";
+    model.booth_count = 0;
+    var index = model.raw_booth_count;
+    while (index > 0) {
+        index -= 1;
+        const raw = &model.raw_booth[index];
+        if (!raw.visible(model.listener.lead_ms, now_ms)) continue;
+        if (model.booth_line.len == 0 and raw.ticker(model.like_song))
+            setStr(&model.booth_buf, &model.booth_line, raw.text.slice());
+        if (model.booth_count >= max_booth or (raw.class == .system and !raw.boundary)) continue;
+        var body = raw.text.slice();
+        var boundary_buf: [240]u8 = undefined;
+        if (raw.boundary) {
+            if (listener_time.isoMs(raw.boundary_at.slice())) |at_ms| {
+                var clock_buf: [32]u8 = undefined;
+                const at = station_time.clock(&clock_buf, at_ms, model.station_offset_minutes, model.station_locale, false);
+                body = std.fmt.bufPrint(&boundary_buf, "{s} · {s}", .{ at, raw.boundary_name.slice() }) catch body;
+            }
+        }
+        if (body.len == 0) continue;
+        if (raw.class == .track and std.mem.startsWith(u8, body, "▶"))
+            body = std.mem.trimStart(u8, body["▶".len..], " \t\r\n");
+        const slot = model.booth_count;
+        const turn = &model.booth_turns[slot];
+        turn.* = .{
+            .is_voice = raw.class == .voice,
+            .is_track = raw.class == .track,
+            .is_carried = raw.carried,
+            .is_boundary = raw.boundary,
+            .kind = switch (raw.class) {
+                .voice => "VOICE",
+                .dj => "PICK",
+                .track => "TRACK",
+                .system => "SHOW",
+            },
+        };
+        setStr(&model.booth_time_store[slot], &turn.hhmm, boothStamp(raw.stamp.slice()));
+        // The controller stamps turns in ISO; a bare number keeps station_time's
+        // seconds-or-milliseconds reading.
+        turn.stamp_epoch_s = if (raw.stamp.slice().len > 0)
+            (if (raw.stamp_ms) |ms| @divFloor(ms, 1000) else null)
+        else if (raw.stamp_ms) |v| station_time.timestamp(.{ .integer = v }) else null;
+        setStr(&model.booth_text_store[slot], &turn.text, body);
+        setStr(&model.booth_persona_store[slot], &turn.persona, raw.persona.slice());
+        model.booth_count += 1;
+    }
+    model.dj_talking = listener_time.talkingState(model.raw_booth[0..model.raw_booth_count], model.listener.lead_ms, now_ms).talking;
+}
+
+fn refreshListener(model: *Model, fx: *Effects, now_ms: i64) void {
+    if (model.listener.advance(now_ms)) |publication| publishTrack(model, fx, publication);
+    refreshBooth(model, now_ms);
+    refreshTrackElapsed(model, now_ms);
+    refreshTrayStatus(model);
+    updateDiscordPresence(model, fx);
 }
 
 // f64 rounds maxInt(i64) up to 2^63, so the upper bound must be exclusive.
@@ -2551,8 +2793,9 @@ fn displayInteger(value: f64, fallback: i64) i64 {
 // "Title — Artist" + "0:52 · on air · 2 listening" — the tray's two
 // disabled now-playing rows.
 fn refreshTrayStatus(model: *Model) void {
-    if (model.artist.len > 0) {
-        if (std.fmt.bufPrint(&model.tray_track_buf, "{s} — {s}", .{ model.title, model.artist })) |line| {
+    const artist = model.presentation_artist();
+    if (artist.len > 0) {
+        if (std.fmt.bufPrint(&model.tray_track_buf, "{s} — {s}", .{ model.title, artist })) |line| {
             model.tray_track = line;
         } else |_| {
             model.tray_track = model.title;
@@ -2572,6 +2815,7 @@ fn refreshTrayStatus(model: *Model) void {
 }
 
 fn startPlayerTimers(fx: *Effects) void {
+    fx.startTimer(.{ .key = keys.listener_timer, .interval_ms = 1000, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_listener) });
     fx.startTimer(.{ .key = keys.feed_timer, .interval_ms = 5000, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_feed) });
     fx.startTimer(.{ .key = keys.theme_timer, .interval_ms = 30_000, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_theme) });
     fx.startTimer(.{ .key = keys.signal_timer, .interval_ms = 5000, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_signal) });
@@ -2810,9 +3054,25 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 tuneOut(model, fx);
             }
         },
+        .tick_listener => |t| {
+            if (t.outcome == .fired) refreshListener(model, fx, native_sdk.nowMs());
+        },
         .got_np => |r| {
-            if (r.outcome != .ok or r.status != 200) return;
-            const parsed = json.parse(json.NowPlaying, std.heap.page_allocator, r.body) catch return;
+            const current_reply = model.listener_fetches.finish(r.key, model.listener_generation);
+            if (!current_reply or r.key != model.listener_np_key) {
+                if (model.listener_feed_deferred) fetchFeed(model, fx);
+                return;
+            }
+            if (r.outcome != .ok or r.status != 200) {
+                model.listener.failTrack();
+                refreshListener(model, fx, native_sdk.nowMs());
+                return;
+            }
+            const parsed = json.parse(json.NowPlaying, std.heap.page_allocator, r.body) catch {
+                model.listener.failTrack();
+                refreshListener(model, fx, native_sdk.nowMs());
+                return;
+            };
             defer parsed.deinit();
             const np = parsed.value;
             if (np.timezone) |v| setStr(&model.timezone_store, &model.timezone, v);
@@ -2824,65 +3084,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 model.day_sel = model.stationDay();
                 resetScheduleDisclosures(model);
             }
-            // Declared out here, not inside the nowPlaying block, because the
-            // track-change notification below fires only once the show name
-            // has been filled too — otherwise the toast would pair the new
-            // track with the previous show.
-            var track_changed = false;
-            if (np.nowPlaying) |t| {
-                // Track identity flip = the anchor moment for the fallback
-                // per-track clock (see the track_elapsed_ms field docs).
-                if (t.title) |v| {
-                    if (!std.mem.eql(u8, v, model.title)) track_changed = true;
-                    setStr(&model.title_buf, &model.title, v);
-                }
-                if (t.artist) |v| {
-                    if (!std.mem.eql(u8, v, model.artist)) track_changed = true;
-                    setStr(&model.artist_buf, &model.artist, v);
-                }
-                if (t.album) |v| setStr(&model.album_buf, &model.album, v);
-                if (t.genre) |v| setStr(&model.genre_buf, &model.genre, v);
-                model.track_year = t.year orelse 0;
-                model.track_duration_s = if (t.duration) |d| displayInteger(@max(0, d), 0) else 0;
-                model.track_started_at_s = t.timestamp orelse 0;
-                if (track_changed) model.track_anchor_ms = model.elapsed_ms;
-                refreshTrackElapsed(model, native_sdk.nowMs());
-                model.track_bpm = if (t.bpm) |b| displayInteger(@round(b), 0) else 0;
-                if (t.musicalKey) |v| setStr(&model.key_buf, &model.musical_key, v) else model.musical_key = "";
-                if (t.energy) |v| setStr(&model.energy_buf, &model.energy, v) else model.energy = "";
-                if (t.moods) |list| {
-                    var joined: [96]u8 = undefined;
-                    var w: usize = 0;
-                    for (list, 0..) |m, i| {
-                        if (i >= 3) break;
-                        const sep: []const u8 = if (i > 0) " · " else "";
-                        if (w + sep.len + m.len > joined.len) break;
-                        @memcpy(joined[w..][0..sep.len], sep);
-                        w += sep.len;
-                        @memcpy(joined[w..][0..m.len], m);
-                        w += m.len;
-                    }
-                    setStr(&model.moods_buf, &model.moods, joined[0..w]);
-                } else model.moods = "";
-                // Fetch cover art when the track's subsonic id changes.
-                if (t.subsonic_id) |sid| {
-                    if (sid.len > 0 and !std.mem.eql(u8, sid, model.cover_sid)) {
-                        setStr(&model.cover_sid_buf, &model.cover_sid, sid);
-                        // Drops the previous track's art right away — the
-                        // initials disc is honest while the new cover loads.
-                        loadCover(model, fx, sid);
-                        // The like state follows the airing: reset for every
-                        // new song and ask the station again — the heart stays
-                        // hidden until the answer confirms it's likeable.
-                        setStr(&model.like_song_buf, &model.like_song, sid);
-                        model.like_available = false;
-                        model.like_liked = false;
-                        model.like_pending = false;
-                        model.like_count = 0;
-                        fetchLikeStatus(model, fx);
-                    }
-                }
-            }
+            const now_ms = native_sdk.nowMs();
+            var moods: [96]u8 = undefined;
+            model.listener.receiveTrack(if (np.nowPlaying) |track| trackInput(track, &moods) else null, if (np.stream) |stream| numberValue(stream.bufferSeconds) else null, now_ms);
             if (np.context) |ctx| {
                 if (ctx.time) |tc| {
                     if (tc.show) |v| setStr(&model.ctx_show_buf, &model.ctx_show, v);
@@ -2929,18 +3133,6 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (np.listeners) |l| {
                 if (l.current) |c| model.listeners = c;
             }
-            // SDK 0.8.4: a background toast is the closest this SDK gets to a
-            // Now Playing surface while OS media controls stay absent. Placed
-            // here, after the show fill, so all three fields describe one
-            // airing. Fire-and-forget: no result Msg would be truthful, since
-            // Focus / Do Not Disturb stay authoritative after the host
-            // accepts it — and the action button's press comes back as an
-            // ordinary command, not as a result of this call.
-            if (track_changed and model.shouldNotifyTrack()) {
-                fx.showNotification(model.trackNotification());
-            }
-            refreshTrayStatus(model);
-            updateDiscordPresence(model, fx);
             if (np.llmTokens) |tok| model.llm_tokens = tok;
             // Optional-mount flags. When they move the effective format —
             // the operator turned the picked mount off (or back on), or the
@@ -2974,11 +3166,30 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     if (model.offline_streak >= 4) model.stream_online = false;
                 }
             }
+            refreshListener(model, fx, now_ms);
         },
         .got_state => |r| {
-            if (r.outcome != .ok or r.status != 200) return;
-            const parsed = json.parse(json.StationState, std.heap.page_allocator, r.body) catch return;
+            const current_reply = model.listener_fetches.finish(r.key, model.listener_generation);
+            if (!current_reply or r.key != model.listener_state_key) {
+                if (model.listener_feed_deferred) fetchFeed(model, fx);
+                return;
+            }
+            defer refreshListener(model, fx, native_sdk.nowMs());
+            if (r.outcome != .ok or r.status != 200) {
+                model.listener.receiveCurrent(null);
+                return;
+            }
+            const parsed = json.parse(json.StationState, std.heap.page_allocator, r.body) catch {
+                model.listener.receiveCurrent(null);
+                return;
+            };
             defer parsed.deinit();
+            model.listener.receiveCurrent(if (parsed.value.current) |current| .{
+                .title = current.title orelse "",
+                .artist = current.artist orelse "",
+                .song_id = current.subsonic_id orelse "",
+                .started_at_ms = if (current.startedAt) |stamp| listener_time.isoMs(stamp) else null,
+            } else null);
             // The active theme id rides /api/state on the 5 s feed cadence;
             // when the station flips its theme, refresh tokens right away.
             if (parsed.value.theme) |t| {
@@ -3101,66 +3312,22 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (r.outcome == .loaded) _ = fx.unregisterImage(r.id);
         },
         .got_session => |r| {
+            const current_reply = model.listener_fetches.finish(r.key, model.listener_generation);
+            if (!current_reply or r.key != model.listener_session_key) {
+                if (model.listener_feed_deferred) fetchFeed(model, fx);
+                return;
+            }
             if (r.outcome != .ok or r.status != 200) return;
             const parsed = json.parse(json.Session, std.heap.page_allocator, r.body) catch return;
             defer parsed.deinit();
             const msgs = parsed.value.messages orelse return;
-            // Booth ticker: the most recent DJ-spoken line (role "dj"/"segment",
-            // skipping internal pick reasoning) for the stage.
-            var i: usize = msgs.len;
-            while (i > 0) {
-                i -= 1;
-                const role = msgs[i].role orelse continue;
-                const spoken = std.mem.eql(u8, role, "dj") or std.mem.eql(u8, role, "segment");
-                if (!spoken) continue;
-                if (msgs[i].kind) |k| {
-                    if (std.mem.eql(u8, k, "pick")) continue;
-                }
-                if (msgs[i].text) |txt| {
-                    if (txt.len > 0) {
-                        setStr(&model.booth_buf, &model.booth_line, txt);
-                        break;
-                    }
-                }
+            model.raw_booth_count = 0;
+            const start = msgs.len - @min(msgs.len, listener_time.max_session_turns);
+            for (msgs[start..]) |message| {
+                decodeBoothTurn(&model.raw_booth[model.raw_booth_count], message);
+                model.raw_booth_count += 1;
             }
-            // Booth feed: newest-first voice/dj/track turns for the panel.
-            model.booth_count = 0;
-            var j: usize = msgs.len;
-            while (j > 0 and model.booth_count < max_booth) {
-                j -= 1;
-                const m = msgs[j];
-                const role = m.role orelse continue;
-                const text = m.text orelse continue;
-                if (text.len == 0) continue;
-                var turn = BoothTurn{};
-                if (std.mem.eql(u8, role, "segment")) {
-                    turn.is_voice = true;
-                    turn.kind = "VOICE";
-                } else if (std.mem.eql(u8, role, "dj")) {
-                    // dj pick reasoning shows as the "thinking" register
-                    turn.kind = "PICK";
-                } else if (std.mem.eql(u8, role, "track")) {
-                    turn.is_track = true;
-                    turn.kind = "TRACK";
-                } else continue; // system/event turns stay internal
-                const k = model.booth_count;
-                model.booth_turns[k].stamp_epoch_s = station_time.timestamp(m.t);
-                var hhmm: []const u8 = "";
-                if (m.t) |tv| {
-                    if (tv == .string) hhmm = isoToHhmm(tv.string);
-                }
-                setStr(&model.booth_time_store[k], &model.booth_turns[k].hhmm, hhmm);
-                // Track turns render as "♪ Title — Artist"; strip any "▶ ".
-                var body = text;
-                if (turn.is_track and std.mem.startsWith(u8, body, "▶")) {
-                    body = std.mem.trimStart(u8, body["▶".len..], " ");
-                }
-                setStr(&model.booth_text_store[k], &model.booth_turns[k].text, body);
-                model.booth_turns[k].is_voice = turn.is_voice;
-                model.booth_turns[k].is_track = turn.is_track;
-                model.booth_turns[k].kind = turn.kind;
-                model.booth_count += 1;
-            }
+            refreshListener(model, fx, native_sdk.nowMs());
         },
         .got_schedule => |r| {
             if (r.outcome != .ok or r.status != 200) return;
@@ -3809,6 +3976,11 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             });
         },
         .got_like_status => |r| {
+            const current_reply = model.listener_fetches.finish(r.key, model.listener_like_generation);
+            if (!current_reply or r.key != model.listener_like_key) {
+                if (model.listener_like_deferred and model.like_song.len > 0) fetchLikeStatus(model, fx);
+                return;
+            }
             if (r.outcome != .ok or r.status != 200) return;
             const parsed = json.parse(json.LikeStatus, std.heap.page_allocator, r.body) catch return;
             defer parsed.deinit();
@@ -3833,8 +4005,8 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.like_pending = false;
             if (r.outcome != .ok) return;
             if (r.status == 409) {
-                // The track flipped mid-tap — re-sync instead of guessing.
-                fetchLikeStatus(model, fx);
+                // The audible song can lag the server during a hold. Keep
+                // its heart and target; promotion will fetch the next status.
                 return;
             }
             if (r.status != 200) return; // 429 / disabled: stay tappable
@@ -4043,6 +4215,31 @@ pub fn initialModel() Model {
 
 // -------------------------------------------------------------- tests
 const testing = std.testing;
+
+test "a buffered live-edge track keeps the audible title cover and like target" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    update(&m, .{ .got_np = .{ .key = keys.fetch_np, .outcome = .ok, .status = 200, .body =
+        \\{"nowPlaying":{"title":"Audible song","artist":"Artist","subsonic_id":"old"},"stream":{"bufferSeconds":22}}
+    } }, &fx);
+    m.cover_id = 1000;
+    m.like_available = true;
+    m.like_liked = true;
+    var body: [256]u8 = undefined;
+    const next = try std.fmt.bufPrint(
+        &body,
+        "{{\"nowPlaying\":{{\"title\":\"Live-edge song\",\"artist\":\"Artist\",\"subsonic_id\":\"new\",\"timestamp\":{d}}},\"stream\":{{\"bufferSeconds\":22}}}}",
+        .{@divTrunc(native_sdk.nowMs(), 1000)},
+    );
+    update(&m, .{ .got_np = .{ .key = keys.fetch_np, .outcome = .ok, .status = 200, .body = next } }, &fx);
+    try testing.expectEqualStrings("Audible song", m.title);
+    try testing.expectEqualStrings("old", m.cover_sid);
+    try testing.expectEqualStrings("old", m.like_song);
+    try testing.expectEqual(@as(u64, 1000), m.cover_id);
+    try testing.expect(m.like_liked);
+}
 
 test "elapsed_str rolls to h:mm:ss past the hour" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
@@ -4448,12 +4645,12 @@ test "like flow: song change resets, status arms the heart, press likes once" {
     try testing.expectEqualStrings("s1", m.like_song);
     try testing.expect(!m.like_available);
     // Status for the current song arms the heart with the airing's count.
-    update(&m, .{ .got_like_status = .{ .key = keys.fetch_like, .outcome = .ok, .status = 200, .body = "{\"enabled\":true,\"songId\":\"s1\",\"liked\":false,\"count\":2}" } }, &fx);
+    update(&m, .{ .got_like_status = .{ .key = m.listener_like_key, .outcome = .ok, .status = 200, .body = "{\"enabled\":true,\"songId\":\"s1\",\"liked\":false,\"count\":2}" } }, &fx);
     try testing.expect(m.like_available);
     try testing.expect(!m.like_liked);
     try testing.expectEqual(@as(u32, 2), m.like_count);
     // A stale status (some other song) changes nothing.
-    update(&m, .{ .got_like_status = .{ .key = keys.fetch_like, .outcome = .ok, .status = 200, .body = "{\"enabled\":true,\"songId\":\"sX\",\"liked\":true,\"count\":9}" } }, &fx);
+    update(&m, .{ .got_like_status = .{ .key = m.listener_like_key, .outcome = .ok, .status = 200, .body = "{\"enabled\":true,\"songId\":\"sX\",\"liked\":true,\"count\":9}" } }, &fx);
     try testing.expectEqual(@as(u32, 2), m.like_count);
     // Press → pending; a second press is a no-op; the server confirm fills.
     update(&m, .press_like, &fx);
@@ -4464,7 +4661,7 @@ test "like flow: song change resets, status arms the heart, press likes once" {
     try testing.expect(!m.like_pending);
     try testing.expectEqual(@as(u32, 3), m.like_count);
     // Likes disabled station-side hides the heart entirely.
-    update(&m, .{ .got_like_status = .{ .key = keys.fetch_like, .outcome = .ok, .status = 200, .body = "{\"enabled\":false}" } }, &fx);
+    update(&m, .{ .got_like_status = .{ .key = m.listener_like_key, .outcome = .ok, .status = 200, .body = "{\"enabled\":false}" } }, &fx);
     try testing.expect(!m.like_available);
 }
 
@@ -4778,7 +4975,7 @@ test "station switch restores format and silently revalidates that station's pas
     update(&m, .{ .pick_recent = "https://first.example/" }, &fx);
     try testing.expectEqual(StreamFormat.opus, m.format_pref);
     try testing.expectEqualStrings("first-secret", m.station_pw);
-    update(&m, .{ .got_state = .{ .key = keys.fetch_state, .status = 200, .body = "{\"privacy\":{\"listenerAuth\":true}}" } }, &fx);
+    update(&m, .{ .got_state = .{ .key = m.listener_state_key, .status = 200, .body = "{\"privacy\":{\"listenerAuth\":true}}" } }, &fx);
     try testing.expectEqual(AuthGate.checking, m.auth_gate);
     try testing.expect(m.auth_from_store);
     try testing.expectEqualStrings("first-secret", m.auth_try);
@@ -5741,4 +5938,303 @@ test "second timer serves visible station panels and survives sleep cancellation
     try testing.expect(!m.station_second_timer_active);
     update(&m, .app_activated, &fx);
     try testing.expect(m.station_second_timer_active);
+}
+
+fn testIso(buf: []u8, now_ms: i64) ![]const u8 {
+    const epoch: std.time.epoch.EpochSeconds = .{ .secs = @intCast(@divTrunc(now_ms, 1000)) };
+    const year_day = epoch.getEpochDay().calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const time = epoch.getDaySeconds();
+    return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
+        year_day.year,          month_day.month.numeric(), @as(u6, month_day.day_index) + 1,
+        time.getHoursIntoDay(), time.getMinutesIntoHour(), time.getSecondsIntoMinute(),
+    });
+}
+
+test "reducer joins feed responses in either order before publishing a held track" {
+    inline for (.{ true, false }) |np_first| {
+        var fx = Effects.init(testing.allocator);
+        defer fx.deinit();
+        fx.executor = .fake;
+        var m: Model = .{};
+        update(&m, .{ .got_np = .{ .key = keys.fetch_np, .outcome = .ok, .status = 200, .body =
+            \\{"nowPlaying":{"title":"Audible","artist":"Artist"},"stream":{"bufferSeconds":22}}
+        } }, &fx);
+        var stamp_buf: [32]u8 = undefined;
+        const stamp = try testIso(&stamp_buf, native_sdk.nowMs());
+        var state_buf: [256]u8 = undefined;
+        const state = try std.fmt.bufPrint(&state_buf, "{{\"current\":{{\"title\":\"Next\",\"artist\":\"Artist\",\"startedAt\":\"{s}\"}}}}", .{stamp});
+        const np: Msg = .{ .got_np = .{ .key = keys.fetch_np, .outcome = .ok, .status = 200, .body =
+            \\{"nowPlaying":{"title":"Next","artist":"Artist"},"stream":{"bufferSeconds":22}}
+        } };
+        const current: Msg = .{ .got_state = .{ .key = keys.fetch_state, .outcome = .ok, .status = 200, .body = state } };
+        fetchFeed(&m, &fx);
+        update(&m, if (np_first) np else current, &fx);
+        try testing.expectEqualStrings("Audible", m.title);
+        update(&m, if (np_first) current else np, &fx);
+        try testing.expectEqualStrings("Audible", m.title);
+        const release = m.listener.current_start_ms.? + 22_000;
+        refreshListener(&m, &fx, release - 1);
+        try testing.expectEqualStrings("Audible", m.title);
+        refreshListener(&m, &fx, release);
+        try testing.expectEqualStrings("Next", m.title);
+        try testing.expectEqual(@as(i64, 0), m.track_elapsed_ms);
+        refreshTrackElapsed(&m, release + 13_000);
+        try testing.expectEqual(@as(i64, 13_000), m.track_elapsed_ms);
+    }
+}
+
+test "a failed or malformed state leg completes the feed join" {
+    inline for (.{ "not json", "{}" }) |body| {
+        var fx = Effects.init(testing.allocator);
+        defer fx.deinit();
+        fx.executor = .fake;
+        var m: Model = .{};
+        fetchFeed(&m, &fx);
+        update(&m, .{ .got_np = .{ .key = keys.fetch_np, .outcome = .ok, .status = 200, .body =
+            \\{"nowPlaying":{"title":"First track"},"stream":{"bufferSeconds":22}}
+        } }, &fx);
+        try testing.expectEqualStrings("Tuning in…", m.title);
+        update(&m, .{ .got_state = .{ .key = keys.fetch_state, .outcome = .ok, .status = 200, .body = body } }, &fx);
+        try testing.expectEqualStrings("First track", m.title);
+        try testing.expect(!m.listener.waiting_np and !m.listener.waiting_state);
+        fetchFeed(&m, &fx);
+        update(&m, .{ .got_np = .{ .key = keys.fetch_np, .outcome = .timed_out, .status = 0, .body = "" } }, &fx);
+        update(&m, .{ .got_state = .{ .key = keys.fetch_state, .outcome = .timed_out, .status = 0, .body = "" } }, &fx);
+        try testing.expect(!m.listener.waiting_np and !m.listener.waiting_state);
+    }
+}
+
+test "station switch clears the listener hold and ignores old feed terminals" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.listener.receiveTrack(.{ .title = "Old station" }, 22, 100_000);
+    refreshListener(&m, &fx, 100_000);
+    m.listener.receiveTrack(.{ .title = "Held", .legacy_start_ms = 105_000 }, 22, 105_000);
+    refreshListener(&m, &fx, 105_000);
+    update(&m, .{ .pick_recent = "https://new.example" }, &fx);
+    try testing.expectEqualStrings("Tuning in…", m.title);
+    try testing.expectEqual(@as(i64, 0), m.listener.lead_ms);
+    try testing.expect(!m.listener.live_known);
+    try testing.expect(m.listener_np_key >= 50 and m.listener_np_key <= 59);
+    update(&m, .{ .got_np = .{ .key = keys.fetch_np, .outcome = .ok, .status = 200, .body =
+        \\{"nowPlaying":{"title":"Old terminal"}}
+    } }, &fx);
+    update(&m, .{ .got_state = .{ .key = keys.fetch_state, .outcome = .cancelled, .status = 0, .body = "" } }, &fx);
+    try testing.expect(m.listener.waiting_np and m.listener.waiting_state);
+    try testing.expectEqualStrings("Tuning in…", m.title);
+}
+
+test "booth decoding holds speech and displays carried tail and boundary only" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.listener.lead_ms = 22_000;
+    m.title = "Song";
+    m.artist = "Song artist";
+    m.host = "Heer";
+    testSetDiscordId(&m);
+    m.discord_enabled = true;
+    m.self_exe_path = "/usr/local/bin/subwave-desktop";
+    var stamp_buf: [32]u8 = undefined;
+    const stamp = try testIso(&stamp_buf, native_sdk.nowMs());
+    const aired = listener_time.isoMs(stamp).?;
+    var body_buf: [2048]u8 = undefined;
+    const body = try std.fmt.bufPrint(&body_buf, "{{\"messages\":[" ++
+        "{{\"t\":123,\"role\":\"segment\",\"text\":\"Goodnight from Bob\",\"meta\":{{\"carried\":true,\"personaName\":\"Bob\",\"ignored\":true}}}}," ++
+        "{{\"role\":\"event\",\"kind\":\"show-boundary\",\"text\":\"Server fallback\",\"meta\":{{\"boundary\":{{\"at\":\"2026-10-09T12:00:00Z\",\"show\":\"Blue Hour\",\"persona\":\"Heer\"}}}}}}," ++
+        "{{\"role\":\"event\",\"kind\":\"scenario\",\"text\":\"Internal event\"}}," ++
+        "{{\"t\":\"{s}\",\"role\":\"segment\",\"kind\":\"link\",\"text\":\"Welcome in\",\"meta\":{{\"airedAt\":\"{s}\",\"durationMs\":14000}}}}]}}", .{ stamp, stamp });
+    update(&m, .{ .got_session = .{ .key = keys.fetch_session, .outcome = .ok, .status = 200, .body = body } }, &fx);
+    try testing.expectEqual(@as(usize, 4), m.raw_booth_count);
+    try testing.expectEqual(@as(usize, 2), m.booth_count);
+    try testing.expectEqualStrings("", m.booth_line);
+    try testing.expect(m.booth_turns[0].is_boundary);
+    try testing.expectEqualStrings("12:00 · Blue Hour", m.booth_turns[0].text);
+    try testing.expect(m.booth_turns[1].is_carried);
+    try testing.expectEqualStrings("Bob", m.booth_turns[1].persona);
+    try testing.expectEqualStrings("Song artist", m.presentation_artist());
+    refreshListener(&m, &fx, aired + 22_000);
+    try testing.expectEqual(@as(usize, 3), m.booth_count);
+    try testing.expectEqualStrings("Welcome in", m.booth_line);
+    try testing.expect(m.dj_talking);
+    try testing.expectEqualStrings("Heer", m.presentation_artist());
+    try testing.expectEqualStrings("Song artist", m.artist);
+    try testing.expectEqualStrings("Song — Heer", m.tray_track);
+    const request = fx.pendingSpawnAt(0).?;
+    try testing.expect(std.mem.indexOf(u8, request.stdin, "\"state\":\"Heer\"") != null);
+    refreshListener(&m, &fx, aired + 36_000);
+    try testing.expect(!m.dj_talking);
+    try testing.expectEqualStrings("Song — Song artist", m.tray_track);
+    try testing.expectEqualStrings("Song artist", m.presentation_artist());
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    m.booth_filter = .tracks;
+    try testing.expectEqual(@as(usize, 1), m.booth_list(arena_state.allocator()).len);
+}
+
+test "hidden latest booth turns cannot evict audible turns before the row cap" {
+    var m: Model = .{};
+    m.listener.lead_ms = 22_000;
+    m.raw_booth[0].class = .voice;
+    m.raw_booth[0].text.set("Audible old line");
+    for (m.raw_booth[1..33]) |*turn| {
+        turn.class = .voice;
+        turn.text.set("Still buffered");
+        turn.aired_at_ms = 100_000;
+    }
+    m.raw_booth_count = 33;
+    refreshBooth(&m, 105_000);
+    try testing.expectEqual(@as(usize, 1), m.booth_count);
+    try testing.expectEqualStrings("Audible old line", m.booth_line);
+}
+
+test "likes during a hold post the audible song and leave a 409 unchanged" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.listener.receiveTrack(.{ .title = "Audible", .song_id = "old" }, 22, 100_000);
+    refreshListener(&m, &fx, 100_000);
+    m.like_available = true;
+    m.like_count = 5;
+    m.listener.receiveTrack(.{ .title = "Next", .song_id = "new", .legacy_start_ms = 105_000 }, 22, 105_000);
+    refreshListener(&m, &fx, 105_000);
+    update(&m, .press_like, &fx);
+    try testing.expect(m.like_pending);
+    try testing.expect(std.mem.startsWith(u8, &m.like_body_buf, "{\"songId\":\"old\"}"));
+    update(&m, .{ .got_like_post = .{ .key = keys.post_like, .outcome = .ok, .status = 409, .body = "{}" } }, &fx);
+    try testing.expect(!m.like_pending and m.like_available and !m.like_liked);
+    try testing.expectEqual(@as(u32, 5), m.like_count);
+    update(&m, .{ .got_like_status = .{ .key = m.listener_like_key, .outcome = .ok, .status = 200, .body =
+        \\{"enabled":true,"songId":"new","liked":true,"count":9}
+    } }, &fx);
+    try testing.expectEqual(@as(u32, 5), m.like_count);
+    refreshListener(&m, &fx, 127_000);
+    try testing.expectEqualStrings("Next", m.title);
+    try testing.expectEqualStrings("new", m.cover_sid);
+    try testing.expectEqualStrings("new", m.like_song);
+    try testing.expect(!m.like_available and !m.like_liked);
+    try testing.expectEqual(@as(u32, 0), m.like_count);
+}
+
+test "boundary labels fall back to server text and malformed voice metadata fails open" {
+    var turn: listener_time.Turn = .{};
+    const parsed = try json.parse(json.Session, testing.allocator,
+        \\{"messages":[{"role":"event","kind":"show-boundary","text":"Server clock · Show","meta":{"boundary":{"at":"invalid","show":"Show"}}},{"t":100000,"role":"segment","kind":"link","text":"one two three four five six seven eight nine ten","meta":{"airedAt":123,"durationMs":"bad","carried":"true"}}]}
+    );
+    defer parsed.deinit();
+    var m: Model = .{};
+    for (parsed.value.messages.?, 0..) |message, i| decodeBoothTurn(&m.raw_booth[i], message);
+    m.raw_booth_count = 2;
+    refreshBooth(&m, 100_000);
+    try testing.expectEqualStrings("Server clock · Show", m.booth_turns[1].text);
+    turn = m.raw_booth[1];
+    try testing.expect(turn.aired_at_ms == null and !turn.carried);
+    try testing.expectEqual(@as(i64, 5046), turn.duration_ms);
+    try testing.expect(m.dj_talking);
+}
+
+test "station switch ignores old booth terminals and the listener tick survives sleep cancellation" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    startPlayerTimers(&fx);
+    armSleep(&m, &fx, 15);
+    disarmSleep(&m, &fx);
+    update(&m, .{ .pick_recent = "https://new.example" }, &fx);
+    update(&m, .{ .got_session = .{ .key = keys.fetch_session, .outcome = .ok, .status = 200, .body =
+        \\{"messages":[{"role":"segment","text":"Old station"}]}
+    } }, &fx);
+    try testing.expectEqual(@as(usize, 0), m.raw_booth_count);
+    m.raw_booth[0].class = .voice;
+    m.raw_booth[0].text.set("Current station");
+    m.raw_booth_count = 1;
+    update(&m, .{ .tick_listener = .{ .key = keys.listener_timer, .outcome = .fired, .timestamp_ns = 0 } }, &fx);
+    try testing.expectEqualStrings("Current station", m.booth_line);
+}
+
+test "track promotion fetches likes on a fresh key while the previous GET is outstanding" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.listener.receiveTrack(.{ .title = "First", .song_id = "first" }, 0, 100_000);
+    refreshListener(&m, &fx, 100_000);
+    const first_key = m.listener_like_key;
+    m.listener.receiveTrack(.{ .title = "Second", .song_id = "second" }, 0, 105_000);
+    refreshListener(&m, &fx, 105_000);
+    try testing.expect(m.listener_like_key != first_key);
+    var fetched = false;
+    for (0..fx.pendingFetchCount()) |index| {
+        if (fx.pendingFetchAt(index).?.key == m.listener_like_key) fetched = true;
+    }
+    try testing.expect(fetched);
+    update(&m, .{ .got_like_status = .{ .key = first_key, .outcome = .ok, .status = 200, .body =
+        \\{"enabled":true,"songId":"first","liked":true,"count":20}
+    } }, &fx);
+    try testing.expect(!m.like_available);
+    update(&m, .{ .got_like_status = .{ .key = m.listener_like_key, .outcome = .ok, .status = 200, .body =
+        \\{"enabled":true,"songId":"second","liked":false,"count":3}
+    } }, &fx);
+    try testing.expect(m.like_available);
+    try testing.expectEqual(@as(u32, 3), m.like_count);
+}
+
+fn testDrainEffects(model: *Model, fx: *Effects) !void {
+    while (fx.takeMsg()) |message| {
+        switch (message) {
+            .got_np, .got_state, .got_like_status => |reply| try testing.expect(reply.outcome != .rejected),
+            else => {},
+        }
+        update(model, message, fx);
+    }
+}
+
+test "rapid station switches wait for cancelled keys and ignore old generations" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    inline for (.{ "first.example", "second.example", "third.example" }) |station| {
+        update(&m, .{ .pick_recent = "https://" ++ station }, &fx);
+    }
+    try testing.expect(m.listener_feed_deferred);
+    try testing.expect(!m.listener.waiting_np and !m.listener.waiting_state);
+    try testDrainEffects(&m, &fx);
+    try testing.expect(!m.listener_feed_deferred);
+    try testing.expect(m.listener.waiting_np and m.listener.waiting_state);
+    try testing.expect(!m.listener.live_known);
+    try testing.expectEqualStrings("Tuning in…", m.title);
+    try fx.feedResponseOutcome(m.listener_np_key, .ok, 200,
+        \\{"nowPlaying":{"title":"Third station"},"stream":{"bufferSeconds":0}}
+    );
+    try fx.feedResponseOutcome(m.listener_state_key, .ok, 200, "{}");
+    try testDrainEffects(&m, &fx);
+    try testing.expectEqualStrings("Third station", m.title);
+}
+
+test "rapid promotions defer a reused like key until its old terminal drains" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    inline for (.{ "First", "Second", "Third" }, 0..) |title, index| {
+        const now_ms: i64 = 100_000 + @as(i64, index) * 1000;
+        m.listener.receiveTrack(.{ .title = title, .song_id = title }, 0, now_ms);
+        refreshListener(&m, &fx, now_ms);
+    }
+    try testing.expect(m.listener_like_deferred);
+    try testDrainEffects(&m, &fx);
+    try testing.expect(!m.listener_like_deferred);
+    try fx.feedResponseOutcome(m.listener_like_key, .ok, 200,
+        \\{"enabled":true,"songId":"Third","liked":false,"count":3}
+    );
+    try testDrainEffects(&m, &fx);
+    try testing.expect(m.like_available);
+    try testing.expectEqual(@as(u32, 3), m.like_count);
 }
