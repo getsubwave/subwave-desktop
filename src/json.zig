@@ -65,6 +65,7 @@ pub const Context = struct {
 // named in `mount` — so a listener tuned to a different format must not be
 // shown this bitrate. See Model.stream_primary.
 pub const StreamInfo = struct {
+    bufferSeconds: ?std.json.Value = null,
     opusEnabled: ?bool = null,
     flacEnabled: ?bool = null,
     aacEnabled: ?bool = null,
@@ -102,7 +103,15 @@ pub const Privacy = struct {
     listenerAuth: ?bool = null,
 };
 
+pub const CurrentTrack = struct {
+    title: ?[]const u8 = null,
+    artist: ?[]const u8 = null,
+    subsonic_id: ?[]const u8 = null,
+    startedAt: ?[]const u8 = null,
+};
+
 pub const StationState = struct {
+    current: ?CurrentTrack = null,
     theme: ?Theme = null,
     upcoming: ?[]QueueEntry = null,
     history: ?[]QueueEntry = null,
@@ -174,6 +183,21 @@ pub const RequestStatus = struct {
 };
 
 // GET /api/session → { messages: [{ t, role, kind, text }] }
+pub const ShowBoundary = struct {
+    at: ?[]const u8 = null,
+    show: ?[]const u8 = null,
+    persona: ?[]const u8 = null,
+};
+
+pub const SessionMeta = struct {
+    airedAt: ?std.json.Value = null,
+    durationMs: ?std.json.Value = null,
+    carried: ?std.json.Value = null,
+    personaName: ?[]const u8 = null,
+    trackId: ?[]const u8 = null,
+    boundary: ?ShowBoundary = null,
+};
+
 pub const SessionMsg = struct {
     // ISO timestamp string OR epoch number depending on station version — a
     // Value survives both (a typed ?[]const u8 would fail the whole parse on
@@ -182,6 +206,7 @@ pub const SessionMsg = struct {
     role: ?[]const u8 = null,
     kind: ?[]const u8 = null,
     text: ?[]const u8 = null,
+    meta: ?SessionMeta = null,
 };
 pub const Session = struct {
     messages: ?[]SessionMsg = null,
@@ -269,4 +294,41 @@ pub const Settings = struct {
 // and MUST `defer parsed.deinit()`; copy any strings before that.
 pub fn parse(comptime T: type, alloc: std.mem.Allocator, body: []const u8) !std.json.Parsed(T) {
     return std.json.parseFromSlice(T, alloc, body, .{ .ignore_unknown_fields = true });
+}
+
+test "listener timing fields decode alongside unknown public payload fields" {
+    const parsed = try parse(NowPlaying, std.testing.allocator,
+        \\{"nowPlaying":{"title":"Song","subsonic_id":"song","unused":true},"stream":{"bufferSeconds":22.5,"mount":"/stream.mp3"},"future":{}}
+    );
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(f64, 22.5), parsed.value.stream.?.bufferSeconds.?.float);
+    const state = try parse(StationState, std.testing.allocator,
+        \\{"current":{"title":"Song","artist":"Artist","subsonic_id":"song","startedAt":"2026-10-09T12:00:00Z","source":"auto"},"future":true}
+    );
+    defer state.deinit();
+    try std.testing.expectEqualStrings("2026-10-09T12:00:00Z", state.value.current.?.startedAt.?);
+    const session = try parse(Session, std.testing.allocator,
+        \\{"messages":[{"t":123,"role":"segment","kind":"link","text":"Goodnight","meta":{"airedAt":"2026-10-09T12:00:00Z","durationMs":12000,"carried":true,"personaName":"Bob","trackId":"song","internal":{}}},{"role":"event","kind":"show-boundary","meta":{"boundary":{"at":"2026-10-09T12:00:00Z","show":"Blue Hour","persona":"Heer","fromSessionId":"prev"}}}]}
+    );
+    defer session.deinit();
+    const turns = session.value.messages.?;
+    try std.testing.expectEqual(@as(i64, 123), turns[0].t.?.integer);
+    try std.testing.expectEqual(@as(i64, 12000), turns[0].meta.?.durationMs.?.integer);
+    try std.testing.expect(turns[0].meta.?.carried.?.bool);
+    try std.testing.expectEqualStrings("Bob", turns[0].meta.?.personaName.?);
+    try std.testing.expectEqualStrings("song", turns[0].meta.?.trackId.?);
+    try std.testing.expectEqualStrings("Blue Hour", turns[1].meta.?.boundary.?.show.?);
+}
+
+test "invalid optional timing types do not discard an otherwise valid feed" {
+    const np = try parse(NowPlaying, std.testing.allocator,
+        \\{"nowPlaying":{"title":"Still playing"},"stream":{"bufferSeconds":"unknown"}}
+    );
+    defer np.deinit();
+    try std.testing.expectEqualStrings("Still playing", np.value.nowPlaying.?.title.?);
+    const session = try parse(Session, std.testing.allocator,
+        \\{"messages":[{"role":"segment","text":"Hello","meta":{"airedAt":123,"durationMs":"unknown","carried":"yes"}}]}
+    );
+    defer session.deinit();
+    try std.testing.expectEqualStrings("Hello", session.value.messages.?[0].text.?);
 }
