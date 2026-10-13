@@ -11,6 +11,7 @@ const json = @import("json.zig");
 const color = @import("color.zig");
 const spectrum = @import("spectrum.zig");
 const stream_format = @import("stream_format.zig");
+const station_access = @import("station_access.zig");
 const discord_rpc = @import("discord_rpc.zig");
 // `update` is the reducer below, so the self-update module needs an alias.
 const updater = @import("update.zig");
@@ -60,6 +61,10 @@ pub const keys = struct {
     pub const open_release_spawn: u64 = 45;
     pub const open_support_spawn: u64 = 46;
     pub const copy_clipboard: u64 = 47;
+    pub const station_credentials: u64 = 70;
+    pub const auth_recheck_timer: u64 = 71;
+    pub const post_auth_recheck: u64 = 72;
+    pub const fetch_ob_fallback: u64 = 73;
 
     // Cover art loads through `fx.loadImage`, where the ImageId IS the effect
     // key — so the id counter has to start clear of every key above or a cover
@@ -391,15 +396,25 @@ pub const Model = struct {
     auth_try_buf: [128]u8 = undefined,
     auth_try: []const u8 = "",
     auth_from_store: bool = false,
-    auth_body_buf: [416]u8 = undefined, // POST body must outlive the frame
+    auth_body_buf: [1024]u8 = undefined, // POST body must outlive the frame
     auth_status: []const u8 = "", // static literals; "" = no error to show
+    station_memory: station_access.Memory = .{},
+    use_secure_credentials: bool = station_access.secure_credentials_supported,
+    keep_station_memory: bool = true,
+    credentials_ready: bool = true,
+    credentials_blocked: bool = false,
+    credentials_saving: bool = false,
+    credentials_dirty: bool = false,
+    auth_recheck: station_access.Recheck = .{},
+    auth_recheck_inflight: bool = false,
+    auth_recheck_body_buf: [1024]u8 = undefined,
 
     // station switcher (TEA text field for the address; shared by the
     // onboarding host field and the sidebar's add-a-station field — the two
     // are never on screen together) + settings scratch.
     station_buffer: canvas.TextBuffer(200) = .{},
     station_status: []const u8 = "",
-    settings_json_buf: [3072]u8 = undefined,
+    settings_json_buf: [station_access.settings_bytes]u8 = undefined,
     save_inflight: bool = false,
     save_dirty: bool = false,
 
@@ -448,7 +463,7 @@ pub const Model = struct {
 
     // recents (persisted) + discover (community directory)
     recents_name_store: [max_recents][48]u8 = undefined,
-    recents_url_store: [max_recents][128]u8 = undefined,
+    recents_url_store: [max_recents][256]u8 = undefined,
     recents: [max_recents]StationRef = [_]StationRef{.{}} ** max_recents,
     recents_count: usize = 0,
     discover_name_store: [max_discover][48]u8 = undefined,
@@ -551,12 +566,18 @@ pub const Model = struct {
     ob_checking: bool = false, // false = entry form, true = check phase
     ob_steps: [4]StepState = [_]StepState{.wait} ** 4,
     ob_done: bool = false,
-    ob_target_url_buf: [160]u8 = undefined,
+    ob_target_url_buf: [256]u8 = undefined,
     ob_target_url: []const u8 = "",
     ob_target_name_buf: [48]u8 = undefined,
     ob_target_name: []const u8 = "",
-    ob_diag_buf: [160]u8 = undefined,
+    ob_diag_buf: [768]u8 = undefined,
     ob_diag: []const u8 = "",
+    ob_raw_buf: [64]u8 = undefined,
+    ob_raw: []const u8 = "",
+    ob_allow_fallback: bool = false,
+    ob_tried_https: bool = false,
+    ob_from_sidebar: bool = false,
+    ob_insecure: bool = false,
 
     // ------------------------------------------------- derived view bindings
     // Everything the markup shows that is computable from the state above is a
@@ -1319,6 +1340,9 @@ pub const Model = struct {
     pub fn has_ob_diag(self: *const Model) bool {
         return self.ob_diag.len > 0;
     }
+    pub fn has_ob_raw(self: *const Model) bool {
+        return self.ob_raw.len > 0;
+    }
     pub const SchemeRow = struct {
         label: []const u8 = "",
         https: bool = true,
@@ -1525,6 +1549,9 @@ pub const Model = struct {
         "privacy_private",    "privacy_listener_auth", "auth_gate",         "station_pw",
         "station_pw_buf",     "pw_buffer",           "auth_try",            "auth_try_buf",
         "auth_from_store",    "auth_body_buf",       "station_locked",
+        "station_memory", "use_secure_credentials", "keep_station_memory", "credentials_ready", "credentials_blocked",
+        "credentials_saving", "credentials_dirty", "auth_recheck", "auth_recheck_inflight", "auth_recheck_body_buf",
+        "ob_raw_buf", "ob_allow_fallback", "ob_tried_https", "ob_from_sidebar",
         // station / settings / theme-override state
         "base",               "base_buf",            "stream_url_buf",      "settings_path",
         "settings_path_buf",  "settings_json_buf",   "station_buffer",      "theme_override",
@@ -1663,6 +1690,9 @@ pub const Msg = union(enum) {
     pw_edit: canvas.TextInputEvent,
     submit_pw,
     got_station_auth: native_sdk.EffectResponse,
+    got_station_credentials: native_sdk.EffectCredentialsResult,
+    tick_auth_recheck: native_sdk.EffectTimer,
+    got_auth_recheck: native_sdk.EffectResponse,
 
     // stations
     station_edit: canvas.TextInputEvent,
@@ -1697,6 +1727,7 @@ pub const Msg = union(enum) {
     ob_pick_known: []const u8, // payload = url (known/discover rows)
     ob_back,
     ob_tune_in,
+    ob_continue_http,
 
     // Effect-result Msgs dispatched by the runtime/fx, not markup.
     pub const view_unbound = .{
@@ -1715,6 +1746,7 @@ pub const Msg = union(enum) {
         "show_player",   "quit_app",       "app_activated", "app_deactivated",
         "got_update",    "tick_update",    "opener_exited",
         "got_station_auth",
+        "got_station_credentials", "tick_auth_recheck", "got_auth_recheck",
     };
 };
 
@@ -1815,6 +1847,8 @@ fn startStream(model: *Model, fx: *Effects) void {
     fx.setAudioVolume(if (model.muted) 0.0 else model.volume);
     diag.print("stream start format={s}", .{model.effectiveFormat().id()});
     model.transport = .playing;
+    model.buffering = true;
+    armAuthRecheck(model, fx);
     updateDiscordPresence(model, fx);
 }
 
@@ -1926,6 +1960,7 @@ pub fn applySettingsJson(model: *Model, bytes: []const u8) void {
     const parsed = json.parse(json.Settings, std.heap.page_allocator, bytes) catch return;
     defer parsed.deinit();
     const s = parsed.value;
+    var legacy_station_valid = true;
     if (s.volume) |v| model.volume = std.math.clamp(v, 0.0, 1.0);
     if (s.themeOverride) |t| setStr(&model.theme_override_buf, &model.theme_override, t);
     // Unknown ids (or none) keep the MP3 floor.
@@ -1942,7 +1977,9 @@ pub fn applySettingsJson(model: *Model, bytes: []const u8) void {
                 // this call site can never actually appear in the log.
                 // main.zig logs the same fact once the station is resolved.
                 model.phase = .player;
-            } else |_| {}
+            } else |_| {
+                legacy_station_valid = false;
+            }
         }
     }
     if (s.stationName) |n| {
@@ -1951,20 +1988,44 @@ pub fn applySettingsJson(model: *Model, bytes: []const u8) void {
     // Re-validated against /station-auth the first time a state poll reports
     // a privacy lock — a rotated password clears itself then.
     if (s.stationPassword) |p| {
-        if (p.len > 0) setStr(&model.station_pw_buf, &model.station_pw, p);
+        if (legacy_station_valid and p.len > 0 and p.len <= model.station_pw_buf.len)
+            setStr(&model.station_pw_buf, &model.station_pw, p);
     }
     if (s.recents) |list| {
         model.recents_count = 0;
         for (list) |r| {
             if (model.recents_count >= max_recents) break;
-            const url = r.url orelse continue;
-            if (url.len == 0) continue;
+            const raw = r.url orelse continue;
+            var url_buf: [256]u8 = undefined;
+            const url = api.normalizeBase(&url_buf, raw) catch continue;
+            var duplicate = false;
+            for (model.recents[0..model.recents_count]) |recent| duplicate = duplicate or std.mem.eql(u8, recent.url, url);
+            if (duplicate) continue;
             const i = model.recents_count;
             setStr(&model.recents_url_store[i], &model.recents[i].url, url);
             setStr(&model.recents_name_store[i], &model.recents[i].name, r.name orelse url);
             model.recents_count += 1;
         }
     }
+    _ = model.station_memory.put(model.base, model.format_pref, model.station_pw) catch false;
+    for (model.recents[0..model.recents_count]) |recent| {
+        if (model.station_memory.get(recent.url) == null)
+            _ = model.station_memory.put(recent.url, .mp3, "") catch false;
+    }
+    if (s.stationSettings) |map| {
+        var it = map.map.iterator();
+        while (it.next()) |entry| {
+            var b: [256]u8 = undefined;
+            const base = api.normalizeBase(&b, entry.key_ptr.*) catch continue;
+            // Imported entries have to belong to a retained station.
+            const old = model.station_memory.get(base) orelse continue;
+            const value = entry.value_ptr.*;
+            const fmt = if (value.streamFormat) |f| stream_format.fromId(f) orelse old.format else old.format;
+            const pw = value.stationPassword orelse old.password();
+            _ = model.station_memory.put(base, fmt, pw) catch false;
+        }
+    }
+    restoreStationSettings(model);
     if (s.notifyTrack) |v| model.notify_track = v;
     if (s.discordEnabled) |v| model.discord_enabled = v;
     if (s.discordClientId) |id| {
@@ -1977,37 +2038,91 @@ pub fn applySettingsJson(model: *Model, bytes: []const u8) void {
 // Persist the current settings (async via fx.writeFile). While a write is in
 // flight further saves set save_dirty; the .saved result re-saves once, so the
 // last state always lands on disk.
+fn rememberStationSettings(model: *Model) void {
+    if (!model.keep_station_memory) return;
+    model.credentials_dirty = (model.station_memory.put(model.base, model.format_pref, model.station_pw) catch false) or model.credentials_dirty;
+}
+
+pub fn restoreStationSettings(model: *Model) void {
+    model.format_pref = .mp3;
+    model.station_pw = "";
+    model.keep_station_memory = true;
+    if (model.station_memory.get(model.base)) |entry| {
+        model.format_pref = entry.format;
+        setStr(&model.station_pw_buf, &model.station_pw, entry.password());
+    }
+}
+
+fn pruneStationSettings(model: *Model) void {
+    var urls: [max_recents][]const u8 = undefined;
+    for (model.recents[0..model.recents_count], 0..) |recent, i| urls[i] = recent.url;
+    model.credentials_dirty = model.station_memory.retain(model.base, urls[0..model.recents_count]) or model.credentials_dirty;
+}
+
+fn settingsSnapshot(model: *Model) ![]const u8 {
+    var w = std.Io.Writer.fixed(&model.settings_json_buf);
+    try w.print("{{\"volume\":{d:.2},\"themeOverride\":", .{model.volume});
+    try std.json.Stringify.value(model.theme_override, .{}, &w);
+    try w.writeAll(",\"station\":");
+    try std.json.Stringify.value(model.base, .{}, &w);
+    try w.writeAll(",\"stationName\":");
+    try std.json.Stringify.value(model.station_name, .{}, &w);
+    try w.print(",\"discordEnabled\":{s},\"discordClientId\":\"{s}\",\"notifyTrack\":{s},\"recents\":[", .{
+        if (model.discord_enabled) "true" else "false",
+        model.discord_client_id,
+        if (model.notify_track) "true" else "false",
+    });
+    for (model.recents[0..model.recents_count], 0..) |recent, i| {
+        if (i > 0) try w.writeByte(',');
+        try w.writeAll("{\"name\":");
+        try std.json.Stringify.value(recent.name, .{}, &w);
+        try w.writeAll(",\"url\":");
+        try std.json.Stringify.value(recent.url, .{}, &w);
+        try w.writeByte('}');
+    }
+    try w.writeAll("],\"stationSettings\":{");
+    for (model.station_memory.entries[0..model.station_memory.count], 0..) |*entry, i| {
+        if (i > 0) try w.writeByte(',');
+        try std.json.Stringify.value(entry.base(), .{}, &w);
+        try w.print(":{{\"streamFormat\":\"{s}\"", .{entry.format.id()});
+        if (!model.use_secure_credentials and entry.password_len > 0) {
+            try w.writeAll(",\"stationPassword\":");
+            try std.json.Stringify.value(entry.password(), .{}, &w);
+        }
+        try w.writeByte('}');
+    }
+    try w.writeAll("}}");
+    return w.buffered();
+}
+
 fn saveSettings(model: *Model, fx: *Effects) void {
+    pruneStationSettings(model);
+    rememberStationSettings(model);
+    if (!model.use_secure_credentials) model.credentials_dirty = false;
+    // Never overwrite a vault we could not read, or scrub an imported secret
+    // before the OS confirms its replacement. Retain the legacy file on error.
+    if (!model.credentials_ready or model.credentials_blocked or model.credentials_saving) {
+        model.save_dirty = true;
+        return;
+    }
+    if (model.credentials_dirty) {
+        var vault_buf: [station_access.vault_bytes]u8 = undefined;
+        const secret = model.station_memory.vaultSnapshot(&vault_buf) catch return;
+        model.credentials_dirty = false;
+        model.credentials_saving = true;
+        fx.credentialsSet(.{ .key = keys.station_credentials, .credential_key = station_access.vault_key, .secret = secret, .on_result = Effects.credentialsMsg(.got_station_credentials) });
+        @memset(&vault_buf, 0);
+        return;
+    }
     if (model.settings_path.len == 0) return;
     if (model.save_inflight) {
         model.save_dirty = true;
         return;
     }
-    var w = std.Io.Writer.fixed(&model.settings_json_buf);
-    var esc: [256]u8 = undefined;
-    // The password gets its own escape buffer: worst case every byte doubles,
-    // and a truncated secret would silently fail to unlock on the next run.
-    var pw_esc: [256]u8 = undefined;
-    // discord_client_id needs no escape pass: it only ever holds an
-    // isValidClientId-vetted string (pure ASCII digits).
-    w.print("{{\"volume\":{d:.2},\"themeOverride\":\"{s}\",\"streamFormat\":\"{s}\",\"station\":\"{s}\",\"stationName\":\"{s}\",\"stationPassword\":\"{s}\",\"discordEnabled\":{s},\"discordClientId\":\"{s}\",\"notifyTrack\":{s},\"recents\":[", .{
-        model.volume,
-        jsonEscape(esc[0..64], model.theme_override),
-        model.format_pref.id(),
-        model.base,
-        jsonEscape(esc[64..128], model.station_name),
-        jsonEscape(&pw_esc, model.station_pw),
-        if (model.discord_enabled) "true" else "false",
-        model.discord_client_id,
-        if (model.notify_track) "true" else "false",
-    }) catch return;
-    for (model.recents[0..model.recents_count], 0..) |r, i| {
-        if (i > 0) w.print(",", .{}) catch return;
-        w.print("{{\"name\":\"{s}\",\"url\":\"{s}\"}}", .{ jsonEscape(esc[0..128], r.name), r.url }) catch return;
-    }
-    w.print("]}}", .{}) catch return;
-    fx.writeFile(.{ .key = keys.save_settings, .path = model.settings_path, .bytes = w.buffered(), .on_result = Effects.fileMsg(.saved) });
+    const bytes = settingsSnapshot(model) catch return;
+    fx.writeFile(.{ .key = keys.save_settings, .path = model.settings_path, .bytes = bytes, .on_result = Effects.fileMsg(.saved) });
     model.save_inflight = true;
+    model.save_dirty = false;
 }
 
 // Coalesce chatty saves (dragging the volume slider emits many changes).
@@ -2018,6 +2133,7 @@ fn scheduleSave(model: *Model, fx: *Effects) void {
 
 fn scheduleReconnect(model: *Model, fx: *Effects) void {
     model.stream_failed = true;
+    armAuthRecheck(model, fx);
     // Linux offers every mount optimistically (GStreamer decode support is
     // whatever plugins are installed) — a non-MP3 mount that keeps failing
     // drops to the floor instead of error-looping against a codec the host
@@ -2047,8 +2163,8 @@ fn postStationAuth(model: *Model, fx: *Effects, candidate: []const u8, from_stor
     model.auth_gate = .checking;
     model.auth_status = "";
     var w = std.Io.Writer.fixed(&model.auth_body_buf);
-    var esc: [256]u8 = undefined;
-    w.print("{{\"password\":\"{s}\"}}", .{jsonEscape(&esc, model.auth_try)}) catch return;
+    std.json.Stringify.value(.{ .password = model.auth_try }, .{}, &w) catch return;
+    model.auth_recheck.last_check = native_sdk.monotonicMs();
     fx.fetch(.{
         .key = keys.post_station_auth,
         .method = .POST,
@@ -2068,6 +2184,37 @@ fn lockStation(model: *Model, fx: *Effects) void {
     model.sheet = .none;
     model.mini_open = false;
     if (model.transport != .stopped) tuneOut(model, fx);
+}
+
+fn syncStationGate(model: *Model, fx: *Effects) void {
+    if (!model.privacy_private and !model.privacy_listener_auth) {
+        model.auth_gate = .idle;
+        model.auth_status = "";
+        model.auth_recheck_inflight = false;
+        model.auth_recheck.reconnect_since = null;
+        fx.cancel(keys.post_station_auth);
+        fx.cancel(keys.post_auth_recheck);
+        fx.cancelTimer(keys.auth_recheck_timer);
+    } else if (!model.credentials_ready) {
+        model.auth_gate = .checking;
+    } else if (model.auth_gate == .idle) {
+        if (model.station_pw.len > 0) {
+            postStationAuth(model, fx, model.station_pw, true);
+        } else {
+            lockStation(model, fx);
+            if (model.credentials_blocked)
+                model.auth_status = "Couldn't read the saved password securely. Unlock the system keyring and restart, or enter the station password for this session.";
+        }
+    }
+}
+
+fn armAuthRecheck(model: *Model, fx: *Effects) void {
+    if (model.auth_gate != .ok or !(model.privacy_private or model.privacy_listener_auth) or
+        model.station_pw.len == 0 or model.transport != .playing) return;
+    if (model.auth_recheck.reconnect_since == null) {
+        model.auth_recheck.reconnect_since = native_sdk.monotonicMs();
+        fx.startTimer(.{ .key = keys.auth_recheck_timer, .interval_ms = 1000, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_auth_recheck) });
+    }
 }
 
 // Ask the station for the current airing's liked-state + count. A station
@@ -2336,20 +2483,18 @@ fn retune(model: *Model, fx: *Effects) void {
     model.like_liked = false;
     model.like_pending = false;
     model.like_count = 0;
-    // The format pick is per station: the new station's mounts are unknown
-    // until its first poll, and the old pick doesn't carry over.
-    model.format_pref = .mp3;
+    // Only this station's remembered format and password can carry over.
+    restoreStationSettings(model);
     model.stream_flags_known = false;
     model.stream_opus = false;
     model.stream_flac = false;
     model.stream_aac = false;
     model.stream_primary = null;
     model.stream_bitrate = 0;
-    // The station password is per station too — and unlike the web's
-    // per-origin localStorage, one settings file serves every station, so the
-    // old station's secret must never be POSTed to the new one. The first
-    // /api/state poll re-gates if the new station is private.
-    model.station_pw = "";
+    model.auth_recheck = .{};
+    model.auth_recheck_inflight = false;
+    fx.cancelTimer(keys.auth_recheck_timer);
+    fx.cancel(keys.post_auth_recheck);
     model.pw_buffer.clear();
     model.privacy_private = false;
     model.privacy_listener_auth = false;
@@ -2469,24 +2614,79 @@ fn tuneOut(model: *Model, fx: *Effects) void {
     model.retry = 0;
     model.latency_ms = -1;
     model.probe_fails = 0;
+    model.auth_recheck.reconnect_since = null;
+    model.auth_recheck_inflight = false;
+    fx.cancelTimer(keys.auth_recheck_timer);
+    fx.cancel(keys.post_auth_recheck);
     updateDiscordPresence(model, fx);
 }
 
 // Start the onboarding health-check against a candidate url/name.
-fn obStart(model: *Model, fx: *Effects, url: []const u8, name: []const u8) void {
-    setStr(&model.ob_target_url_buf, &model.ob_target_url, url);
-    setStr(&model.ob_target_name_buf, &model.ob_target_name, if (name.len > 0) name else url);
+fn obStart(model: *Model, fx: *Effects, raw: []const u8, name: []const u8) void {
+    var buf: [256]u8 = undefined;
+    const normalized = api.normalizeBase(&buf, raw) catch |err| {
+        model.station_status = if (err == error.StationLoginUnsupported)
+            "HTTP Basic Station login is not supported by this desktop player. Use a URL without a proxy login."
+        else
+            "That address doesn't look right. Enter an HTTP or HTTPS station URL.";
+        return;
+    };
+    fx.cancel(keys.fetch_ob_health);
+    fx.cancel(keys.fetch_ob_fallback);
+    fx.cancel(keys.fetch_ob_dj);
+    fx.cancelTimer(keys.ob_step_timer);
+    setStr(&model.ob_target_url_buf, &model.ob_target_url, normalized);
+    setStr(&model.ob_target_name_buf, &model.ob_target_name, if (name.len > 0) name else normalized);
+    model.ob_allow_fallback = !station_access.hasScheme(raw) and std.mem.startsWith(u8, normalized, "https://");
+    model.ob_tried_https = std.mem.startsWith(u8, normalized, "https://");
     model.ob_checking = true;
     model.ob_done = false;
     model.ob_diag = "";
+    model.ob_raw = "";
+    model.ob_insecure = false;
+    model.station_status = "";
     model.ob_steps = .{ .run, .wait, .wait, .wait };
-    // Step 1 is cosmetic (the fetch below resolves the host as a side effect);
-    // give it a beat so the stepper reads as progress, then gate on /health.
+    if (model.ob_from_sidebar) model.phase = .onboarding;
     fx.startTimer(.{ .key = keys.ob_step_timer, .interval_ms = 420, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick_ob_step) });
+}
+
+fn fetchObHealth(model: *Model, fx: *Effects, key: u64) void {
+    var b: [256]u8 = undefined;
+    if (api.health(&b, model.ob_target_url)) |u| {
+        fx.fetch(.{ .key = key, .url = u, .timeout_ms = 4500, .on_response = Effects.responseMsg(.got_ob_health) });
+    } else |_| {
+        model.ob_steps[1] = .fail;
+        setStr(&model.ob_diag_buf, &model.ob_diag, "That address doesn't look right.");
+    }
+}
+
+fn finishOnboarding(model: *Model, fx: *Effects) void {
+    var buf: [256]u8 = undefined;
+    const b = api.normalizeBase(&buf, model.ob_target_url) catch return;
+    rememberStationSettings(model);
+    setStr(&model.base_buf, &model.base, b);
+    setStr(&model.station_name_buf, &model.station_name, model.ob_target_name);
+    pushRecent(model, model.station_name, model.base);
+    model.station_buffer.clear();
+    model.phase = .player;
+    diag.print("phase player (onboarding complete)", .{});
+    model.ob_checking = false;
+    model.ob_from_sidebar = false;
+    model.ob_insecure = false;
+    model.sidebar_open = false;
+    model.day_sel = model.stationDay();
+    startPlayerTimers(fx);
+    retune(model, fx);
 }
 
 // ------------------------------------------------------------------ boot
 pub fn boot(model: *Model, fx: *Effects) void {
+    if (model.phase == .player) pushRecent(model, model.station_name, model.base);
+    rememberStationSettings(model);
+    if (model.use_secure_credentials) {
+        model.credentials_ready = false;
+        fx.credentialsGet(.{ .key = keys.station_credentials, .credential_key = station_access.vault_key, .on_result = Effects.credentialsMsg(.got_station_credentials) });
+    } else saveSettings(model, fx);
     // Station-independent, so it runs in both phases; the repeating timer
     // matters because close_policy = hide keeps the app resident for weeks.
     checkForUpdate(fx);
@@ -2794,16 +2994,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             const priv = parsed.value.privacy orelse json.Privacy{};
             model.privacy_private = priv.privatePlayer orelse false;
             model.privacy_listener_auth = priv.listenerAuth orelse false;
-            if (!model.privacy_private and !model.privacy_listener_auth) {
-                // Operator unlocked (or the station never was locked).
-                model.auth_gate = .idle;
-                model.auth_status = "";
-            } else if (model.auth_gate == .idle) {
-                if (model.station_pw.len > 0)
-                    postStationAuth(model, fx, model.station_pw, true)
-                else
-                    lockStation(model, fx);
-            }
+            syncStationGate(model, fx);
             // Timeline ledger: UP NEXT + PLAYED.
             if (parsed.value.upcoming) |list| {
                 model.upcoming_count = 0;
@@ -3213,6 +3404,10 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     model.buffering = e.buffering;
                     model.stream_failed = false;
                     model.retry = 0;
+                    if (!e.buffering) {
+                        model.auth_recheck.reconnect_since = null;
+                        fx.cancelTimer(keys.auth_recheck_timer);
+                    } else armAuthRecheck(model, fx);
                     refreshTrackElapsed(model, native_sdk.nowMs());
                     refreshTrayStatus(model);
                 },
@@ -3446,39 +3641,105 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             postStationAuth(model, fx, pw, false);
         },
         .got_station_auth => |r| {
-            // A verdict for a check the gate has moved past (station switch,
-            // operator unlocking mid-flight) changes nothing.
-            if (model.auth_gate != .checking) return;
+            if (model.auth_gate != .checking or !model.credentials_ready) return;
             if (r.outcome == .ok and r.status == 200) {
                 setStr(&model.station_pw_buf, &model.station_pw, model.auth_try);
                 model.auth_gate = .ok;
                 model.auth_status = "";
                 model.pw_buffer.clear();
+                model.keep_station_memory = true;
                 saveSettings(model, fx);
-                // Unlocking IS tuning in — the stream URL now carries ?auth=.
-                // A stream that never stopped (stored password confirmed) is
-                // already playing with the token and stays untouched.
                 if (model.transport != .playing) {
                     model.retry = 0;
                     startStream(model, fx);
                 }
+                if (model.stream_failed or model.buffering) armAuthRecheck(model, fx);
                 return;
             }
             const stale = model.auth_from_store;
             lockStation(model, fx);
-            if (stale) {
-                // Operator rotated the password: forget it, prompt silently —
-                // the listener never typed anything to be wrong about.
-                model.station_pw = "";
-                saveSettings(model, fx);
+            if (r.outcome == .ok and r.status == 401) {
+                if (stale) {
+                    model.station_pw = "";
+                    saveSettings(model, fx);
+                } else model.auth_status = "That password was not accepted.";
+            } else {
+                // Offline, rate-limited and 5xx responses do not prove rotation.
+                model.auth_status = if (r.outcome == .ok and r.status == 429)
+                    "Too many attempts. Wait a few minutes and try again."
+                else
+                    "Couldn't verify the password. Try again when the station is reachable.";
+            }
+        },
+        .got_station_credentials => |r| {
+            if (r.key != keys.station_credentials) return;
+            if (r.operation == .get) {
+                if (model.credentials_ready) return;
+                model.credentials_ready = true;
+                if (r.outcome == .ok or r.outcome == .miss) {
+                    if (r.outcome == .ok) model.station_memory.mergeVault(r.bytes, std.heap.page_allocator) catch {
+                        model.credentials_blocked = true;
+                    };
+                    if (!model.credentials_blocked) {
+                        // Existing vault records win over legacy plaintext.
+                        restoreStationSettings(model);
+                        model.credentials_dirty = true;
+                        saveSettings(model, fx);
+                    }
+                } else model.credentials_blocked = true;
+                if (model.credentials_blocked)
+                    model.station_status = "Couldn't read secure storage. Unlock the system keyring and restart to restore saved passwords. Settings were kept.";
+                if (model.auth_gate == .checking) model.auth_gate = .idle;
+                syncStationGate(model, fx);
+                // A password loaded after the initial anonymous stream must
+                // reach Icecast only once its station check succeeds.
+                if (model.station_locked() and model.transport != .stopped) {
+                    fx.stopAudio();
+                    fx.cancelTimer(keys.reconnect);
+                    model.transport = .stopped;
+                }
+            } else if (r.operation == .set and model.credentials_saving) {
+                model.credentials_saving = false;
+                if (r.outcome == .ok) {
+                    saveSettings(model, fx);
+                } else {
+                    model.credentials_blocked = true;
+                    model.credentials_dirty = true;
+                    model.station_status = "Couldn't save the station password securely. Unlock the system keyring and restart. Settings were kept.";
+                }
+            }
+        },
+        .tick_auth_recheck => |t| {
+            if (t.outcome != .fired) return;
+            const reconnecting = model.transport == .playing and model.auth_gate == .ok and
+                (model.privacy_private or model.privacy_listener_auth) and
+                model.station_pw.len > 0 and (model.stream_failed or model.buffering);
+            if (!reconnecting) {
+                model.auth_recheck.reconnect_since = null;
+                fx.cancelTimer(keys.auth_recheck_timer);
                 return;
             }
-            model.auth_status = if (r.outcome != .ok)
-                "Couldn't reach the station."
-            else if (r.status == 429)
-                "Too many attempts — wait a few minutes and try again."
-            else
-                "That password was not accepted.";
+            if (!model.auth_recheck_inflight and model.auth_recheck.due(native_sdk.monotonicMs(), true)) {
+                var b: [256]u8 = undefined;
+                const url = api.stationAuth(&b, model.base) catch return;
+                var w = std.Io.Writer.fixed(&model.auth_recheck_body_buf);
+                std.json.Stringify.value(.{ .password = model.station_pw }, .{}, &w) catch return;
+                model.auth_recheck_inflight = true;
+                fx.fetch(.{ .key = keys.post_auth_recheck, .url = url, .method = .POST,
+                    .headers = &.{.{ .name = "content-type", .value = "application/json" }},
+                    .body = w.buffered(), .timeout_ms = 10_000, .on_response = Effects.responseMsg(.got_auth_recheck) });
+            }
+        },
+        .got_auth_recheck => |r| {
+            if (!model.auth_recheck_inflight) return;
+            model.auth_recheck_inflight = false;
+            if (model.auth_gate != .ok or model.transport != .playing or
+                !(model.stream_failed or model.buffering)) return;
+            if (r.outcome == .ok and r.status == 401) {
+                model.station_pw = "";
+                saveSettings(model, fx);
+                lockStation(model, fx);
+            }
         },
 
         // ---------------------------------------------------------- stations
@@ -3487,38 +3748,43 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.station_status = "";
         },
         .tune_station => {
-            const raw = model.station_buffer.text();
-            if (api.normalizeBase(&model.base_buf, raw)) |b| {
-                model.base = b;
-                model.station_buffer.clear();
-                model.station_status = "";
-                setStr(&model.station_name_buf, &model.station_name, model.base_display());
-                pushRecent(model, model.station_name, model.base);
-                model.sidebar_open = false;
-                retune(model, fx);
-            } else |_| {
-                model.station_status = "not a valid address";
-            }
+            model.ob_from_sidebar = true;
+            obStart(model, fx, model.station_buffer.text(), "");
         },
         .pick_recent, .pick_discover => |url| {
-            if (api.normalizeBase(&model.base_buf, url)) |b| {
-                model.base = b;
-                // Resolve the display name from whichever list carried it.
-                var name: []const u8 = model.base_display();
+            var base_buf: [256]u8 = undefined;
+            if (api.normalizeBase(&base_buf, url)) |normalized| {
+                // Resolve the display name before any MRU buffers move.
+                var name: []const u8 = normalized;
                 for (model.recents[0..model.recents_count]) |rec| {
-                    if (std.mem.eql(u8, rec.url, b)) name = rec.name;
+                    if (std.mem.eql(u8, rec.url, normalized)) name = rec.name;
                 }
                 for (model.discover_rows[0..model.discover_count]) |d| {
                     if (std.mem.eql(u8, d.url, url)) name = d.name;
                 }
+                if (station_access.needsHttpConsent(normalized)) {
+                    model.ob_from_sidebar = model.phase == .player;
+                    obStart(model, fx, normalized, name);
+                    return;
+                }
+                rememberStationSettings(model);
                 setStr(&model.station_name_buf, &model.station_name, name);
+                setStr(&model.base_buf, &model.base, normalized);
                 pushRecent(model, model.station_name, model.base);
                 model.sidebar_open = false;
                 retune(model, fx);
             } else |_| {}
         },
         .forget_recent => |url| {
-            if (forgetRecent(model, url)) saveSettings(model, fx);
+            var buf: [256]u8 = undefined;
+            const base = api.normalizeBase(&buf, url) catch return;
+            if (forgetRecent(model, base)) {
+                model.credentials_dirty = model.station_memory.forget(base) or model.credentials_dirty;
+                // Forgetting the active recent keeps its live session, but
+                // subsequent unrelated saves must not recreate its secrets.
+                if (std.mem.eql(u8, base, model.base)) model.keep_station_memory = false;
+                saveSettings(model, fx);
+            }
         },
         .press_like => {
             // Guarded so the L key (and a stale heart) is a no-op when there
@@ -3656,13 +3922,11 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .ob_run_check => {
             const raw = std.mem.trim(u8, model.station_buffer.text(), " \t\r\n");
             if (raw.len == 0) return;
-            var buf: [200]u8 = undefined;
-            const has_scheme = std.mem.startsWith(u8, raw, "http://") or std.mem.startsWith(u8, raw, "https://");
-            const url = if (has_scheme)
-                raw
-            else
-                std.fmt.bufPrint(&buf, "{s}{s}", .{ model.ob_scheme(), raw }) catch return;
-            obStart(model, fx, std.mem.trimEnd(u8, url, "/"), "");
+            var buf: [256]u8 = undefined;
+            const url = if (!station_access.hasScheme(raw) and !model.ob_https)
+                std.fmt.bufPrint(&buf, "http://{s}", .{raw}) catch return
+            else raw;
+            obStart(model, fx, url, "");
         },
         .ob_pick_known => |url| {
             // Resolve name from known/discover rows.
@@ -3682,13 +3946,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 // Step 1 done; step 2 is the real gate — probe /health.
                 model.ob_steps[0] = .ok;
                 model.ob_steps[1] = .run;
-                var b: [256]u8 = undefined;
-                if (api.health(&b, model.ob_target_url)) |u| {
-                    fx.fetch(.{ .key = keys.fetch_ob_health, .url = u, .timeout_ms = 8000, .on_response = Effects.responseMsg(.got_ob_health) });
-                } else |_| {
-                    model.ob_steps[1] = .fail;
-                    setStr(&model.ob_diag_buf, &model.ob_diag, "That address doesn't look right.");
-                }
+                fetchObHealth(model, fx, keys.fetch_ob_health);
             } else if (model.ob_steps[2] == .run) {
                 // Step 3 is cosmetic (controller answered → mount assumed up);
                 // step 4 resolves the station identity, best-effort.
@@ -3704,28 +3962,40 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             }
         },
         .got_ob_health => |r| {
-            if (!model.ob_checking) return;
-            if (r.outcome == .ok and r.status < 400) {
+            if (!model.ob_checking or model.ob_steps[1] != .run) return;
+            const expected_key = if (model.ob_tried_https and !std.mem.startsWith(u8, model.ob_target_url, "https://")) keys.fetch_ob_fallback else keys.fetch_ob_health;
+            if (r.key != expected_key) return;
+            const healthy = blk: {
+                if (r.outcome != .ok or r.status != 200 or r.truncated) break :blk false;
+                const parsed = json.parse(json.Health, std.heap.page_allocator, r.body) catch break :blk false;
+                defer parsed.deinit();
+                break :blk std.mem.eql(u8, parsed.value.status orelse "", "on-air");
+            };
+            if (healthy) {
                 model.ob_steps[1] = .ok;
                 model.ob_steps[2] = .run;
+                model.ob_insecure = station_access.needsHttpConsent(model.ob_target_url);
                 fx.startTimer(.{ .key = keys.ob_step_timer, .interval_ms = 400, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick_ob_step) });
+            } else if (model.ob_allow_fallback and !(r.outcome == .ok and (r.status == 401 or r.status == 407))) {
+                // A login challenge must never be retried in cleartext.
+                model.ob_allow_fallback = false;
+                var buf: [256]u8 = undefined;
+                const url = std.fmt.bufPrint(&buf, "http://{s}", .{model.ob_target_url[8..]}) catch return;
+                if (std.mem.eql(u8, model.ob_target_name, model.ob_target_url))
+                    setStr(&model.ob_target_name_buf, &model.ob_target_name, url);
+                setStr(&model.ob_target_url_buf, &model.ob_target_url, url);
+                fetchObHealth(model, fx, keys.fetch_ob_fallback);
             } else {
                 model.ob_steps[1] = .fail;
-                // Named `note`, not `diag`: that name now belongs to the
-                // top-level src/diag.zig import (breadcrumb logging), and
-                // Zig disallows a local shadowing a file-scope declaration.
-                const note: []const u8 = switch (r.outcome) {
-                    .ok => "The address answered, but not like a SUB/WAVE station — is /api routed to the controller?",
-                    .timed_out => "No answer — the station didn't respond in time.",
-                    .connect_failed => "Couldn't open a connection — check the address is right and the station is reachable from this network.",
-                    .tls_failed => "Secure connection failed — try the http:// prefix if the station has no certificate.",
-                    else => "Couldn't reach the station.",
-                };
-                setStr(&model.ob_diag_buf, &model.ob_diag, note);
+                var note_buf: [768]u8 = undefined;
+                setStr(&model.ob_diag_buf, &model.ob_diag, station_access.diagnostic(&note_buf, @tagName(r.outcome), r.status, model.ob_tried_https));
+                // SDK 0.10.1 exposes only the closed outcome and HTTP status,
+                // not the underlying host error. Show all available detail.
+                model.ob_raw = std.fmt.bufPrint(&model.ob_raw_buf, "{s} (HTTP {d})", .{ @tagName(r.outcome), r.status }) catch "";
             }
         },
         .got_ob_dj => |r| {
-            if (!model.ob_checking) return;
+            if (!model.ob_checking or model.ob_steps[3] != .run) return;
             // Best-effort: any response completes the check.
             model.ob_steps[3] = .ok;
             model.ob_done = true;
@@ -3743,25 +4013,25 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.ob_checking = false;
             model.ob_done = false;
             model.ob_diag = "";
+            model.ob_raw = "";
+            model.ob_insecure = false;
+            if (model.ob_from_sidebar) {
+                model.phase = .player;
+                model.ob_from_sidebar = false;
+            }
             model.ob_steps = [_]StepState{.wait} ** 4;
             fx.cancel(keys.fetch_ob_health);
+            fx.cancel(keys.fetch_ob_fallback);
             fx.cancel(keys.fetch_ob_dj);
             fx.cancelTimer(keys.ob_step_timer);
         },
         .ob_tune_in => {
-            if (!model.ob_done) return;
-            if (api.normalizeBase(&model.base_buf, model.ob_target_url)) |b| {
-                model.base = b;
-                setStr(&model.station_name_buf, &model.station_name, model.ob_target_name);
-                pushRecent(model, model.station_name, model.base);
-                model.station_buffer.clear();
-                model.phase = .player;
-                diag.print("phase player (onboarding complete)", .{});
-                model.ob_checking = false;
-                model.day_sel = model.stationDay();
-                startPlayerTimers(fx);
-                retune(model, fx);
-            } else |_| {}
+            if (!model.ob_done or model.ob_insecure) return;
+            finishOnboarding(model, fx);
+        },
+        .ob_continue_http => {
+            if (!model.ob_done or !model.ob_insecure) return;
+            finishOnboarding(model, fx);
         },
     }
     syncSecondTimer(model, fx);
@@ -4017,7 +4287,7 @@ test "tune_station reports an invalid address instead of failing silently" {
     var m: Model = .{};
     // Empty buffer → normalizeBase errors → visible feedback, base unchanged.
     update(&m, .tune_station, &fx);
-    try testing.expectEqualStrings("not a valid address", m.station_status);
+    try testing.expect(std.mem.indexOf(u8, m.station_status, "HTTP or HTTPS") != null);
     try testing.expectEqualStrings(api.default_base, m.base);
     // Editing the field clears the error as the listener fixes it.
     update(&m, .{ .station_edit = .{ .insert_text = "x" } }, &fx);
@@ -4234,7 +4504,7 @@ test "onboarding walks entry → check → done and tunes in" {
     try testing.expectEqual(StepState.ok, m.ob_steps[0]);
     try testing.expectEqual(StepState.run, m.ob_steps[1]);
     // Health ok → step 3 runs on the next step-timer fire.
-    update(&m, .{ .got_ob_health = .{ .key = keys.fetch_ob_health, .outcome = .ok, .status = 200 } }, &fx);
+    update(&m, .{ .got_ob_health = .{ .key = keys.fetch_ob_health, .outcome = .ok, .status = 200, .body = "{\"status\":\"on-air\"}" } }, &fx);
     try testing.expectEqual(StepState.ok, m.ob_steps[1]);
     update(&m, .{ .tick_ob_step = .{ .key = keys.ob_step_timer, .outcome = .fired, .timestamp_ns = 0 } }, &fx);
     try testing.expectEqual(StepState.run, m.ob_steps[3]);
@@ -4463,7 +4733,7 @@ test "private station: a rotated stored password re-prompts silently, a typed on
     try testing.expectEqual(AuthGate.idle, m.auth_gate);
 }
 
-test "private station: switching stations forgets the password" {
+test "private station: switching stations never sends the old station's password" {
     var fx = Effects.init(testing.allocator);
     defer fx.deinit();
     fx.executor = .fake;
@@ -4480,6 +4750,355 @@ test "private station: switching stations forgets the password" {
     // The new station's stream URL carries no stale ?auth= token.
     try testing.expect(std.mem.startsWith(u8, &m.stream_url_buf, "https://other.example/stream.mp3"));
     try testing.expect(!std.mem.startsWith(u8, &m.stream_url_buf, "https://other.example/stream.mp3?"));
+}
+
+test "station preferences migrate to normalized bases and newer map entries win" {
+    var m: Model = .{};
+    applySettingsJson(&m,
+        \\{"station":"HTTPS://Radio.Example:443/","streamFormat":"opus","stationPassword":"legacy","recents":[{"url":"https://Second.Example/"}],"stationSettings":{"https://radio.example":{"streamFormat":"flac","stationPassword":"newer"},"https://second.example":{"streamFormat":"aac"},"https://unretained.example":{"stationPassword":"discard"}}}
+    );
+    try testing.expectEqualStrings("https://radio.example", m.base);
+    try testing.expectEqual(StreamFormat.flac, m.format_pref);
+    try testing.expectEqualStrings("newer", m.station_pw);
+    try testing.expectEqual(@as(usize, 2), m.station_memory.count);
+    try testing.expectEqual(StreamFormat.aac, m.station_memory.get("https://second.example").?.format);
+}
+
+test "station switch restores format and silently revalidates that station's password" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    applySettingsJson(&m, "{\"station\":\"https://first.example\",\"streamFormat\":\"opus\",\"stationPassword\":\"first-secret\"}");
+    pushRecent(&m, "First", m.base);
+    update(&m, .{ .pick_recent = "https://second.example" }, &fx);
+    try testing.expectEqualStrings("", m.station_pw);
+    m.format_pref = .flac;
+    setStr(&m.station_pw_buf, &m.station_pw, "second-secret");
+    update(&m, .{ .pick_recent = "https://first.example/" }, &fx);
+    try testing.expectEqual(StreamFormat.opus, m.format_pref);
+    try testing.expectEqualStrings("first-secret", m.station_pw);
+    update(&m, .{ .got_state = .{ .key = keys.fetch_state, .status = 200, .body = "{\"privacy\":{\"listenerAuth\":true}}" } }, &fx);
+    try testing.expectEqual(AuthGate.checking, m.auth_gate);
+    try testing.expect(m.auth_from_store);
+    try testing.expectEqualStrings("first-secret", m.auth_try);
+    update(&m, .{ .got_station_auth = .{ .key = keys.post_station_auth, .status = 200 } }, &fx);
+    update(&m, .{ .pick_recent = "https://second.example" }, &fx);
+    try testing.expectEqual(StreamFormat.flac, m.format_pref);
+    try testing.expectEqualStrings("second-secret", m.station_pw);
+}
+
+test "forgetting an active recent removes saved preferences without stopping its session" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    applySettingsJson(&m, "{\"station\":\"https://first.example\",\"streamFormat\":\"opus\",\"stationPassword\":\"secret\"}");
+    pushRecent(&m, "First", m.base);
+    update(&m, .{ .forget_recent = "https://first.example/" }, &fx);
+    try testing.expectEqualStrings("secret", m.station_pw);
+    try testing.expectEqual(Transport.playing, m.transport);
+    try testing.expect(m.station_memory.get(m.base) == null);
+    update(&m, .toggle_notify, &fx);
+    try testing.expect(m.station_memory.get(m.base) == null);
+    update(&m, .{ .pick_recent = "https://second.example" }, &fx);
+    update(&m, .{ .pick_recent = "https://first.example" }, &fx);
+    try testing.expectEqual(StreamFormat.mp3, m.format_pref);
+    try testing.expectEqualStrings("", m.station_pw);
+}
+
+test "settings and vault round-trip nine stations at their bounds without leaking passwords" {
+    var m: Model = .{};
+    m.use_secure_credentials = true;
+    var base_buf: [256]u8 = undefined;
+    const long_name = [_]u8{1} ** 48;
+    const secret = [_]u8{'"'} ** 128;
+    for (0..max_recents + 1) |i| {
+        const prefix = try std.fmt.bufPrint(&base_buf, "https://station{d}.example/", .{i});
+        @memset(base_buf[prefix.len..station_access.max_base_bytes], 'a');
+        const base = base_buf[0..station_access.max_base_bytes];
+        _ = try m.station_memory.put(base, .opus, &secret);
+        if (i < max_recents) pushRecent(&m, &long_name, base) else setStr(&m.base_buf, &m.base, base);
+    }
+    const bytes = try settingsSnapshot(&m);
+    try testing.expect(bytes.len <= station_access.settings_bytes);
+    try testing.expect(std.mem.indexOf(u8, bytes, "stationPassword") == null);
+    var vault_buf: [station_access.vault_bytes]u8 = undefined;
+    const vault = try m.station_memory.vaultSnapshot(&vault_buf);
+    try testing.expect(vault.len <= native_sdk.platform.max_credential_secret_bytes);
+    var restored: Model = .{};
+    applySettingsJson(&restored, bytes);
+    try restored.station_memory.mergeVault(vault, testing.allocator);
+    restoreStationSettings(&restored);
+    try testing.expectEqual(@as(usize, 9), restored.station_memory.count);
+    try testing.expectEqual(StreamFormat.opus, restored.format_pref);
+    try testing.expectEqualStrings(&secret, restored.station_pw);
+}
+
+test "vault migration commits secrets before scrubbing settings and preserves legacy on failure" {
+    const services: native_sdk.platform.PlatformServices = .{};
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    fx.bindCredentialsStore(.{ .services = &services, .service = "dev.subwave.test", .permitted = true });
+    var m: Model = .{};
+    m.use_secure_credentials = true;
+    m.settings_path = "/tmp/station-access-test-settings.json";
+    applySettingsJson(&m, "{\"stationPassword\":\"migration-secret\",\"streamFormat\":\"opus\"}");
+    m.credentials_ready = false;
+    update(&m, .{ .got_station_credentials = .{ .key = keys.station_credentials, .operation = .get, .outcome = .miss } }, &fx);
+    try testing.expect(m.credentials_saving);
+    try testing.expectEqual(@as(usize, 0), fx.pendingFileCount());
+    const request = fx.pendingHostAt(0).?;
+    try testing.expectEqualStrings("core.credentials.set", request.name);
+    fx.cancel(keys.station_credentials);
+    update(&m, .{ .got_station_credentials = .{ .key = keys.station_credentials, .operation = .set, .outcome = .ok } }, &fx);
+    try testing.expectEqual(@as(usize, 1), fx.pendingFileCount());
+    try testing.expect(std.mem.indexOf(u8, fx.pendingFileAt(0).?.bytes, "migration-secret") == null);
+    try testing.expect(std.mem.indexOf(u8, fx.pendingFileAt(0).?.bytes, "stationPassword") == null);
+
+    var failed: Model = .{};
+    failed.use_secure_credentials = true;
+    failed.settings_path = m.settings_path;
+    applySettingsJson(&failed, "{\"stationPassword\":\"retain-secret\"}");
+    failed.credentials_ready = false;
+    const before = fx.pendingFileCount();
+    update(&failed, .{ .got_station_credentials = .{ .key = keys.station_credentials, .operation = .get, .outcome = .locked } }, &fx);
+    update(&failed, .toggle_notify, &fx);
+    try testing.expect(failed.credentials_blocked);
+    try testing.expectEqualStrings("retain-secret", failed.station_pw);
+    try testing.expectEqual(before, fx.pendingFileCount());
+}
+
+test "Linux fallback avoids the crashing SDK credential calls and round-trips station passwords" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.use_secure_credentials = false;
+    m.settings_path = "/tmp/station-access-test-settings.json";
+    applySettingsJson(&m, "{\"stationPassword\":\"linux-session-secret\",\"streamFormat\":\"opus\"}");
+    boot(&m, &fx);
+    try testing.expectEqual(@as(usize, 0), fx.pendingHostCount());
+    const bytes = fx.pendingFileAt(0).?.bytes;
+    var restored: Model = .{};
+    applySettingsJson(&restored, bytes);
+    try testing.expectEqualStrings("linux-session-secret", restored.station_pw);
+    try testing.expectEqual(StreamFormat.opus, restored.format_pref);
+    const parsed = try json.parse(json.Settings, testing.allocator, bytes);
+    defer parsed.deinit();
+    try testing.expect(parsed.value.stationPassword == null);
+    try testing.expectEqualStrings("linux-session-secret", parsed.value.stationSettings.?.map.get(m.base).?.stationPassword.?);
+}
+
+test "plaintext fallback fits the read limit even with maximally escaped passwords and names" {
+    var m: Model = .{};
+    m.use_secure_credentials = false;
+    var base_buf: [256]u8 = undefined;
+    const name = [_]u8{1} ** 48;
+    const password = [_]u8{1} ** 128;
+    for (0..max_recents + 1) |i| {
+        const prefix = try std.fmt.bufPrint(&base_buf, "https://station{d}.example/", .{i});
+        @memset(base_buf[prefix.len..station_access.max_base_bytes], '"');
+        const base = base_buf[0..station_access.max_base_bytes];
+        _ = try m.station_memory.put(base, .opus, &password);
+        if (i < max_recents) pushRecent(&m, &name, base) else setStr(&m.base_buf, &m.base, base);
+    }
+    const bytes = try settingsSnapshot(&m);
+    try testing.expect(bytes.len > 8192);
+    try testing.expect(bytes.len <= station_access.settings_bytes);
+    var restored: Model = .{};
+    applySettingsJson(&restored, bytes);
+    try testing.expectEqual(@as(usize, 9), restored.station_memory.count);
+    try testing.expectEqualStrings(&password, restored.station_pw);
+}
+
+test "MRU eviction prunes both format and password and an override restores only its own station" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    var buf: [64]u8 = undefined;
+    for (0..12) |i| {
+        const url = try std.fmt.bufPrint(&buf, "https://station{d}.example", .{i});
+        update(&m, .{ .pick_recent = url }, &fx);
+        m.format_pref = .opus;
+        setStr(&m.station_pw_buf, &m.station_pw, "its-secret");
+        saveSettings(&m, &fx);
+        try testing.expect(m.station_memory.count <= max_recents + 1);
+    }
+    try testing.expect(m.station_memory.get("https://station0.example") == null);
+    setStr(&m.base_buf, &m.base, "https://override.example");
+    restoreStationSettings(&m);
+    try testing.expectEqualStrings("", m.station_pw);
+    try testing.expectEqual(StreamFormat.mp3, m.format_pref);
+    setStr(&m.base_buf, &m.base, "https://station11.example");
+    restoreStationSettings(&m);
+    try testing.expectEqualStrings("its-secret", m.station_pw);
+    try testing.expectEqual(StreamFormat.opus, m.format_pref);
+}
+
+test "vault saves coalesce later password changes and failures never write plaintext" {
+    const services: native_sdk.platform.PlatformServices = .{};
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    fx.bindCredentialsStore(.{ .services = &services, .service = "dev.subwave.test", .permitted = true });
+    var m: Model = .{};
+    m.use_secure_credentials = true;
+    m.settings_path = "/tmp/station-access-test-settings.json";
+    setStr(&m.station_pw_buf, &m.station_pw, "first-secret");
+    saveSettings(&m, &fx);
+    setStr(&m.station_pw_buf, &m.station_pw, "last-secret");
+    saveSettings(&m, &fx);
+    try testing.expect(m.credentials_dirty);
+    fx.cancel(keys.station_credentials);
+    update(&m, .{ .got_station_credentials = .{ .key = keys.station_credentials, .operation = .set, .outcome = .ok } }, &fx);
+    try testing.expect(m.credentials_saving);
+    try testing.expectEqual(@as(usize, 0), fx.pendingFileCount());
+    fx.cancel(keys.station_credentials);
+    update(&m, .{ .got_station_credentials = .{ .key = keys.station_credentials, .operation = .set, .outcome = .locked } }, &fx);
+    try testing.expect(m.credentials_blocked);
+    try testing.expectEqual(@as(usize, 0), fx.pendingFileCount());
+    try testing.expectEqualStrings("last-secret", m.station_pw);
+}
+
+test "stored-password network failures do not erase credentials" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    applySettingsJson(&m, "{\"stationPassword\":\"keep-secret\"}");
+    m.privacy_private = true;
+    postStationAuth(&m, &fx, m.station_pw, true);
+    update(&m, .{ .got_station_auth = .{ .key = keys.post_station_auth, .outcome = .timed_out } }, &fx);
+    try testing.expectEqualStrings("keep-secret", m.station_pw);
+    try testing.expectEqual(AuthGate.prompt, m.auth_gate);
+}
+
+test "reconnect rotation stops audio, clears only its station secret and ignores unavailable verdicts" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    applySettingsJson(&m, "{\"stationPassword\":\"old-secret\"}");
+    m.privacy_listener_auth = true;
+    m.auth_gate = .ok;
+    m.stream_failed = true;
+    m.auth_recheck_inflight = true;
+    update(&m, .{ .got_auth_recheck = .{ .key = keys.post_auth_recheck, .outcome = .timed_out } }, &fx);
+    try testing.expectEqual(AuthGate.ok, m.auth_gate);
+    try testing.expectEqualStrings("old-secret", m.station_pw);
+    m.auth_recheck_inflight = true;
+    update(&m, .{ .got_auth_recheck = .{ .key = keys.post_auth_recheck, .status = 401 } }, &fx);
+    try testing.expectEqual(AuthGate.prompt, m.auth_gate);
+    try testing.expectEqual(Transport.stopped, m.transport);
+    try testing.expectEqualStrings("", m.station_pw);
+    try testing.expectEqualStrings("", m.station_memory.get(m.base).?.password());
+}
+
+test "reconnect timer posts its saved password only after the threshold and recovery disarms it" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    applySettingsJson(&m, "{\"stationPassword\":\"saved-secret\"}");
+    m.privacy_listener_auth = true;
+    m.auth_gate = .ok;
+    scheduleReconnect(&m, &fx);
+    update(&m, .{ .tick_auth_recheck = .{ .key = keys.auth_recheck_timer, .outcome = .fired, .timestamp_ns = 0 } }, &fx);
+    try testing.expect(!m.auth_recheck_inflight);
+    m.auth_recheck.reconnect_since = native_sdk.monotonicMs() -| 15_000;
+    update(&m, .{ .tick_auth_recheck = .{ .key = keys.auth_recheck_timer, .outcome = .fired, .timestamp_ns = 0 } }, &fx);
+    try testing.expect(m.auth_recheck_inflight);
+    const request = fx.pendingFetchAt(0).?;
+    try testing.expectEqual(keys.post_auth_recheck, request.key);
+    try testing.expectEqualStrings("{\"password\":\"saved-secret\"}", request.body);
+    update(&m, .{ .audio_event = .{ .key = keys.audio, .kind = .position, .buffering = false } }, &fx);
+    update(&m, .{ .got_auth_recheck = .{ .key = keys.post_auth_recheck, .status = 401 } }, &fx);
+    try testing.expectEqual(AuthGate.ok, m.auth_gate);
+    try testing.expect(m.auth_recheck.reconnect_since == null);
+}
+
+test "bare-host checks fall back to HTTP and require explicit public cleartext consent" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.station_buffer.set("radio.example");
+    update(&m, .ob_run_check, &fx);
+    m.ob_steps = .{ .ok, .run, .wait, .wait };
+    update(&m, .{ .got_ob_health = .{ .key = keys.fetch_ob_health, .outcome = .tls_failed } }, &fx);
+    try testing.expectEqualStrings("http://radio.example", m.ob_target_url);
+    update(&m, .{ .got_ob_health = .{ .key = keys.fetch_ob_fallback, .status = 200, .body = "{\"status\":\"on-air\"}" } }, &fx);
+    try testing.expect(m.ob_insecure);
+    m.ob_done = true;
+    update(&m, .ob_tune_in, &fx);
+    try testing.expectEqual(Phase.onboarding, m.phase);
+    update(&m, .ob_continue_http, &fx);
+    try testing.expectEqual(Phase.player, m.phase);
+    try testing.expectEqualStrings("http://radio.example", m.base);
+}
+
+test "sidebar uses the same health check, preserves the player on cancel and exempts LAN HTTP" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.phase = .player;
+    m.format_pref = .opus;
+    m.station_buffer.set("http://BOX.local:7701/");
+    update(&m, .tune_station, &fx);
+    try testing.expectEqual(Phase.onboarding, m.phase);
+    try testing.expectEqualStrings(api.default_base, m.base);
+    update(&m, .ob_back, &fx);
+    try testing.expectEqual(Phase.player, m.phase);
+    try testing.expectEqual(StreamFormat.opus, m.format_pref);
+    update(&m, .tune_station, &fx);
+    m.ob_steps = .{ .ok, .run, .wait, .wait };
+    update(&m, .{ .got_ob_health = .{ .key = keys.fetch_ob_health, .status = 200, .body = "{\"status\":\"on-air\"}" } }, &fx);
+    try testing.expect(!m.ob_insecure);
+    m.ob_done = true;
+    update(&m, .ob_tune_in, &fx);
+    try testing.expectEqualStrings("http://box.local:7701", m.base);
+}
+
+test "login challenges never downgrade, explicit HTTPS never falls back and HTML health fails" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    obStart(&m, &fx, "radio.example", "");
+    m.ob_steps = .{ .ok, .run, .wait, .wait };
+    update(&m, .{ .got_ob_health = .{ .key = keys.fetch_ob_health, .status = 401 } }, &fx);
+    try testing.expectEqual(StepState.fail, m.ob_steps[1]);
+    try testing.expectEqualStrings("https://radio.example", m.ob_target_url);
+    try testing.expect(std.mem.indexOf(u8, m.ob_diag, "not supported") != null);
+    obStart(&m, &fx, "https://radio.example", "");
+    m.ob_steps = .{ .ok, .run, .wait, .wait };
+    update(&m, .{ .got_ob_health = .{ .key = keys.fetch_ob_health, .status = 200, .body = "<html>login</html>" } }, &fx);
+    try testing.expectEqual(StepState.fail, m.ob_steps[1]);
+    try testing.expect(std.mem.indexOf(u8, m.ob_diag, "port 7701") != null);
+    update(&m, .{ .got_ob_health = .{ .key = keys.fetch_ob_health, .outcome = .tls_failed } }, &fx);
+    try testing.expectEqualStrings("https://radio.example", m.ob_target_url);
+}
+
+test "public HTTP recent and directory selections also require consent" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    m.phase = .player;
+    update(&m, .{ .pick_discover = "http://radio.example" }, &fx);
+    try testing.expectEqualStrings(api.default_base, m.base);
+    try testing.expectEqual(Phase.onboarding, m.phase);
+    m.ob_steps = .{ .ok, .run, .wait, .wait };
+    update(&m, .{ .got_ob_health = .{ .key = keys.fetch_ob_health, .status = 200, .body = "{\"status\":\"on-air\"}" } }, &fx);
+    m.ob_done = true;
+    update(&m, .ob_tune_in, &fx);
+    try testing.expectEqualStrings(api.default_base, m.base);
+    update(&m, .ob_continue_http, &fx);
+    try testing.expectEqualStrings("http://radio.example", m.base);
 }
 
 // Configure Discord the way a listener would end up configured: a stored,
@@ -4832,7 +5451,7 @@ test "a stale exit from a superseded helper does not disturb the current one" {
     try testing.expect(m.discord_last_payload.len > 0);
 }
 
-test "switching stations resets the format pick to the floor" {
+test "a new station starts with the format floor after its health check" {
     var fx = Effects.init(testing.allocator);
     defer fx.deinit();
     fx.executor = .fake;
@@ -4842,6 +5461,9 @@ test "switching stations resets the format pick to the floor" {
     m.stream_aac = true;
     m.station_buffer.set("radio.example");
     update(&m, .tune_station, &fx);
+    try testing.expectEqual(StreamFormat.aac, m.format_pref);
+    m.ob_done = true;
+    update(&m, .ob_tune_in, &fx);
     try testing.expectEqual(StreamFormat.mp3, m.format_pref);
     try testing.expect(!m.stream_flags_known);
     try testing.expect(!m.stream_aac);

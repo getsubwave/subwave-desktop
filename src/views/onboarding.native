@@ -40,6 +40,9 @@
             <search-field text="{station_text}" placeholder="radio.yourhost.com" on-input="station_edit" on-submit="ob_run_check" grow="1"/>
           </row>
           <button variant="primary" on-press="ob_run_check">Run health check</button>
+          <if test="{station_status}">
+            <text size="sm" foreground="accent" wrap="true">{station_status}</text>
+          </if>
 
           <use template="section-label" title="OR PICK A KNOWN STATION"/>
           <column gap="0">
@@ -121,6 +124,9 @@
           <if test="{has_ob_diag}">
             <text size="sm" foreground="accent" wrap="true">{ob_diag}</text>
           </if>
+          <if test="{has_ob_raw}">
+            <text size="sm" foreground="text_muted"><span mono="true">{ob_raw}</span></text>
+          </if>
 
           <if test="{ob_done}">
             <card padding="14" border-color="accent">
@@ -132,7 +138,18 @@
                 <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{ob_target_url}</text>
               </column>
             </card>
-            <button variant="primary" on-press="ob_tune_in">Tune in to {ob_target_name}</button>
+            <if test="{ob_insecure}">
+              <card padding="14" border-color="accent">
+                <column gap="5">
+                  <text><span weight="medium">Insecure connection</span></text>
+                  <text size="sm" foreground="text_muted" wrap="true">This station uses plain HTTP. People on the network can see or change the connection, including any station password you enter. Continue only if you trust the station and network.</text>
+                </column>
+              </card>
+              <button variant="primary" on-press="ob_continue_http">Continue over insecure HTTP</button>
+            </if>
+            <else>
+              <button variant="primary" on-press="ob_tune_in">Tune in to {ob_target_name}</button>
+            </else>
           </if>
 
           <row>

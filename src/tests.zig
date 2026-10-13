@@ -15,6 +15,7 @@ comptime {
     _ = @import("diag.zig");
     _ = @import("model.zig");
     _ = @import("stream_format.zig");
+    _ = @import("station_access.zig");
     _ = @import("theme.zig");
     _ = @import("discord_rpc.zig");
     _ = @import("station_time.zig");
@@ -318,6 +319,42 @@ test "onboarding view builds in entry and check phases" {
     model.ob_steps = .{ .ok, .ok, .ok, .ok };
     model.ob_done = true;
     try buildAndLayout(arena3.allocator(), onboarding_markup, &model, 980, 660);
+}
+
+test "station access warnings and diagnostics build at the minimum window size" {
+    var model: Model = .{};
+    model.ob_checking = true;
+    model.ob_steps = .{ .ok, .ok, .ok, .ok };
+    model.ob_done = true;
+    model.ob_insecure = true;
+    model.ob_target_name = "Public station";
+    model.ob_target_url = "http://radio.example";
+    {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        try buildAndLayout(arena.allocator(), onboarding_markup, &model, 880, 560);
+    }
+    model.ob_done = false;
+    model.ob_steps = .{ .ok, .fail, .wait, .wait };
+    model.ob_diag = "The station asked for a login (HTTP 401). HTTP Basic Station login is not supported by this desktop player.";
+    model.ob_raw = "ok (HTTP 401)";
+    {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        try buildAndLayout(arena.allocator(), onboarding_markup, &model, 880, 560);
+    }
+    model.ob_checking = false;
+    model.station_status = "HTTP Basic Station login is not supported by this desktop player.";
+    {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        try buildAndLayout(arena.allocator(), onboarding_markup, &model, 880, 560);
+    }
+    {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        try buildAndLayout(arena.allocator(), player_sidebar_markup, &model, 880, 560);
+    }
 }
 
 test "lock view builds in prompt, error, and checking states" {
