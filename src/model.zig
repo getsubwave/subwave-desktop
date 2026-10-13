@@ -23,6 +23,7 @@ const diag = @import("diag.zig");
 const station_time = @import("station_time.zig");
 const station_schedule = @import("station_schedule.zig");
 const listener_time = @import("listener_time.zig");
+const iso8601 = @import("iso8601.zig");
 pub const StreamFormat = stream_format.StreamFormat;
 
 // Default listening volume on tune-in. (Decode/position/spectrum report
@@ -2872,7 +2873,7 @@ fn decodeBoothTurn(turn: *listener_time.Turn, message: json.SessionMsg) void {
     if (message.t) |stamp| switch (stamp) {
         .string => |value| {
             turn.stamp.set(value);
-            turn.stamp_ms = listener_time.isoMs(value);
+            turn.stamp_ms = iso8601.parseMs(value);
         },
         .integer => |value| turn.stamp_ms = value,
         .float => |value| {
@@ -2882,7 +2883,7 @@ fn decodeBoothTurn(turn: *listener_time.Turn, message: json.SessionMsg) void {
         else => {},
     };
     if (meta.airedAt) |stamp| {
-        if (stamp == .string) turn.aired_at_ms = listener_time.isoMs(stamp.string);
+        if (stamp == .string) turn.aired_at_ms = iso8601.parseMs(stamp.string);
     }
     if (meta.boundary) |boundary| {
         turn.boundary_at.set(boundary.at orelse "");
@@ -2911,7 +2912,7 @@ fn refreshBooth(model: *Model, now_ms: i64) void {
         var body = raw.text.slice();
         var boundary_buf: [240]u8 = undefined;
         if (raw.boundary) {
-            if (listener_time.isoMs(raw.boundary_at.slice())) |at_ms| {
+            if (iso8601.parseMs(raw.boundary_at.slice())) |at_ms| {
                 var clock_buf: [32]u8 = undefined;
                 const at = station_time.clock(&clock_buf, at_ms, model.station_offset_minutes, model.station_locale, false);
                 body = std.fmt.bufPrint(&boundary_buf, "{s} · {s}", .{ at, raw.boundary_name.slice() }) catch body;
@@ -3401,7 +3402,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 .title = current.title orelse "",
                 .artist = current.artist orelse "",
                 .song_id = current.subsonic_id orelse "",
-                .started_at_ms = if (current.startedAt) |stamp| listener_time.isoMs(stamp) else null,
+                .started_at_ms = if (current.startedAt) |stamp| iso8601.parseMs(stamp) else null,
             } else null);
             // The active theme id rides /api/state on the 5 s feed cadence;
             // when the station flips its theme, refresh tokens right away.
@@ -6514,7 +6515,7 @@ test "booth decoding holds speech and displays carried tail and boundary only" {
     m.self_exe_path = "/usr/local/bin/subwave-desktop";
     var stamp_buf: [32]u8 = undefined;
     const stamp = try testIso(&stamp_buf, native_sdk.nowMs());
-    const aired = listener_time.isoMs(stamp).?;
+    const aired = iso8601.parseMs(stamp).?;
     var body_buf: [2048]u8 = undefined;
     const body = try std.fmt.bufPrint(&body_buf, "{{\"messages\":[" ++
         "{{\"t\":123,\"role\":\"segment\",\"text\":\"Goodnight from Bob\",\"meta\":{{\"carried\":true,\"personaName\":\"Bob\",\"ignored\":true}}}}," ++

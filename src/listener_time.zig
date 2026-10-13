@@ -241,53 +241,6 @@ pub fn elapsedMs(now_ms: i64, audible_at_ms: i64, duration_ms: i64) i64 {
 
 // Controller stamps are ISO-8601, with optional fractional seconds and zone
 // offsets. Reject invalid dates rather than parking a hold on a garbage stamp.
-pub fn isoMs(value: []const u8) ?i64 {
-    if (value.len < 20 or value[4] != '-' or value[7] != '-' or value[10] != 'T' or value[13] != ':' or value[16] != ':') return null;
-    const year = digits(value[0..4]) orelse return null;
-    const month = digits(value[5..7]) orelse return null;
-    const day = digits(value[8..10]) orelse return null;
-    const hour = digits(value[11..13]) orelse return null;
-    const minute = digits(value[14..16]) orelse return null;
-    const second = digits(value[17..19]) orelse return null;
-    if (month < 1 or month > 12 or day < 1 or hour > 23 or minute > 59 or second > 59) return null;
-    const leap = @mod(year, 4) == 0 and (@mod(year, 100) != 0 or @mod(year, 400) == 0);
-    const month_days = [_]i64{ 31, if (leap) @as(i64, 29) else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-    if (day > month_days[@intCast(month - 1)]) return null;
-    var at: usize = 19;
-    var fraction: i64 = 0;
-    if (value[at] == '.') {
-        at += 1;
-        const begin = at;
-        while (at < value.len and std.ascii.isDigit(value[at])) : (at += 1) {
-            if (at - begin < 3) fraction = fraction * 10 + value[at] - '0';
-        }
-        if (at == begin) return null;
-        if (at - begin == 1) fraction *= 100;
-        if (at - begin == 2) fraction *= 10;
-    }
-    if (at >= value.len) return null;
-    var offset: i64 = 0;
-    if (value[at] == 'Z' and at + 1 == value.len) {} else if ((value[at] == '+' or value[at] == '-') and at + 6 == value.len and value[at + 3] == ':') {
-        const hours = digits(value[at + 1 .. at + 3]) orelse return null;
-        const minutes = digits(value[at + 4 .. at + 6]) orelse return null;
-        if (hours > 23 or minutes > 59) return null;
-        offset = (hours * 60 + minutes) * 60;
-        if (value[at] == '-') offset = -offset;
-    } else return null;
-    const adjusted_year = year - @as(i64, if (month <= 2) 1 else 0);
-    const era = @divFloor(adjusted_year, 400);
-    const yoe = adjusted_year - era * 400;
-    const shifted_month = month + @as(i64, if (month > 2) -3 else 9);
-    const doy = @divTrunc(153 * shifted_month + 2, 5) + day - 1;
-    const days = era * 146097 + yoe * 365 + @divTrunc(yoe, 4) - @divTrunc(yoe, 100) + doy - 719468;
-    return (days * 86400 + hour * 3600 + minute * 60 + second - offset) * 1000 + fraction;
-}
-
-fn digits(value: []const u8) ?i64 {
-    for (value) |ch| if (!std.ascii.isDigit(ch)) return null;
-    return std.fmt.parseInt(i64, value, 10) catch null;
-}
-
 pub const TurnClass = enum { voice, dj, track, system };
 
 pub fn turnClass(role: []const u8) TurnClass {
@@ -484,16 +437,6 @@ test "elapsed clamps at both bounds with saturated timestamp arithmetic" {
     try testing.expectEqual(@as(i64, 137_000), elapsedMs(400_000, 122_000, 137_000));
     try testing.expectEqual(@as(i64, 0), elapsedMs(0, std.math.maxInt(i64), 0));
     try testing.expectEqual(std.math.maxInt(i64), elapsedMs(std.math.maxInt(i64), std.math.minInt(i64), 0));
-}
-
-test "ISO timestamps accept fractions offsets and leap days and reject junk" {
-    try testing.expectEqual(@as(?i64, 0), isoMs("1970-01-01T00:00:00Z"));
-    try testing.expectEqual(@as(?i64, 123), isoMs("1970-01-01T01:00:00.123+01:00"));
-    try testing.expectEqual(@as(?i64, 120), isoMs("1970-01-01T00:00:00.12Z"));
-    try testing.expectEqual(isoMs("2026-10-09T12:00:00Z"), isoMs("2026-10-09T07:00:00-05:00"));
-    try testing.expect(isoMs("2024-02-29T12:00:00Z") != null);
-    inline for (.{ "junk", "2026-02-29T12:00:00Z", "2026-13-01T00:00:00Z", "2026-01-01T24:00:00Z", "2026-01-01T00:00:00.Z" }) |bad|
-        try testing.expect(isoMs(bad) == null);
 }
 
 test "booth lines release at aired plus buffer and future holds fail open" {
