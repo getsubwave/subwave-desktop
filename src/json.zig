@@ -30,12 +30,15 @@ pub const Dj = struct {
 };
 
 pub const Persona = struct {
+    id: ?[]const u8 = null,
     name: ?[]const u8 = null,
+    avatar: ?[]const u8 = null,
 };
 
 pub const ActiveShow = struct {
     name: ?[]const u8 = null,
     persona: ?Persona = null,
+    guests: ?[]Persona = null,
 };
 
 // listeners is an object {current, peak}, not a scalar.
@@ -52,11 +55,16 @@ pub const TimeCtx = struct {
 pub const WeatherCtx = struct {
     condition: ?[]const u8 = null,
     temp: ?f64 = null,
+    location: ?[]const u8 = null,
 };
+pub const ClockCtx = struct { hhmm: ?[]const u8 = null };
+pub const DateCtx = struct { dayOfWeek: ?i64 = null, iso: ?[]const u8 = null };
 pub const Context = struct {
     time: ?TimeCtx = null,
     weather: ?WeatherCtx = null,
     dominantMood: ?[]const u8 = null,
+    clock: ?ClockCtx = null,
+    date: ?DateCtx = null,
 };
 
 // The station's stream description on /now-playing: which extra mounts it
@@ -73,6 +81,8 @@ pub const StreamInfo = struct {
 };
 
 pub const NowPlaying = struct {
+    timezone: ?[]const u8 = null,
+    locale: ?[]const u8 = null,
     nowPlaying: ?Track = null,
     context: ?Context = null,
     dj: ?Dj = null,
@@ -93,6 +103,8 @@ pub const QueueEntry = struct {
     artist: ?[]const u8 = null,
     requestedBy: ?[]const u8 = null,
     t: ?[]const u8 = null, // ISO timestamp on history entries
+    startedAt: ?[]const u8 = null,
+    queuedAt: ?[]const u8 = null,
 };
 
 // Private-station flags riding /api/state — booleans only, never the
@@ -187,16 +199,20 @@ pub const Session = struct {
     messages: ?[]SessionMsg = null,
 };
 
-// /api/schedule (the show catalogue + personas; the 7x24 grid is ignored here)
+// /api/schedule (the weekly grid, shows and public persona roster)
 pub const SchedPersona = struct {
     id: ?[]const u8 = null,
     name: ?[]const u8 = null,
+    tagline: ?[]const u8 = null,
+    soul: ?[]const u8 = null,
+    avatar: ?[]const u8 = null,
 };
 pub const SchedShow = struct {
     id: ?[]const u8 = null,
     name: ?[]const u8 = null,
     topic: ?[]const u8 = null,
     personaId: ?[]const u8 = null,
+    guestPersonaIds: ?[][]const u8 = null,
 };
 // The 7x24 grid: JSON object keyed "0".."6" (Sun..Sat), each a 24-slot array
 // of showId|null. @"N" field names match the numeric-string keys verbatim.
@@ -224,6 +240,9 @@ pub const SchedGrid = struct {
 };
 
 pub const SchedulePayload = struct {
+    timezone: ?[]const u8 = null,
+    locale: ?[]const u8 = null,
+    soulsPublished: ?bool = null,
     personas: ?[]SchedPersona = null,
     shows: ?[]SchedShow = null,
     schedule: ?SchedGrid = null,

@@ -82,6 +82,11 @@ pub fn coverUrl(buf: []u8, base: []const u8, id: []const u8) ![]const u8 {
     const b = std.mem.trimEnd(u8, base, "/");
     return std.fmt.bufPrint(buf, "{s}/api/cover/{s}", .{ b, id });
 }
+pub fn personaAvatarUrl(buf: []u8, base: []const u8, path: []const u8) ![]const u8 {
+    if (std.mem.startsWith(u8, path, "/api/persona-avatar/")) return build(buf, base, path);
+    if (!std.mem.startsWith(u8, path, "/persona-avatar/")) return error.InvalidAvatarPath;
+    return std.fmt.bufPrint(buf, "{s}/api{s}", .{ std.mem.trimEnd(u8, base, "/"), path });
+}
 pub fn requestStatus(buf: []u8, base: []const u8, id: []const u8) ![]const u8 {
     const b = std.mem.trimEnd(u8, base, "/");
     return std.fmt.bufPrint(buf, "{s}/api/request/{s}", .{ b, id });
@@ -112,6 +117,9 @@ test "url builders join base and path" {
     try testing.expectEqualStrings("https://x.test/stream.mp3", try streamUrl(&buf, "https://x.test/"));
     try testing.expectEqualStrings("https://x.test/stream.opus", try streamMount(&buf, "https://x.test/", "/stream.opus"));
     try testing.expectEqualStrings("https://x.test/api/cover/ab12", try coverUrl(&buf, "https://x.test", "ab12"));
+    try testing.expectEqualStrings("https://x.test/api/persona-avatar/p1", try personaAvatarUrl(&buf, "https://x.test/", "/persona-avatar/p1"));
+    try testing.expectEqualStrings("https://x.test/api/persona-avatar/p1", try personaAvatarUrl(&buf, "https://x.test", "/api/persona-avatar/p1"));
+    try testing.expectError(error.InvalidAvatarPath, personaAvatarUrl(&buf, "https://x.test", "https://other.test/p1"));
     try testing.expectEqualStrings("https://x.test/api/like", try like(&buf, "https://x.test/"));
     try testing.expectEqualStrings("https://x.test/api/station-auth", try stationAuth(&buf, "https://x.test/"));
 }

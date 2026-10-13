@@ -25,6 +25,13 @@
 
             <!-- SHOWS -->
             <if test="{tab_shows}">
+              <column gap="4">
+                <text size="sm" foreground="text_muted">STATION TIME</text>
+                <text size="heading"><span mono="true">{stationClock}</span></text>
+                <if test="{has_timezone}">
+                  <text size="sm" foreground="text_muted">{timezone}</text>
+                </if>
+              </column>
               <if test="{has_station_loc}">
                 <row main="space_between" cross="center">
                   <text size="sm" foreground="text_muted">LOCATION</text>
@@ -33,42 +40,85 @@
               </if>
               <if test="{has_show}">
                 <card padding="12" border-color="accent">
-                  <column gap="3">
+                  <column gap="6">
                     <text size="sm" foreground="accent">ON NOW</text>
                     <text><span weight="medium">{show}</span></text>
-                    <if test="{has_host}">
-                      <text size="sm" foreground="text_muted">with {host}</text>
-                    </if>
+                    <for each="now_show_list" as="n">
+                      <if test="{has_host}">
+                        <row gap="8" cross="center">
+                          <avatar image="{n.avatar_id}" width="28" height="28" label="{host}">{n.initials}</avatar>
+                          <text size="sm" foreground="text_muted">with {host}</text>
+                        </row>
+                      </if>
+                      <if test="{n.has_guests}">
+                        <text size="sm" foreground="text_muted" wrap="true">GUESTS · {n.guests}</text>
+                      </if>
+                      <if test="{n.has_tagline}">
+                        <text size="sm" foreground="text_muted" wrap="true">{n.tagline}</text>
+                      </if>
+                      <if test="{n.has_soul}">
+                        <button variant="ghost" size="sm" on-press="toggle_now_host" label="About the on-air host">{n.host_action} {host}</button>
+                        <if test="{n.host_open}">
+                          <text size="sm" foreground="text_muted" wrap="true">{n.soul}</text>
+                        </if>
+                      </if>
+                      <if test="{n.has_topic}">
+                        <text size="sm" foreground="text_muted" wrap="true">{n.topic}</text>
+                        <if test="{n.topic_long}">
+                          <button variant="ghost" size="sm" on-press="toggle_now_topic" label="Expand or collapse on-air description">{n.topic_action}</button>
+                        </if>
+                      </if>
+                    </for>
                   </column>
                 </card>
               </if>
               <toggle-group gap="4" label="Day">
                 <for each="day_tabs" as="d">
-                  <toggle-button size="sm" selected="{d.idx == day_sel}" on-toggle="pick_day:{d.idx}">{d.label}</toggle-button>
+                  <toggle-button size="sm" selected="{d.idx == selectedDay}" on-toggle="pick_day:{d.idx}">{d.label}</toggle-button>
                 </for>
               </toggle-group>
               <column gap="0">
                 <for each="day_slots" as="slot">
-                  <row gap="12" cross="center" padding="8">
-                    <text size="sm" foreground="text_muted" width="96" wrap="false" overflow="clip">{slot.range}</text>
-                    <if test="{slot.has_host}">
-                      <avatar width="28" height="28" label="{slot.persona}">{slot.initials}</avatar>
-                    </if>
-                    <column gap="1" grow="1">
-                      <if test="{slot.autopilot}">
-                        <text foreground="text_muted">Autopilot</text>
-                      </if>
-                      <else>
-                        <text wrap="false" overflow="ellipsis">{slot.show_name}</text>
-                      </else>
+                  <column gap="4" padding="8">
+                    <row gap="8" cross="center">
+                      <text size="sm" foreground="text_muted" width="96" wrap="false" overflow="clip">{slot.range}</text>
                       <if test="{slot.has_host}">
-                        <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{slot.persona}</text>
+                        <avatar image="{slot.avatar_id}" width="28" height="28" label="{slot.persona}">{slot.initials}</avatar>
                       </if>
-                    </column>
-                    <if test="{slot.on_air}">
-                      <text size="sm" foreground="accent">NOW</text>
+                      <column gap="1" grow="1">
+                        <if test="{slot.autopilot}">
+                          <text foreground="text_muted">Autopilot</text>
+                        </if>
+                        <else>
+                          <text wrap="false" overflow="ellipsis">{slot.show_name}</text>
+                        </else>
+                        <if test="{slot.has_host}">
+                          <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{slot.persona}</text>
+                        </if>
+                      </column>
+                      <if test="{slot.on_air}">
+                        <text size="sm" foreground="accent">NOW</text>
+                      </if>
+                    </row>
+                    <if test="{slot.has_guests}">
+                      <text size="sm" foreground="text_muted" wrap="true">GUESTS · {slot.guests}</text>
                     </if>
-                  </row>
+                    <if test="{slot.has_tagline}">
+                      <text size="sm" foreground="text_muted" wrap="true">{slot.tagline}</text>
+                    </if>
+                    <if test="{slot.has_soul}">
+                      <button variant="ghost" size="sm" on-press="toggle_slot_host:{slot.hour}" label="About this host">{slot.host_action} {slot.persona}</button>
+                      <if test="{slot.host_open}">
+                        <text size="sm" foreground="text_muted" wrap="true">{slot.soul}</text>
+                      </if>
+                    </if>
+                    <if test="{slot.has_topic}">
+                      <text size="sm" foreground="text_muted" wrap="true">{slot.topic}</text>
+                      <if test="{slot.topic_long}">
+                        <button variant="ghost" size="sm" on-press="toggle_slot_topic:{slot.hour}" label="Expand or collapse show description">{slot.topic_action}</button>
+                      </if>
+                    </if>
+                  </column>
                   <separator/>
                 </for>
                 <else>
@@ -106,7 +156,10 @@
                       <text wrap="false" overflow="ellipsis">{t.title}</text>
                       <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{t.artist}</text>
                     </column>
-                    <text size="sm" foreground="text_muted" wrap="false" overflow="clip">{t.hhmm}</text>
+                    <column gap="1" cross="end">
+                      <text size="sm" foreground="text_muted" wrap="false">{t.hhmm}</text>
+                      <text size="sm" foreground="text_muted" wrap="false">{t.ago}</text>
+                    </column>
                   </row>
                   <separator/>
                 </for>
@@ -127,7 +180,7 @@
                 <for each="booth_list" as="t">
                   <column gap="4" padding="8">
                     <row gap="8" cross="center">
-                      <text size="sm" foreground="text_muted" width="44" wrap="false" overflow="clip">{t.hhmm}</text>
+                      <text size="sm" foreground="text_muted" wrap="false">{t.station_stamp}</text>
                       <if test="{t.is_voice}">
                         <badge background="accent" foreground="accent_text">{t.kind}</badge>
                       </if>
