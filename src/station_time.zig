@@ -39,8 +39,13 @@ pub fn clock(buf: []u8, wall_ms: i64, offset_minutes: i64, display_locale: Local
     const h: u64 = @intCast(if (display_locale == .en_us) (if (@mod(p.hour, 12) == 0) @as(i64, 12) else @mod(p.hour, 12)) else p.hour);
     const minute: u64 = @intCast(p.minute);
     const second: u64 = @intCast(p.second);
-    const suffix: []const u8 = if (display_locale == .en_us) (if (p.hour < 12) " am" else " pm") else "";
-    if (seconds) return std.fmt.bufPrint(buf, "{d:0>2}:{d:0>2}:{d:0>2}{s}", .{ h, minute, second, suffix }) catch "";
+    const suffix: []const u8 = if (display_locale == .en_us) (if (p.hour < 12) " AM" else " PM") else "";
+    // Mirrors mobile's Intl output: a full en-US stamp prints a bare hour
+    // ("5:46:40 PM"), a minute clock a two-digit one ("05:46 PM").
+    if (seconds) {
+        if (display_locale == .en_us) return std.fmt.bufPrint(buf, "{d}:{d:0>2}:{d:0>2}{s}", .{ h, minute, second, suffix }) catch "";
+        return std.fmt.bufPrint(buf, "{d:0>2}:{d:0>2}:{d:0>2}", .{ h, minute, second }) catch "";
+    }
     return std.fmt.bufPrint(buf, "{d:0>2}:{d:0>2}{s}", .{ h, minute, suffix }) catch "";
 }
 
@@ -167,8 +172,8 @@ test "station clocks, locale and ranges" {
     try testing.expectEqual(Locale.en_gb, locale("fr-FR"));
     try testing.expectEqual(Locale.en_gb, locale(null));
     try testing.expectEqualStrings("00:00", clock(&buf, 0, 0, .en_gb, false));
-    try testing.expectEqualStrings("12:00 am", clock(&buf, 0, 0, .en_us, false));
-    try testing.expectEqualStrings("12:00:01 pm", clock(&buf, 43201_000, 0, .en_us, true));
+    try testing.expectEqualStrings("12:00 AM", clock(&buf, 0, 0, .en_us, false));
+    try testing.expectEqualStrings("12:00:01 PM", clock(&buf, 43201_000, 0, .en_us, true));
     try testing.expectEqualStrings("05:45:00", clock(&buf, 0, 345, .en_gb, true));
     try testing.expectEqualStrings("18:30:00", clock(&buf, 0, -330, .en_gb, true));
     try testing.expectEqualStrings("23:00 – 00:00", hourRange(&buf, 23, 24, .en_gb));

@@ -94,6 +94,12 @@ pub const keys = struct {
     pub const persona_image_base: u64 = 1_000_000_000;
 };
 
+// One directory probe key per cache slot: a capacity bump must not spill past
+// the 80–99 window these keys share with the request and polling timers.
+comptime {
+    std.debug.assert(keys.directory_status_base + station_status.capacity - 1 <= 99);
+}
+
 pub const max_themes = 12;
 pub const max_shows = 32;
 pub const max_recents = 8;
@@ -148,7 +154,6 @@ pub const ShowRow = struct {
     name: []const u8 = "",
     topic: []const u8 = "",
     persona: []const u8 = "",
-    live: bool = false,
     persona_slot: ?usize = null,
     guests: []const u8 = "",
 };
@@ -1065,7 +1070,7 @@ pub const Model = struct {
     };
 
     pub fn stationClock(self: *const Model, arena: std.mem.Allocator) []const u8 {
-        return formatStationStamp(arena, @divFloor(self.station_clock.wallMs(), 1000), self.station_offset_minutes, self.station_locale, true);
+        return formatStationStamp(arena, @divFloor(self.station_clock.wallMs(), 1000), self.station_offset_minutes, self.station_locale, false);
     }
 
     pub fn stationDay(self: *const Model) i64 {
@@ -1192,16 +1197,6 @@ pub const Model = struct {
         return self.station_loc.len > 0;
     }
 
-    // Schedule rows with the on-air show flagged live (kept for tests/status).
-    pub fn shows_list(self: *const Model, arena: std.mem.Allocator) []const ShowRow {
-        const out = arena.alloc(ShowRow, self.show_count) catch return &.{};
-        for (out, self.show_rows[0..self.show_count]) |*row, src| {
-            row.* = src;
-            row.live = self.show.len > 0 and std.mem.eql(u8, src.name, self.show);
-        }
-        return out;
-    }
-
     // ------------------------------------------------------------- timeline
     pub const UpRow = struct {
         n: []const u8 = "",
@@ -1249,10 +1244,9 @@ pub const Model = struct {
         return out;
     }
     pub fn presentation_artist(self: *const Model) []const u8 {
-        if (self.dj_talking) {
-            if (self.host.len > 0) return self.host;
-            if (self.dj.len > 0) return self.dj;
-        }
+        // Mobile swaps to the show's persona only; with no host the track
+        // artist stays.
+        if (self.dj_talking and self.host.len > 0) return self.host;
         return self.artist;
     }
 
@@ -1648,7 +1642,7 @@ pub const Model = struct {
         "moods",              "energy",              "musical_key",         "track_bpm",
         "track_year",         "track_duration_s",    "ctx_show",            "ctx_vibe",
         "ctx_cond",           "ctx_temp",            "show",                "host",
-        "llm_tokens",         "status_word",         "shows_list",          "play_label",
+        "llm_tokens",         "status_word",         "play_label",
         "play_icon",          "tune_label",          "mute_label",          "vol_display",
         // schedule / guide / feed backing storage
         "show_names_store",   "show_topics_store",   "show_personas_store", "show_rows",
@@ -2424,7 +2418,9 @@ fn syncStationGate(model: *Model, fx: *Effects) void {
 }
 
 fn armAuthRecheck(model: *Model, fx: *Effects) void {
-    if (model.auth_gate != .ok or !(model.privacy_private or model.privacy_listener_auth) or
+    // Only listenerAuth puts the password on the stream; a private-player-only
+    // station's stalls are network trouble, not a rotated password.
+    if (model.auth_gate != .ok or !model.privacy_listener_auth or
         model.station_pw.len == 0 or model.transport != .playing) return;
     if (model.auth_recheck.reconnect_since == null) {
         model.auth_recheck.reconnect_since = native_sdk.monotonicMs();
@@ -4132,7 +4128,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .tick_auth_recheck => |t| {
             if (t.outcome != .fired) return;
             const reconnecting = model.transport == .playing and model.auth_gate == .ok and
-                (model.privacy_private or model.privacy_listener_auth) and
+                model.privacy_listener_auth and
                 model.station_pw.len > 0 and (model.stream_failed or model.buffering);
             if (!reconnecting) {
                 model.auth_recheck.reconnect_since = null;
@@ -4176,13 +4172,19 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (api.normalizeBase(&base_buf, url)) |normalized| {
                 // Resolve the display name before any MRU buffers move.
                 var name: []const u8 = normalized;
+                var saved = false;
                 for (model.recents[0..model.recents_count]) |rec| {
-                    if (std.mem.eql(u8, rec.url, normalized)) name = rec.name;
+                    if (std.mem.eql(u8, rec.url, normalized)) {
+                        name = rec.name;
+                        saved = true;
+                    }
                 }
                 for (model.discover_rows[0..model.discover_count]) |d| {
                     if (std.mem.eql(u8, d.url, url)) name = d.name;
                 }
-                if (station_access.needsHttpConsent(normalized)) {
+                // A saved recent was accepted when it was added; only a station
+                // the listener hasn't tuned before gets the cleartext warning.
+                if (!saved and station_access.needsHttpConsent(normalized)) {
                     model.ob_from_sidebar = model.phase == .player;
                     obStart(model, fx, normalized, name);
                     return;
@@ -6265,9 +6267,9 @@ test "station polls derive the offset and reset it when context disappears" {
     try testing.expectEqual(station_time.Locale.en_us, m.station_locale);
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try testing.expectEqualStrings("05:35:00 am", m.stationClock(arena.allocator()));
-    clock.advanceMs(1000);
-    try testing.expectEqualStrings("05:35:01 am", m.stationClock(arena.allocator()));
+    try testing.expectEqualStrings("05:35 AM", m.stationClock(arena.allocator()));
+    clock.advanceMs(60_000);
+    try testing.expectEqualStrings("05:36 AM", m.stationClock(arena.allocator()));
     update(&m, .{ .pick_day = 1 }, &fx);
     update(&m, .{ .got_np = .{ .key = keys.fetch_np, .outcome = .ok, .status = 200, .body = "{}" } }, &fx);
     try testing.expectEqual(@as(i64, 0), m.station_offset_minutes);
@@ -6282,7 +6284,7 @@ test "NOW marks only the current range and follows station midnight" {
     clock.setWallMs((station_time.isoSeconds("2026-10-13T23:59:00Z") orelse unreachable) * 1000);
     m.station_clock = clock.clock();
     m.show_count = 1;
-    m.show_rows[0] = .{ .name = "Repeated show", .live = true };
+    m.show_rows[0] = .{ .name = "Repeated show" };
     m.sched_grid[2][23] = 1;
     m.sched_grid[3][0] = 1;
     m.sched_grid[3][12] = 1;
@@ -6313,14 +6315,14 @@ test "history selects the aired timestamp and booth formats ISO or epoch in stat
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const history = m.history_list(arena.allocator());
-    try testing.expectEqualStrings("04:30 am", history[0].hhmm);
-    try testing.expectEqualStrings("03:30 am", history[1].hhmm);
-    try testing.expectEqualStrings("02:30 am", history[2].hhmm);
+    try testing.expectEqualStrings("04:30 AM", history[0].hhmm);
+    try testing.expectEqualStrings("03:30 AM", history[1].hhmm);
+    try testing.expectEqualStrings("02:30 AM", history[2].hhmm);
     try testing.expectEqualStrings("", history[3].hhmm);
     const turns = m.booth_list(arena.allocator());
     try testing.expectEqualStrings("", turns[0].station_stamp);
-    try testing.expectEqualStrings("05:46:40 am", turns[1].station_stamp);
-    try testing.expectEqualStrings("05:30:01 am", turns[2].station_stamp);
+    try testing.expectEqualStrings("5:46:40 AM", turns[1].station_stamp);
+    try testing.expectEqualStrings("5:30:01 AM", turns[2].station_stamp);
 }
 
 test "schedule retains guests and public biographies and maps only kept shows" {
@@ -6689,4 +6691,42 @@ test "rapid promotions defer a reused like key until its old terminal drains" {
     try testDrainEffects(&m, &fx);
     try testing.expect(m.like_available);
     try testing.expectEqual(@as(u32, 3), m.like_count);
+}
+
+test "a saved public-HTTP recent retunes directly; a new one goes through consent" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{ .phase = .player };
+    pushRecent(&m, "Saved", "http://radio.example");
+    update(&m, .{ .pick_recent = "http://radio.example" }, &fx);
+    try testing.expectEqualStrings("http://radio.example", m.base);
+    try testing.expectEqual(Phase.player, m.phase);
+    update(&m, .{ .pick_discover = "http://other.example" }, &fx);
+    try testing.expectEqualStrings("http://radio.example", m.base);
+    try testing.expectEqual(Phase.onboarding, m.phase);
+    try testing.expectEqualStrings("http://other.example", m.ob_target_url);
+}
+
+test "only a listenerAuth stream arms the stuck-reconnect password re-check" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{ .phase = .player, .transport = .playing, .auth_gate = .ok, .privacy_private = true };
+    setStr(&m.station_pw_buf, &m.station_pw, "saved-secret");
+    armAuthRecheck(&m, &fx);
+    try testing.expect(m.auth_recheck.reconnect_since == null);
+    m.privacy_listener_auth = true;
+    armAuthRecheck(&m, &fx);
+    try testing.expect(m.auth_recheck.reconnect_since != null);
+}
+
+test "DJ talk swaps in the show host, never the bare DJ name" {
+    var m: Model = .{};
+    m.artist = "Song artist";
+    m.dj = "Frequency";
+    m.dj_talking = true;
+    try testing.expectEqualStrings("Song artist", m.presentation_artist());
+    m.host = "Heer";
+    try testing.expectEqualStrings("Heer", m.presentation_artist());
 }
