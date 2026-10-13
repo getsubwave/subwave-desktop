@@ -22,6 +22,7 @@ comptime {
     _ = @import("station_schedule.zig");
     _ = @import("listener_time.zig");
     _ = @import("iso8601.zig");
+    _ = @import("utf8.zig");
     _ = @import("request_suggestions.zig");
     _ = @import("polling.zig");
     _ = @import("station_status.zig");

@@ -1,6 +1,7 @@
 //! Bounded live-status cache. Slots retain their URL until a fetch settles,
 //! so a cancelled response cannot describe a newly assigned station.
 const std = @import("std");
+const utf8 = @import("utf8.zig");
 
 pub const capacity = 17; // featured + eight recents + eight directory rows
 pub const concurrency = 3; // leave the SDK's 16 effect slots for the player
@@ -34,7 +35,7 @@ pub const Entry = struct {
             if (artist.len > 0 and title.len > 0) w.writeAll(" — ") catch {};
             w.writeAll(title) catch {};
         }
-        self.label_len = utf8End(w.buffered());
+        self.label_len = utf8.dropCutTail(w.buffered()).len;
     }
 };
 
@@ -96,11 +97,6 @@ pub const Cache = struct {
     }
 };
 
-fn utf8End(bytes: []const u8) usize {
-    var end = bytes.len;
-    while (end > 0 and !std.unicode.utf8ValidateSlice(bytes[0..end])) : (end -= 1) {}
-    return end;
-}
 
 test "live labels match mobile, including missing artist or title" {
     var e: Entry = .{};

@@ -1,5 +1,6 @@
 //! Listener-time projection of the station's live-edge track and booth feed.
 const std = @import("std");
+const utf8 = @import("utf8.zig");
 
 pub const max_session_turns = 120;
 pub const max_hold_ms: i64 = 120_000;
@@ -10,12 +11,7 @@ pub fn Text(comptime capacity: usize) type {
         len: usize = 0,
 
         pub fn set(self: *@This(), value: []const u8) void {
-            var n = @min(value.len, capacity);
-            if (n < value.len) while (n > 0 and value[n] & 0xc0 == 0x80) {
-                n -= 1;
-            };
-            @memcpy(self.store[0..n], value[0..n]);
-            self.len = n;
+            self.len = utf8.copyInto(&self.store, value).len;
         }
 
         pub fn slice(self: *const @This()) []const u8 {

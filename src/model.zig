@@ -24,6 +24,7 @@ const station_time = @import("station_time.zig");
 const station_schedule = @import("station_schedule.zig");
 const listener_time = @import("listener_time.zig");
 const iso8601 = @import("iso8601.zig");
+const utf8 = @import("utf8.zig");
 pub const StreamFormat = stream_format.StreamFormat;
 
 // Default listening volume on tune-in. (Decode/position/spectrum report
@@ -1117,7 +1118,7 @@ pub const Model = struct {
                         .has_host = row.persona.len > 0,
                         .on_air = on_air,
                         .avatar_id = if (row.persona_slot) |pi| self.persona_images[pi] else 0,
-                        .topic = if (self.slot_topic_open[h]) row.topic else station_schedule.preview(row.topic, 120),
+                        .topic = if (self.slot_topic_open[h]) row.topic else utf8.prefix(row.topic, 120),
                         .has_topic = row.topic.len > 0,
                         .topic_long = row.topic.len > 120,
                         .topic_action = if (self.slot_topic_open[h]) "LESS" else "MORE",
@@ -1171,7 +1172,7 @@ pub const Model = struct {
         const pi = self.persona_roster.find(self.host_id);
         const p: station_schedule.Persona = if (pi) |i| self.persona_roster.rows[i] else .{};
         return .{
-            .topic = if (self.now_topic_open) topic else station_schedule.preview(topic, 180),
+            .topic = if (self.now_topic_open) topic else utf8.prefix(topic, 180),
             .has_topic = topic.len > 0,
             .topic_long = topic.len > 180,
             .topic_action = if (self.now_topic_open) "LESS" else "MORE",
@@ -1836,14 +1837,7 @@ pub const Msg = union(enum) {
 
 // ---------------------------------------------------------------- helpers
 fn setStr(buf: []u8, out: *[]const u8, v: []const u8) void {
-    var n = @min(v.len, buf.len);
-    // Never truncate mid-codepoint: back off past any UTF-8 continuation bytes
-    // so the copy stays valid UTF-8.
-    if (n < v.len) {
-        while (n > 0 and v[n] & 0xC0 == 0x80) n -= 1;
-    }
-    @memcpy(buf[0..n], v[0..n]);
-    out.* = buf[0..n];
+    out.* = utf8.copyInto(buf, v);
 }
 
 // First letters of the first two words, uppercased ("Juno Reyes" -> "JR").
@@ -3563,7 +3557,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 model.show_rows[i] = .{};
                 setStr(&model.show_ids_store[i], &model.show_rows[i].id, s.id orelse "");
                 setStr(&model.show_names_store[i], &model.show_rows[i].name, name);
-                setStr(&model.show_topics_store[i], &model.show_rows[i].topic, station_schedule.preview(s.topic orelse "", model.show_topics_store[i].len));
+                setStr(&model.show_topics_store[i], &model.show_rows[i].topic, s.topic orelse "");
                 var persona_name: []const u8 = "";
                 if (s.personaId) |pid| {
                     if (model.persona_roster.find(pid)) |pi| {
