@@ -73,17 +73,20 @@ the previous tag's assets, which is only right for re-cutting a botched build.
 - Takes ~10-15 minutes, nearly all of it waiting on the runners
   (Windows is by far the slowest). The script prints each leg's status as it
   goes and exits non-zero if fewer than four assets land.
-- **CI signs macOS ad-hoc.** There is no `SIGN_IDENTITY` path any more,
-  because signing happens on a runner that holds no certificate. Giving CI a
-  real Developer ID means putting a `.p12` plus an App Store Connect key into
-  repository secrets and adding keychain setup to `release-macos.yml` first.
-  Until that exists, never describe a DMG as notarized.
+- **CI signs macOS with Developer ID and notarizes.** The `.p12` and the
+  App Store Connect key live in repository secrets
+  (`scripts/setup-macos-signing.sh` creates them), and a leg with a missing
+  secret fails instead of falling back to ad-hoc. Its "Verify the DMG the way
+  Gatekeeper will" step is the proof; if it was skipped or failed, don't call
+  the DMG notarized. To test signing without a release:
+  `gh workflow run release-macos.yml -f tag=vX.Y.Z -f dry_run=true`.
 - `--publish` uses `--generate-notes`. For a release users will actually
   read, replace them: `gh release edit vX.Y.Z --notes-file …` with the shape
   used by v0.1.0 — what's new (concrete, feature-level), a download table
   with per-platform caveats, and build-from-source including the SDK patch
-  step. Keep the honest flags: macOS ad-hoc = "right-click → Open on first
-  launch"; Linux = needs glibc 2.39+ and GTK4, older distros build from
+  step. Keep the honest flags: macOS DMGs are notarized and open normally
+  (releases cut before the Developer ID switch were ad-hoc and needed
+  System Settings → Open Anyway); Linux = needs glibc 2.39+ and GTK4, older distros build from
   source. The old Windows caveat ("cross-compiled, not yet tested on real
   hardware") is retired — `release-windows.yml` builds AND launches the app on
   a real Windows runner. Don't reinstate it, but don't overclaim either: CI
@@ -171,8 +174,9 @@ marketing gloss) and approved examples live there.
   `-Dautomation=true`, which is what retires the "untested on real hardware"
   caveat. If that smoke test proves unreachable in a runner's service session,
   narrow it to launch-and-survive rather than deleting it.
-- CI signs macOS **ad-hoc**, same as the script's default. Don't describe a
-  CI-built DMG as notarized.
+- CI signs macOS with **Developer ID** and notarizes both the app and the
+  DMG; the verify step checks the stapled tickets and Gatekeeper's verdict.
+  Expired or revoked credentials fail the macOS legs, not the release notes.
 - Linux artifact requires glibc 2.39+ and GTK4 — Ubuntu 24.04+, Fedora 40+,
   Arch. Ubuntu 22.04 and Debian 12 users build from source; say so rather
   than implying it runs everywhere.
