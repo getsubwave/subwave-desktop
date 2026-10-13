@@ -12,6 +12,13 @@
 #
 # This guard exists because the flag lives in YAML that nothing else tests.
 # Drop it and the bug ships again silently.
+#
+# It also pins the distribution channel. The checked-in src/distribution.zig
+# must say .github, because that is what every GitHub release ships, and none
+# of the GitHub release workflows may flip it to store. A store workflow flips
+# it on its own runner with scripts/set-distribution.sh, after this guard runs.
+# A committed or misplaced flip would silently drop the update notice from the
+# builds people download from GitHub.
 set -euo pipefail
 
 fail=0
@@ -39,3 +46,25 @@ if [ "$fail" -ne 0 ]; then
   exit 1
 fi
 echo "ok: every 'native build' passes -Dtrace=off"
+
+channel="$(sed -n 's/^pub const channel: Channel = \.\([a-z_]*\);$/\1/p' src/distribution.zig | head -1)"
+if [ "$channel" != "github" ]; then
+  echo "error: src/distribution.zig declares channel '${channel:-<none found>}'; the committed value must be github" >&2
+  echo "       (store workflows flip it on their own runner with scripts/set-distribution.sh)" >&2
+  exit 1
+fi
+for wf in release-windows release-macos release-linux; do
+  file=".github/workflows/${wf}.yml"
+  n=0
+  while IFS= read -r line; do
+    n=$((n + 1))
+    code="${line%%#*}"
+    case "$code" in
+      *"set-distribution.sh store"*)
+        echo "error: ${file}:${n}: a GitHub release workflow flips to the store channel" >&2
+        exit 1
+        ;;
+    esac
+  done < "$file"
+done
+echo "ok: GitHub release builds ship the github distribution channel"

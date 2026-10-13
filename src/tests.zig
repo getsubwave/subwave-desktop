@@ -12,6 +12,7 @@ comptime {
     _ = @import("api.zig");
     _ = @import("update.zig");
     _ = @import("links.zig");
+    _ = @import("distribution.zig");
     _ = @import("diag.zig");
     _ = @import("model.zig");
     _ = @import("stream_format.zig");
@@ -171,6 +172,14 @@ test "player fragments build and lay out (every panel + sheets)" {
         try buildAndLayout(arena8.allocator(), player_top_markup, &model, 980, 660);
     }
     model.update_tag = "";
+    // Mac App Store build: the panel without its SUPPORT section.
+    model.support_link = false;
+    {
+        var arena9 = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena9.deinit();
+        try buildAndLayout(arena9.allocator(), player_sheets_markup, &model, 980, 660);
+    }
+    model.support_link = true;
 }
 
 // The dial strip carries full words (SHOWS / TIMELINE / LIVE / BOOTH /
