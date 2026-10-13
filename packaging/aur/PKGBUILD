@@ -1,0 +1,54 @@
+# Maintainer: Parminder Klair <perminder dot klair at gmail dot com>
+#
+# Source of truth: packaging/aur/ in https://github.com/getsubwave/subwave-desktop.
+# The AUR repository carries PKGBUILD, .SRCINFO and the .desktop file from
+# there; bump.sh moves all three to a new release.
+
+pkgname=subwave-desktop-bin
+_pkgname=subwave-desktop
+_appid=dev.subwave.player
+pkgver=0.10.1
+pkgrel=1
+pkgdesc='Native desktop player for SUB/WAVE internet radio stations'
+arch=('x86_64')
+url='https://github.com/getsubwave/subwave-desktop'
+license=('MIT')
+# The binary links the GTK4 stack directly. GStreamer and libsoup are
+# dlopen()ed at runtime by the SDK's GTK host, so namcap cannot see them:
+# playbin + spectrum + souphttpsrc + the Ogg/Opus/FLAC/MP3 decoders come from
+# -base and -good, and libsoup also fills the cover-art cache.
+depends=('glibc' 'glib2' 'gtk4' 'cairo' 'pango' 'gdk-pixbuf2' 'graphene' 'hicolor-icon-theme'
+         'libsoup3' 'gstreamer' 'gst-plugins-base' 'gst-plugins-good')
+optdepends=('gst-libav: AAC stream decoding'
+            'gst-plugins-bad: AAC stream decoding (alternative to gst-libav)')
+provides=("$_pkgname")
+conflicts=("$_pkgname")
+# CI already drops the DWARF and keeps .symtab on purpose so panic backtraces
+# still name functions; a second strip here would lose them.
+options=('!strip' '!debug')
+source=("SUBWAVE-Player-$pkgver-linux-x64.tar.gz::$url/releases/download/v$pkgver/SUBWAVE-Player-$pkgver-linux-x64.tar.gz"
+        "LICENSE-$pkgver::https://raw.githubusercontent.com/getsubwave/subwave-desktop/v$pkgver/LICENSE"
+        "$_appid.desktop")
+sha256sums=('94692a06ba226d955b42435bd205dd7ffee2e565ce1d453c20661c70d500963e'
+            '0735adbd0d3294cc8b3f498f345d22a3b605b9a5be6ddf28eebc6d96a62d3406'
+            '7af0ff26d199c9a008caf3659278693b02fb07c4580137d0d5b10f2babda9590')
+
+package() {
+  cd "$srcdir/$_pkgname-linux"
+
+  # resources/ only records the packager's asset manifest; nothing reads it at
+  # runtime, so the executable stands alone.
+  install -Dm755 "bin/$_pkgname" "$pkgdir/usr/bin/$_pkgname"
+
+  # The tarball's own entry is generic (Icon=app-icon, Categories=Utility).
+  # This one is named after the GTK application id, which Wayland compositors
+  # see as the window's app_id; StartupWMClass covers X11.
+  install -Dm644 "$srcdir/$_appid.desktop" "$pkgdir/usr/share/applications/$_appid.desktop"
+  local size
+  for size in 16 24 32 48 64 128 256 512; do
+    install -Dm644 "share/icons/hicolor/${size}x$size/apps/app-icon.png" \
+      "$pkgdir/usr/share/icons/hicolor/${size}x$size/apps/$_appid.png"
+  done
+
+  install -Dm644 "$srcdir/LICENSE-$pkgver" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

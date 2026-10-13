@@ -1,0 +1,6 @@
+# makepkg output, if it is ever run in-tree
+/src/
+/pkg/
+*.tar.gz
+*.pkg.tar.zst
+LICENSE-*

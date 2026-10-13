@@ -294,6 +294,12 @@ the store delivers updates itself, and on macOS also drops the Ko-fi link.
 `scripts/check-release-flags.sh` fails CI if `store` is ever committed or a
 GitHub release workflow flips to it.
 
+The Arch package `subwave-desktop-bin` lives in `packaging/aur/` (not on the
+AUR yet; see #48). It repackages the Linux tarball, so it needs no build of its
+own: after a release is published, `packaging/aur/bump.sh <version>` updates
+the version, checksums and `.SRCINFO`, and those three files go to the AUR
+repository.
+
 Two runner pins are deliberate. `ubuntu-24.04` because Linux can't be
 cross-compiled (the binary links the GTK4 system stack, 113 shared libraries,
 nothing bundled) and because ubuntu-22.04's GTK 4.6 would compile the
