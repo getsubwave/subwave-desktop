@@ -40,6 +40,10 @@
                     <column gap="1" grow="1">
                       <text><span weight="medium">{st.name}</span></text>
                       <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{st.url}</text>
+                      <if test="{st.live_label}">
+                        <if test="{st.live_online}"><text size="sm" foreground="accent" wrap="false" overflow="ellipsis">{st.live_label}</text></if>
+                        <else><text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{st.live_label}</text></else>
+                      </if>
                     </column>
                     <button variant="ghost" size="sm" icon="x" label="Remove station" on-press="forget_recent:{st.url}"/>
                   </row>
@@ -55,6 +59,10 @@
                     <column gap="2" grow="1">
                       <text><span weight="medium">{st.name}</span></text>
                       <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{st.sub}</text>
+                      <if test="{st.live_label}">
+                        <if test="{st.live_online}"><text size="sm" foreground="accent" wrap="false" overflow="ellipsis">{st.live_label}</text></if>
+                        <else><text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{st.live_label}</text></else>
+                      </if>
                     </column>
                     <icon name="chevron-right" width="14" height="14" foreground="text_muted"/>
                   </row>
@@ -71,7 +79,7 @@
               </stack>
             </row>
             <if test="{station_status}">
-              <text size="sm" foreground="accent">{station_status}</text>
+              <text size="sm" foreground="accent" wrap="true">{station_status}</text>
             </if>
           </column>
         </scroll>

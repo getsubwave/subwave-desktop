@@ -82,6 +82,11 @@ pub fn coverUrl(buf: []u8, base: []const u8, id: []const u8) ![]const u8 {
     const b = std.mem.trimEnd(u8, base, "/");
     return std.fmt.bufPrint(buf, "{s}/api/cover/{s}", .{ b, id });
 }
+pub fn personaAvatarUrl(buf: []u8, base: []const u8, path: []const u8) ![]const u8 {
+    if (std.mem.startsWith(u8, path, "/api/persona-avatar/")) return build(buf, base, path);
+    if (!std.mem.startsWith(u8, path, "/persona-avatar/")) return error.InvalidAvatarPath;
+    return std.fmt.bufPrint(buf, "{s}/api{s}", .{ std.mem.trimEnd(u8, base, "/"), path });
+}
 pub fn requestStatus(buf: []u8, base: []const u8, id: []const u8) ![]const u8 {
     const b = std.mem.trimEnd(u8, base, "/");
     return std.fmt.bufPrint(buf, "{s}/api/request/{s}", .{ b, id });
@@ -90,12 +95,7 @@ pub fn requestStatus(buf: []u8, base: []const u8, id: []const u8) ![]const u8 {
 // Normalize an operator-entered station address into a base URL: trim spaces,
 // default to https:// when no scheme, drop any trailing slash. Writes into buf.
 pub fn normalizeBase(buf: []u8, raw: []const u8) ![]const u8 {
-    var s = std.mem.trim(u8, raw, " \t\r\n");
-    s = std.mem.trimEnd(u8, s, "/");
-    if (s.len == 0) return error.EmptyBase;
-    const has_scheme = std.mem.startsWith(u8, s, "http://") or std.mem.startsWith(u8, s, "https://");
-    if (has_scheme) return std.fmt.bufPrint(buf, "{s}", .{s});
-    return std.fmt.bufPrint(buf, "https://{s}", .{s});
+    return @import("station_access.zig").normalizeBase(buf, raw);
 }
 
 const testing = std.testing;
@@ -112,6 +112,9 @@ test "url builders join base and path" {
     try testing.expectEqualStrings("https://x.test/stream.mp3", try streamUrl(&buf, "https://x.test/"));
     try testing.expectEqualStrings("https://x.test/stream.opus", try streamMount(&buf, "https://x.test/", "/stream.opus"));
     try testing.expectEqualStrings("https://x.test/api/cover/ab12", try coverUrl(&buf, "https://x.test", "ab12"));
+    try testing.expectEqualStrings("https://x.test/api/persona-avatar/p1", try personaAvatarUrl(&buf, "https://x.test/", "/persona-avatar/p1"));
+    try testing.expectEqualStrings("https://x.test/api/persona-avatar/p1", try personaAvatarUrl(&buf, "https://x.test", "/api/persona-avatar/p1"));
+    try testing.expectError(error.InvalidAvatarPath, personaAvatarUrl(&buf, "https://x.test", "https://other.test/p1"));
     try testing.expectEqualStrings("https://x.test/api/like", try like(&buf, "https://x.test/"));
     try testing.expectEqualStrings("https://x.test/api/station-auth", try stationAuth(&buf, "https://x.test/"));
 }

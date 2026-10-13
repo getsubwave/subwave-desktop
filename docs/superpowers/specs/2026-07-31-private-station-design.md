@@ -1,5 +1,9 @@
 # Private-station support (station password)
 
+The original single-station persistence and rotation limitations below have
+been superseded. See [Station access on SDK 0.10.1](../../station-access-sdk-0.10.1.md)
+for per-station memory, reconnect checks, and the Linux credential-store blocker.
+
 2026-07-31 · mirrors the SUB/WAVE web player's privacy feature (#478 in the
 subwave monorepo).
 

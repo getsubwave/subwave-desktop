@@ -15,8 +15,15 @@ comptime {
     _ = @import("diag.zig");
     _ = @import("model.zig");
     _ = @import("stream_format.zig");
+    _ = @import("station_access.zig");
     _ = @import("theme.zig");
     _ = @import("discord_rpc.zig");
+    _ = @import("station_time.zig");
+    _ = @import("station_schedule.zig");
+    _ = @import("listener_time.zig");
+    _ = @import("request_suggestions.zig");
+    _ = @import("polling.zig");
+    _ = @import("station_status.zig");
 }
 
 const AppUi = main.AppUi;
@@ -207,6 +214,119 @@ test "dial strip fits the minimum window width" {
 
 const model_dial_stops_len = @typeInfo(@TypeOf(Model.dial_stops)).array.len;
 
+test "station panels lay out in both locales, with disclosures and avatar states" {
+    const model_module = @import("model.zig");
+    const station_time = @import("station_time.zig");
+    var fx = model_module.Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var model: Model = .{};
+    var clock: native_sdk.TestClock = .{};
+    clock.setWallMs((station_time.isoSeconds("2026-10-13T23:00:00Z") orelse unreachable) * 1000);
+    model.station_clock = clock.clock();
+    model.phase = .player;
+    model.station_offset_minutes = 330;
+    model.station_loc = "Calcutta";
+    model_module.update(&model, .{ .got_schedule = .{
+        .key = model_module.keys.fetch_schedule, .outcome = .ok, .status = 200,
+        .body =
+        \\{"timezone":"Asia/Calcutta","locale":"en-US","soulsPublished":true,
+        \\ "personas":[{"id":"host","name":"Heer","tagline":"Records after dark.","soul":"A published host biography.","avatar":"/persona-avatar/host"},{"id":"guest","name":"Sol"}],
+        \\ "shows":[{"id":"night","name":"Night Static","personaId":"host","guestPersonaIds":["guest"],"topic":"An extended show description that needs a disclosure so the listener can read every word. This part keeps the text long enough to exercise MORE and LESS in the ON NOW card as well as in the schedule slot."}],
+        \\ "schedule":{"3":["night","night","night","night","night"]}}
+        ,
+    } }, &fx);
+    model.show = "Night Static";
+    model.host = "Heer";
+    model.host_id = "host";
+    model.now_guests = "Sol";
+    model.history_count = 2;
+    model.history_rows[0] = .{ .title = "Aired track", .artist = "Heer", .played_at_s = station_time.isoSeconds("2026-10-13T22:50:00Z") };
+    model.history_rows[1] = .{ .title = "Unknown airing", .artist = "Sol" };
+    model.booth_count = 3;
+    model.booth_turns[0] = .{ .kind = "VOICE", .is_voice = true, .text = "It is half past four.", .stamp_epoch_s = station_time.isoSeconds("2026-10-13T23:00:00Z") };
+    model.booth_turns[1] = .{ .kind = "TRACK", .is_track = true, .text = "Title · Artist", .stamp_epoch_s = station_time.isoSeconds("2026-10-13T22:50:00Z") };
+    model.booth_turns[2] = .{ .kind = "PICK", .text = "Picking a record." };
+
+    inline for (.{ .en_gb, .en_us }) |display_locale| {
+        model.station_locale = display_locale;
+        inline for (.{ false, true }) |expanded| {
+            model.slot_topic_open[0] = expanded;
+            model.slot_host_open[0] = expanded;
+            model.now_topic_open = expanded;
+            model.now_host_open = expanded;
+            model.persona_images[0] = if (expanded) model_module.keys.persona_image_base else 0;
+            inline for (.{ .schedule, .timeline, .booth }) |tab| {
+                var arena = std.heap.ArenaAllocator.init(testing.allocator);
+                defer arena.deinit();
+                model.active_tab = tab;
+                try buildAndLayout(arena.allocator(), player_panel_markup, &model, 380, 560);
+            }
+        }
+    }
+    // A browsed day must not borrow today's NOW marker. Guests can also air
+    // without a host, and private souls must not produce an ABOUT control.
+    model.day_picked = true;
+    model.day_sel = 4;
+    model.host = "";
+    model.host_id = "";
+    model.persona_roster.rows[0].soul = "";
+    model.active_tab = .schedule;
+    {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        try buildAndLayout(arena.allocator(), player_panel_markup, &model, 380, 560);
+    }
+    model.show = "";
+    model.timezone = "";
+    model.station_loc = "";
+    {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        try buildAndLayout(arena.allocator(), player_panel_markup, &model, 380, 560);
+    }
+}
+
+test "station lists lay out with pending, on-air and offline row status" {
+    const api = @import("api.zig");
+    var model: Model = .{};
+    model.recents[0] = .{ .name = "Recent", .url = "https://recent.test" };
+    model.recents_count = 1;
+    model.discover_rows[0] = .{ .name = "Discover", .url = "https://discover.test", .sub = "London · Jazz" };
+    model.discover_count = 1;
+    model.directory_status.want(api.default_base);
+    model.directory_status.want(model.recents[0].url);
+    model.directory_status.want(model.discover_rows[0].url);
+    for (0..3) |state| {
+        if (state > 0) for (&model.directory_status.entries) |*entry| {
+            if (entry.wanted) entry.setStatus(state == 1, "An artist with a long name", "A title that must ellipsize within the station row");
+        };
+        model.phase = .onboarding;
+        var onboarding_arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer onboarding_arena.deinit();
+        try buildAndLayout(onboarding_arena.allocator(), onboarding_markup, &model, 880, 560);
+        model.phase = .player;
+        model.sidebar_open = true;
+        var sidebar_arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer sidebar_arena.deinit();
+        try buildAndLayout(sidebar_arena.allocator(), player_sidebar_markup, &model, 320, 560);
+    }
+}
+
+test "request panel lays out one fallback chip and all five context chips" {
+    var model: Model = .{ .phase = .player, .active_tab = .request };
+    var fallback_arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer fallback_arena.deinit();
+    try buildAndLayout(fallback_arena.allocator(), player_panel_markup, &model, 380, 560);
+    model.artist = "Björk";
+    model.ctx_festival = "Diwali";
+    model.ctx_vibe = "slow burn";
+    model.ctx_cond = "rain";
+    var full_arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer full_arena.deinit();
+    try buildAndLayout(full_arena.allocator(), player_panel_markup, &model, 380, 560);
+}
+
 test "composed player view (every fragment) builds and lays out" {
     const views = @import("views.zig");
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
@@ -243,6 +363,42 @@ test "onboarding view builds in entry and check phases" {
     model.ob_steps = .{ .ok, .ok, .ok, .ok };
     model.ob_done = true;
     try buildAndLayout(arena3.allocator(), onboarding_markup, &model, 980, 660);
+}
+
+test "station access warnings and diagnostics build at the minimum window size" {
+    var model: Model = .{};
+    model.ob_checking = true;
+    model.ob_steps = .{ .ok, .ok, .ok, .ok };
+    model.ob_done = true;
+    model.ob_insecure = true;
+    model.ob_target_name = "Public station";
+    model.ob_target_url = "http://radio.example";
+    {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        try buildAndLayout(arena.allocator(), onboarding_markup, &model, 880, 560);
+    }
+    model.ob_done = false;
+    model.ob_steps = .{ .ok, .fail, .wait, .wait };
+    model.ob_diag = "The station asked for a login (HTTP 401). HTTP Basic Station login is not supported by this desktop player.";
+    model.ob_raw = "ok (HTTP 401)";
+    {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        try buildAndLayout(arena.allocator(), onboarding_markup, &model, 880, 560);
+    }
+    model.ob_checking = false;
+    model.station_status = "HTTP Basic Station login is not supported by this desktop player.";
+    {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        try buildAndLayout(arena.allocator(), onboarding_markup, &model, 880, 560);
+    }
+    {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        try buildAndLayout(arena.allocator(), player_sidebar_markup, &model, 880, 560);
+    }
 }
 
 test "lock view builds in prompt, error, and checking states" {
@@ -291,4 +447,30 @@ test "mini view builds and lays out" {
     var arena3 = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena3.deinit();
     try buildAndLayout(arena3.allocator(), mini_markup, &model, 420, 168);
+
+    model.dj_talking = true;
+    model.host = "Heer";
+    var arena4 = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena4.deinit();
+    try buildAndLayout(arena4.allocator(), mini_markup, &model, 420, 168);
+}
+
+test "booth carried tail and boundary branches build and lay out in every filter" {
+    var model: Model = .{};
+    model.phase = .player;
+    model.active_tab = .booth;
+    model.booth_turns[0] = .{ .hhmm = "20:02", .text = "Welcome in.", .kind = "VOICE", .is_voice = true };
+    model.booth_turns[1] = .{ .text = "20:00 · Blue Hour", .is_boundary = true };
+    model.booth_turns[2] = .{ .hhmm = "19:59", .text = "Goodnight from Bob.", .kind = "VOICE", .is_voice = true, .is_carried = true, .persona = "Bob" };
+    model.booth_turns[3] = .{ .hhmm = "19:58", .text = "Last pick.", .kind = "PICK", .is_carried = true, .persona = "Bob" };
+    model.booth_turns[4] = .{ .hhmm = "19:57", .text = "Song · Artist", .kind = "TRACK", .is_track = true, .is_carried = true, .persona = "Bob" };
+    model.booth_turns[5] = .{ .hhmm = "20:01", .text = "Song · Artist", .kind = "TRACK", .is_track = true };
+    model.booth_turns[6] = .{ .hhmm = "20:01", .text = "Picked this.", .kind = "PICK" };
+    model.booth_count = 7;
+    inline for (.{ .all, .dj, .tracks }) |filter| {
+        model.booth_filter = filter;
+        var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena_state.deinit();
+        try buildAndLayout(arena_state.allocator(), player_panel_markup, &model, 880, 560);
+    }
 }

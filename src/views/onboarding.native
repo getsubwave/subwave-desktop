@@ -40,6 +40,9 @@
             <search-field text="{station_text}" placeholder="radio.yourhost.com" on-input="station_edit" on-submit="ob_run_check" grow="1"/>
           </row>
           <button variant="primary" on-press="ob_run_check">Run health check</button>
+          <if test="{station_status}">
+            <text size="sm" foreground="accent" wrap="true">{station_status}</text>
+          </if>
 
           <use template="section-label" title="OR PICK A KNOWN STATION"/>
           <column gap="0">
@@ -47,6 +50,10 @@
               <column gap="1" grow="1">
                 <text><span weight="medium">{featured_name}</span></text>
                 <text size="sm" foreground="text_muted">{featured_display}</text>
+                <if test="{featured_live_label}">
+                  <if test="{featured_live_online}"><text size="sm" foreground="accent" wrap="false" overflow="ellipsis">{featured_live_label}</text></if>
+                  <else><text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{featured_live_label}</text></else>
+                </if>
               </column>
               <icon name="chevron-right" width="14" height="14" foreground="text_muted"/>
             </row>
@@ -56,6 +63,10 @@
                 <column gap="1" grow="1">
                   <text><span weight="medium">{st.name}</span></text>
                   <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{st.url}</text>
+                  <if test="{st.live_label}">
+                    <if test="{st.live_online}"><text size="sm" foreground="accent" wrap="false" overflow="ellipsis">{st.live_label}</text></if>
+                    <else><text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{st.live_label}</text></else>
+                  </if>
                 </column>
                 <icon name="chevron-right" width="14" height="14" foreground="text_muted"/>
               </row>
@@ -71,6 +82,10 @@
                   <column gap="2" grow="1">
                     <text><span weight="medium">{st.name}</span></text>
                     <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{st.sub}</text>
+                    <if test="{st.live_label}">
+                      <if test="{st.live_online}"><text size="sm" foreground="accent" wrap="false" overflow="ellipsis">{st.live_label}</text></if>
+                      <else><text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{st.live_label}</text></else>
+                    </if>
                   </column>
                   <icon name="chevron-right" width="14" height="14" foreground="text_muted"/>
                 </row>
@@ -121,6 +136,9 @@
           <if test="{has_ob_diag}">
             <text size="sm" foreground="accent" wrap="true">{ob_diag}</text>
           </if>
+          <if test="{has_ob_raw}">
+            <text size="sm" foreground="text_muted"><span mono="true">{ob_raw}</span></text>
+          </if>
 
           <if test="{ob_done}">
             <card padding="14" border-color="accent">
@@ -132,7 +150,18 @@
                 <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{ob_target_url}</text>
               </column>
             </card>
-            <button variant="primary" on-press="ob_tune_in">Tune in to {ob_target_name}</button>
+            <if test="{ob_insecure}">
+              <card padding="14" border-color="accent">
+                <column gap="5">
+                  <text><span weight="medium">Insecure connection</span></text>
+                  <text size="sm" foreground="text_muted" wrap="true">This station uses plain HTTP. People on the network can see or change the connection, including any station password you enter. Continue only if you trust the station and network.</text>
+                </column>
+              </card>
+              <button variant="primary" on-press="ob_continue_http">Continue over insecure HTTP</button>
+            </if>
+            <else>
+              <button variant="primary" on-press="ob_tune_in">Tune in to {ob_target_name}</button>
+            </else>
           </if>
 
           <row>

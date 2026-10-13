@@ -58,7 +58,7 @@ pub const app_icons = [_]canvas.icons.Entry{
 
 // ------------------------------------------------------- OS integration seams
 // App-level key fallback — consulted only for keys no focused widget consumed
-// (typing in the request/station fields is never stolen). Space = tune toggle,
+// (typing in the request/station fields is never stolen). Space = play/pause,
 // [ / ] = volume, M = mute, cmd/ctrl+K = stations, cmd/ctrl+shift+M = mini
 // player (plain cmd+M is the macOS system minimize), Esc = back to LIVE,
 // 1–5 = dial stops.
@@ -173,6 +173,25 @@ fn onLifecycle(event: native_sdk.LifecycleEvent) ?Msg {
         .deactivate => .app_deactivated,
         else => null,
     };
+}
+
+// UiApp's on_frame projection omits the host's occlusion flag. Observe the
+// raw event at the App boundary while retaining the normal SDK handling.
+const AppEvents = struct {
+    var upstream: @FieldType(native_sdk.App, "event_fn") = null;
+
+    fn event(context: *anyopaque, runtime: *native_sdk.Runtime, value: native_sdk.Event) anyerror!void {
+        if (upstream) |handler| try handler(context, runtime, value);
+        const app: *model.App = @ptrCast(@alignCast(context));
+        if (visibilityMsg(&app.model, value)) |msg| try app.dispatch(runtime, app.canvas_window_id, msg);
+    }
+};
+
+fn visibilityMsg(m: *const Model, value: native_sdk.Event) ?Msg {
+    if (value != .gpu_surface_frame) return null;
+    const frame = value.gpu_surface_frame;
+    if (!std.mem.eql(u8, frame.label, canvas_label) or frame.occluded == m.main_occluded) return null;
+    return .{ .main_occlusion = frame.occluded };
 }
 
 // Hidden-titlebar chrome geometry → model (the masthead pads around the window
@@ -443,7 +462,9 @@ fn windowsFn(m: *const Model, scratch: *model.App.WindowsScratch) []const model.
     return scratch.windows[0..count];
 }
 
-const app_permissions = [_][]const u8{ native_sdk.security.permission_command, native_sdk.security.permission_view };
+// Legacy settings/cache live under subwave-player, outside the runner's
+// bundle-id app directories, so its file effects need the filesystem grant.
+const app_permissions = [_][]const u8{ native_sdk.security.permission_command, native_sdk.security.permission_view, native_sdk.security.permission_credentials, native_sdk.security.permission_filesystem };
 const shell_views = [_]native_sdk.ShellView{
     .{ .label = canvas_label, .kind = .gpu_surface, .fill = true, .role = "Player canvas", .accessibility_label = "Player", .gpu_backend = .metal, .gpu_pixel_format = .bgra8_unorm, .gpu_present_mode = .timer, .gpu_alpha_mode = .@"opaque", .gpu_color_space = .srgb, .gpu_vsync = true },
 };
@@ -525,6 +546,7 @@ pub fn main(init: std.process.Init) !void {
         if (env_station.len > 0) {
             if (api.normalizeBase(&app_state.model.base_buf, env_station)) |b| {
                 app_state.model.base = b;
+                model.restoreStationSettings(&app_state.model);
                 app_state.model.phase = .player;
             } else |_| {}
         }
@@ -551,7 +573,10 @@ pub fn main(init: std.process.Init) !void {
         if (app_state.model.base.len > 0) app_state.model.base else "(none)",
     });
 
-    try runner.runWithOptions(app_state.app(), .{
+    var app = app_state.app();
+    AppEvents.upstream = app.event_fn;
+    app.event_fn = AppEvents.event;
+    try runner.runWithOptions(app, .{
         .app_name = "subwave",
         .window_title = "SUB/WAVE",
         .bundle_id = bundle_id,
@@ -599,6 +624,19 @@ test "lifecycle maps only the activate/deactivate edges" {
     try testing.expect(onLifecycle(.frame) == null);
     try testing.expect(onLifecycle(.start) == null);
     try testing.expect(onLifecycle(.stop) == null);
+}
+
+test "visibility hook emits only main-window occlusion edges" {
+    var m: Model = .{};
+    const frame: native_sdk.platform.GpuSurfaceFrameEvent = .{ .label = canvas_label, .size = geometry.SizeF.init(980, 660), .occluded = true };
+    try testing.expectEqual(Msg{ .main_occlusion = true }, visibilityMsg(&m, .{ .gpu_surface_frame = frame }).?);
+    m.main_occluded = true;
+    try testing.expect(visibilityMsg(&m, .{ .gpu_surface_frame = frame }) == null);
+    var mini_frame = frame;
+    mini_frame.label = "mini-canvas";
+    m.main_occluded = false;
+    try testing.expect(visibilityMsg(&m, .{ .gpu_surface_frame = mini_frame }) == null);
+    try testing.expect(visibilityMsg(&m, .{ .lifecycle = .activate }) == null);
 }
 
 test "status-item menu derives from the model and maps commands back" {

@@ -146,14 +146,15 @@
             </row>
             <use template="section-label" title="SHORTCUTS"/>
             <card padding="12">
-              <grid columns="2" gap="10">
-                <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">TUNE</text><badge>Space</badge></row>
+              <grid columns="1" gap="10">
+                <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">PLAY / PAUSE</text><badge>Space</badge></row>
                 <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">DIAL</text><badge>1–5</badge></row>
                 <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">MUTE</text><badge>M</badge></row>
                 <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">LIKE</text><badge>L</badge></row>
-                <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">VOLUME</text><badge>Up · Down</badge></row>
-                <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">STATIONS</text><badge>Cmd K</badge></row>
-                <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">BACK TO LIVE</text><badge>Esc</badge></row>
+                <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">VOLUME DOWN / UP</text><badge>[ / ]</badge></row>
+                <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">STATIONS</text><badge>{stations_shortcut}</badge></row>
+                <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">CLOSE / LIVE</text><badge>Esc</badge></row>
+                <row main="space_between" cross="center" gap="8"><text size="sm" foreground="text_muted">MINI PLAYER</text><badge>{mini_shortcut}</badge></row>
               </grid>
             </card>
             <text size="sm" foreground="text_muted" text-alignment="center">MODEL SW-D1 · V{app_version} · MADE FOR THE INTERNET</text>
