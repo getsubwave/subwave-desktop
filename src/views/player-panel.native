@@ -27,7 +27,7 @@
             <if test="{tab_shows}">
               <column gap="4">
                 <text size="sm" foreground="text_muted">STATION TIME</text>
-                <text size="heading"><span mono="true">{stationClock}</span></text>
+                <text size="heading"><span mono="true">{station_clock_label}</span></text>
                 <if test="{has_timezone}">
                   <text size="sm" foreground="text_muted">{timezone}</text>
                 </if>
@@ -74,7 +74,7 @@
               </if>
               <toggle-group gap="4" label="Day">
                 <for each="day_tabs" as="d">
-                  <toggle-button size="sm" selected="{d.idx == selectedDay}" on-toggle="pick_day:{d.idx}">{d.label}</toggle-button>
+                  <toggle-button size="sm" selected="{d.idx == selected_day}" on-toggle="pick_day:{d.idx}">{d.label}</toggle-button>
                 </for>
               </toggle-group>
               <column gap="0">

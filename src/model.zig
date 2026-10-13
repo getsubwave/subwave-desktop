@@ -1071,16 +1071,16 @@ pub const Model = struct {
         has_guests: bool = false,
     };
 
-    pub fn stationClock(self: *const Model, arena: std.mem.Allocator) []const u8 {
+    pub fn station_clock_label(self: *const Model, arena: std.mem.Allocator) []const u8 {
         return formatStationStamp(arena, @divFloor(self.station_clock.wallMs(), 1000), self.station_offset_minutes, self.station_locale, false);
     }
 
-    pub fn stationDay(self: *const Model) i64 {
+    pub fn station_day(self: *const Model) i64 {
         return station_time.parts(self.station_clock.wallMs(), self.station_offset_minutes).day;
     }
 
-    pub fn selectedDay(self: *const Model) i64 {
-        return if (self.day_picked) self.day_sel else self.stationDay();
+    pub fn selected_day(self: *const Model) i64 {
+        return if (self.day_picked) self.day_sel else self.station_day();
     }
 
     pub fn has_timezone(self: *const Model) bool {
@@ -1090,8 +1090,8 @@ pub const Model = struct {
     /// The selected day's grid compressed to contiguous ranges.
     pub fn day_slots(self: *const Model, arena: std.mem.Allocator) []const SlotRow {
         const wall_ms = self.station_clock.wallMs();
-        const selected_day = if (self.day_picked) self.day_sel else station_time.parts(wall_ms, self.station_offset_minutes).day;
-        const d: usize = @intCast(std.math.clamp(selected_day, 0, 6));
+        const day = self.selected_day();
+        const d: usize = @intCast(std.math.clamp(day, 0, 6));
         const grid = self.sched_grid[d];
         var out: std.ArrayList(SlotRow) = .empty;
         var h: usize = 0;
@@ -1155,7 +1155,7 @@ pub const Model = struct {
         initials: []const u8 = "",
     };
 
-    pub fn nowShow(self: *const Model, arena: std.mem.Allocator) NowShow {
+    pub fn now_show(self: *const Model, arena: std.mem.Allocator) NowShow {
         var topic: []const u8 = "";
         const time = station_time.parts(self.station_clock.wallMs(), self.station_offset_minutes);
         const slot = self.sched_grid[@intCast(time.day)][@intCast(time.hour)];
@@ -1191,7 +1191,7 @@ pub const Model = struct {
 
     pub fn now_show_list(self: *const Model, arena: std.mem.Allocator) []const NowShow {
         const out = arena.alloc(NowShow, 1) catch return &.{};
-        out[0] = self.nowShow(arena);
+        out[0] = self.now_show(arena);
         return out;
     }
 
@@ -1575,7 +1575,7 @@ pub const Model = struct {
     // of the dead-state lint.
     pub const view_unbound = .{
         "timezone_store", "station_locale", "station_offset_minutes", "station_clock", "station_second_timer_active",
-        "stationDay", "nowShow", "day_picked", "slot_topic_open", "slot_host_open",
+        "station_day", "now_show", "day_picked", "slot_topic_open", "slot_host_open",
         "now_topic_open", "now_host_open", "host_id_store", "host_id",
         "now_guests_store", "now_guests", "persona_roster", "persona_images",
         "persona_loading", "next_persona_id", "persona_url_store", "persona_cache_store",
@@ -1968,7 +1968,13 @@ fn fetchSession(model: *Model, fx: *Effects) void {
 }
 
 fn pollCadence(model: *const Model) polling.Cadence {
-    return polling.cadence(model.phase == .player, feedActive(model), model.transport != .stopped, model.transport == .playing, model.probe_slow);
+    return polling.cadence(.{
+        .player = model.phase == .player,
+        .active = feedActive(model),
+        .tuned = model.transport != .stopped,
+        .playing = model.transport == .playing,
+        .probe_slow = model.probe_slow,
+    });
 }
 
 fn feedActive(model: *const Model) bool {
@@ -2675,7 +2681,7 @@ fn retune(model: *Model, fx: *Effects) void {
     model.station_locale = .en_gb;
     model.station_offset_minutes = 0;
     model.day_picked = false;
-    model.day_sel = model.stationDay();
+    model.day_sel = model.station_day();
     resetScheduleDisclosures(model);
     model.host_id = "";
     model.now_guests = "";
@@ -3083,7 +3089,7 @@ fn finishOnboarding(model: *Model, fx: *Effects) void {
     model.ob_from_sidebar = false;
     model.ob_insecure = false;
     model.sidebar_open = false;
-    model.day_sel = model.stationDay();
+    model.day_sel = model.station_day();
     startPlayerTimers(model, fx);
     retune(model, fx);
 }
@@ -3109,7 +3115,7 @@ pub fn boot(model: *Model, fx: *Effects) void {
         fetchDj(model, fx);
         postBeacon(model, fx);
         startPlayerTimers(model, fx);
-        model.day_sel = model.stationDay();
+        model.day_sel = model.station_day();
         syncSecondTimer(model, fx);
     } else {
         model.transport = .stopped;
@@ -3241,8 +3247,8 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .tick_second => |t| {
             if (t.outcome != .fired) return;
             model.now_wall_ms = native_sdk.nowMs();
-            if (!model.day_picked and model.day_sel != model.stationDay()) {
-                model.day_sel = model.stationDay();
+            if (!model.day_picked and model.day_sel != model.station_day()) {
+                model.day_sel = model.station_day();
                 resetScheduleDisclosures(model);
             }
             if (model.sleep_deadline_ms > 0 and model.now_wall_ms >= model.sleep_deadline_ms) {
@@ -3276,8 +3282,8 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             const ctx_clock = if (np.context) |c| c.clock else null;
             const ctx_date = if (np.context) |c| c.date else null;
             model.station_offset_minutes = station_time.offset(model.station_clock.wallMs(), if (ctx_clock) |c| c.hhmm else null, if (ctx_date) |d| d.dayOfWeek else null);
-            if (!model.day_picked and model.day_sel != model.stationDay()) {
-                model.day_sel = model.stationDay();
+            if (!model.day_picked and model.day_sel != model.station_day()) {
+                model.day_sel = model.station_day();
                 resetScheduleDisclosures(model);
             }
             const now_ms = native_sdk.nowMs();
@@ -3908,7 +3914,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.active_tab = tab;
             if (tab == .schedule) {
                 model.day_picked = false;
-                model.day_sel = model.stationDay();
+                model.day_sel = model.station_day();
                 resetScheduleDisclosures(model);
             }
         },
@@ -6276,20 +6282,20 @@ test "station polls derive the offset and reset it when context disappears" {
     m.station_clock = clock.clock();
     update(&m, .{ .got_np = .{ .key = keys.fetch_np, .outcome = .ok, .status = 200, .body = "{\"timezone\":\"Asia/Kathmandu\",\"locale\":\"en-US\",\"context\":{\"clock\":{\"hhmm\":\"05:35\"},\"date\":{\"dayOfWeek\":3,\"iso\":\"2026-10-14\"}}}" } }, &fx);
     try testing.expectEqual(@as(i64, 345), m.station_offset_minutes);
-    try testing.expectEqual(@as(i64, 3), m.selectedDay());
+    try testing.expectEqual(@as(i64, 3), m.selected_day());
     try testing.expectEqualStrings("Asia/Kathmandu", m.timezone);
     try testing.expectEqual(station_time.Locale.en_us, m.station_locale);
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try testing.expectEqualStrings("05:35 AM", m.stationClock(arena.allocator()));
+    try testing.expectEqualStrings("05:35 AM", m.station_clock_label(arena.allocator()));
     clock.advanceMs(60_000);
-    try testing.expectEqualStrings("05:36 AM", m.stationClock(arena.allocator()));
+    try testing.expectEqualStrings("05:36 AM", m.station_clock_label(arena.allocator()));
     update(&m, .{ .pick_day = 1 }, &fx);
     update(&m, .{ .got_np = .{ .key = keys.fetch_np, .outcome = .ok, .status = 200, .body = "{}" } }, &fx);
     try testing.expectEqual(@as(i64, 0), m.station_offset_minutes);
-    try testing.expectEqual(@as(i64, 1), m.selectedDay());
+    try testing.expectEqual(@as(i64, 1), m.selected_day());
     update(&m, .{ .pick_tab = .schedule }, &fx);
-    try testing.expectEqual(@as(i64, 2), m.selectedDay());
+    try testing.expectEqual(@as(i64, 2), m.selected_day());
 }
 
 test "NOW marks only the current range and follows station midnight" {
@@ -6308,7 +6314,7 @@ test "NOW marks only the current range and follows station midnight" {
     try testing.expect(!slots[0].on_air);
     try testing.expect(slots[1].on_air);
     clock.advanceMs(60000);
-    try testing.expectEqual(@as(i64, 3), m.selectedDay());
+    try testing.expectEqual(@as(i64, 3), m.selected_day());
     slots = m.day_slots(arena.allocator());
     try testing.expect(slots[0].on_air);
     for (slots[1..]) |row| try testing.expect(!row.on_air);
