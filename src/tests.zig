@@ -17,6 +17,9 @@ comptime {
     _ = @import("stream_format.zig");
     _ = @import("theme.zig");
     _ = @import("discord_rpc.zig");
+    _ = @import("request_suggestions.zig");
+    _ = @import("polling.zig");
+    _ = @import("station_status.zig");
 }
 
 const AppUi = main.AppUi;
@@ -206,6 +209,46 @@ test "dial strip fits the minimum window width" {
 }
 
 const model_dial_stops_len = @typeInfo(@TypeOf(Model.dial_stops)).array.len;
+
+test "station lists lay out with pending, on-air and offline row status" {
+    const api = @import("api.zig");
+    var model: Model = .{};
+    model.recents[0] = .{ .name = "Recent", .url = "https://recent.test" };
+    model.recents_count = 1;
+    model.discover_rows[0] = .{ .name = "Discover", .url = "https://discover.test", .sub = "London · Jazz" };
+    model.discover_count = 1;
+    model.directory_status.want(api.default_base);
+    model.directory_status.want(model.recents[0].url);
+    model.directory_status.want(model.discover_rows[0].url);
+    for (0..3) |state| {
+        if (state > 0) for (&model.directory_status.entries) |*entry| {
+            if (entry.wanted) entry.setStatus(state == 1, "An artist with a long name", "A title that must ellipsize within the station row");
+        };
+        model.phase = .onboarding;
+        var onboarding_arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer onboarding_arena.deinit();
+        try buildAndLayout(onboarding_arena.allocator(), onboarding_markup, &model, 880, 560);
+        model.phase = .player;
+        model.sidebar_open = true;
+        var sidebar_arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer sidebar_arena.deinit();
+        try buildAndLayout(sidebar_arena.allocator(), player_sidebar_markup, &model, 320, 560);
+    }
+}
+
+test "request panel lays out one fallback chip and all five context chips" {
+    var model: Model = .{ .phase = .player, .active_tab = .request };
+    var fallback_arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer fallback_arena.deinit();
+    try buildAndLayout(fallback_arena.allocator(), player_panel_markup, &model, 380, 560);
+    model.artist = "Björk";
+    model.ctx_festival = "Diwali";
+    model.ctx_vibe = "slow burn";
+    model.ctx_cond = "rain";
+    var full_arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer full_arena.deinit();
+    try buildAndLayout(full_arena.allocator(), player_panel_markup, &model, 380, 560);
+}
 
 test "composed player view (every fragment) builds and lays out" {
     const views = @import("views.zig");

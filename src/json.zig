@@ -53,10 +53,14 @@ pub const WeatherCtx = struct {
     condition: ?[]const u8 = null,
     temp: ?f64 = null,
 };
+pub const FestivalCtx = struct {
+    name: ?[]const u8 = null,
+};
 pub const Context = struct {
     time: ?TimeCtx = null,
     weather: ?WeatherCtx = null,
     dominantMood: ?[]const u8 = null,
+    festival: ?FestivalCtx = null,
 };
 
 // The station's stream description on /now-playing: which extra mounts it

@@ -5,7 +5,7 @@
   <row gap="14" cross="center" padding="12">
     <stack>
       <button variant="outline" size="lg" icon="app:power" label="{tune_label}" on-press="tune_toggle"/>
-      <tooltip anchor="above">{tune_label} · Space</tooltip>
+      <tooltip anchor="above">{tune_label}</tooltip>
     </stack>
     <if test="{connecting}">
       <spinner/>

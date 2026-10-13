@@ -10,6 +10,9 @@ const api = @import("api.zig");
 const json = @import("json.zig");
 const color = @import("color.zig");
 const spectrum = @import("spectrum.zig");
+const request_suggestions = @import("request_suggestions.zig");
+const polling = @import("polling.zig");
+const station_status = @import("station_status.zig");
 const stream_format = @import("stream_format.zig");
 const discord_rpc = @import("discord_rpc.zig");
 // `update` is the reducer below, so the self-update module needs an alias.
@@ -58,6 +61,11 @@ pub const keys = struct {
     pub const open_release_spawn: u64 = 45;
     pub const open_support_spawn: u64 = 46;
     pub const copy_clipboard: u64 = 47;
+    pub const request_return: u64 = 80;
+    pub const background_feed_timer: u64 = 81;
+    pub const directory_status_timer: u64 = 82;
+    // One key per cache slot; only three probes run at once.
+    pub const directory_status_base: u64 = 83; // 83–99 inclusive
 
     // Cover art loads through `fx.loadImage`, where the ImageId IS the effect
     // key — so the id counter has to start clear of every key above or a cover
@@ -148,11 +156,7 @@ pub const DiscoverRow = struct {
     sub: []const u8 = "", // "Tucson, AZ · desert rock"
 };
 
-// Static request chips (ON THE WIRE) — text payload fills the slip.
-pub const Chip = struct {
-    t: []const u8,
-    a: []const u8,
-};
+pub const Chip = request_suggestions.Chip;
 
 // Sleep-timer options.
 pub const SleepOpt = struct {
@@ -252,6 +256,8 @@ pub const Model = struct {
     ctx_cond_buf: [32]u8 = undefined,
     ctx_cond: []const u8 = "",
     ctx_temp: i64 = -999, // -999 = unknown
+    ctx_festival_store: [96]u8 = undefined,
+    ctx_festival: []const u8 = "",
 
     // cover art (registered image ids; 0 = disc/initials fallback). The art is
     // loaded by `fx.loadImage`, which runs the fetch and the decode on a worker
@@ -270,7 +276,8 @@ pub const Model = struct {
     // Heartbeat bookkeeping. The audio-event count is the closest honest
     // proxy for "is the loop still turning" (the model has no frame counter,
     // and the audio channel is the ~25 Hz animation clock). It rides the
-    // free-running 5s feed poll (tick_feed) as the diagnostic heartbeat.
+    // feed poll (tick_feed) as the diagnostic heartbeat, at 5s in foreground
+    // and 10s during background playback.
     // NEVER log per event — count here, emit on the tick. See src/diag.zig's
     // header and issue #23.
     hb_audio_events: u32 = 0,
@@ -329,6 +336,7 @@ pub const Model = struct {
 
     // feed bookkeeping
     offline_streak: u8 = 0,
+    poll_cadence: polling.Cadence = .{},
 
     // ------------------------------------------------------------- UI state
     active_tab: Tab = .live,
@@ -396,9 +404,9 @@ pub const Model = struct {
     // never starts interrupting a listener who never asked for it.
     notify_track: bool = false,
     // App foreground state, from the app_activated / app_deactivated
-    // lifecycle Msgs. Only the notification gate reads it — a toast that
-    // repeats what the on-screen stage already says is noise.
+    // lifecycle Msgs. Polling and notifications share this focus signal.
     app_active: bool = true,
+    main_occluded: bool = false,
 
     // Discord Rich Presence (opt-in; see discord_rpc.zig / discord.zon).
     discord_enabled: bool = false,
@@ -444,6 +452,7 @@ pub const Model = struct {
     discover_sub_store: [max_discover][64]u8 = undefined,
     discover_rows: [max_discover]DiscoverRow = [_]DiscoverRow{.{}} ** max_discover,
     discover_count: usize = 0,
+    directory_status: station_status.Cache = .{},
 
     // Listener like for the current airing (mirrors web useTrackLike): the
     // heart stays hidden until GET /api/like confirms the station has likes
@@ -510,6 +519,8 @@ pub const Model = struct {
     req_queue_pos: i64 = 0,
     req_id_buf: [64]u8 = undefined,
     req_id: []const u8 = "",
+    req_return_allowed: bool = false,
+    req_return_armed: bool = false,
 
     // onboarding
     ob_https: bool = true,
@@ -911,12 +922,22 @@ pub const Model = struct {
     }
 
     // ------------------------------------------------------------- catalogues
-    pub const chips = [_]Chip{
-        .{ .t = "more like this", .a = "SAME SHELF" },
-        .{ .t = "late-night driving", .a = "RIGHT NOW" },
-        .{ .t = "something upbeat", .a = "LIFT THE FLOOR" },
-        .{ .t = "surprise me", .a = "RANDOM" },
-    };
+    pub fn chips(self: *const Model, arena: std.mem.Allocator) []const Chip {
+        return request_suggestions.build(arena, .{
+            .artist = self.artist,
+            .festival = self.ctx_festival,
+            .vibe = self.ctx_vibe,
+            .show = self.ctx_show,
+            .weather = self.ctx_cond,
+        });
+    }
+
+    pub fn stations_shortcut(_: *const Model) []const u8 {
+        return if (builtin.os.tag == .macos) "Cmd K" else "Ctrl K";
+    }
+    pub fn mini_shortcut(_: *const Model) []const u8 {
+        return if (builtin.os.tag == .macos) "Cmd Shift M" else "Ctrl Shift M";
+    }
 
     pub const sleep_options = [_]SleepOpt{
         .{ .min = 15, .label = "15 minutes" },
@@ -1121,14 +1142,39 @@ pub const Model = struct {
     }
 
     // ------------------------------------------------------------- stations
-    pub fn recents_list(self: *const Model) []const StationRef {
-        return self.recents[0..self.recents_count];
+    pub const StationStatusRow = struct {
+        name: []const u8,
+        url: []const u8,
+        sub: []const u8 = "",
+        live_label: []const u8 = "",
+        live_online: bool = false,
+    };
+    pub fn recents_list(self: *const Model, arena: std.mem.Allocator) []const StationStatusRow {
+        const rows = arena.alloc(StationStatusRow, self.recents_count) catch return &.{};
+        for (rows, self.recents[0..self.recents_count]) |*row, ref| {
+            const status = self.directory_status.find(ref.url);
+            row.* = .{ .name = ref.name, .url = ref.url, .live_label = if (status) |s| s.label() else "", .live_online = if (status) |s| s.online else false };
+        }
+        return rows;
     }
     pub fn has_recents(self: *const Model) bool {
         return self.recents_count > 0;
     }
-    pub fn discover_list(self: *const Model) []const DiscoverRow {
-        return self.discover_rows[0..self.discover_count];
+    pub fn discover_list(self: *const Model, arena: std.mem.Allocator) []const StationStatusRow {
+        const rows = arena.alloc(StationStatusRow, self.discover_count) catch return &.{};
+        for (rows, self.discover_rows[0..self.discover_count]) |*row, ref| {
+            const status = self.directory_status.find(ref.url);
+            row.* = .{ .name = ref.name, .url = ref.url, .sub = ref.sub, .live_label = if (status) |s| s.label() else "", .live_online = if (status) |s| s.online else false };
+        }
+        return rows;
+    }
+    pub fn featured_live_label(self: *const Model) []const u8 {
+        const status = self.directory_status.find(api.default_base) orelse return "";
+        return status.label();
+    }
+    pub fn featured_live_online(self: *const Model) bool {
+        const status = self.directory_status.find(api.default_base) orelse return false;
+        return status.online;
     }
     pub fn has_discover(self: *const Model) bool {
         return self.discover_count > 0;
@@ -1328,6 +1374,9 @@ pub const Model = struct {
     // Names read/dispatched only by update/fx (never bound in markup) — opt out
     // of the dead-state lint.
     pub const view_unbound = .{
+        "ctx_festival_store", "ctx_festival", "poll_cadence", "directory_status",
+        "req_return_allowed", "req_return_armed",
+        "main_occluded",
         // fixed backing buffers behind the bound slice fields
         "title_buf",          "artist_buf",          "album_buf",           "genre_buf",
         "dj_buf",             "show_buf",            "host_buf",            "cover_sid_buf",
@@ -1413,6 +1462,10 @@ pub const Effects = App.Effects;
 pub const Msg = union(enum) {
     // effect results
     tick_feed: native_sdk.EffectTimer,
+    tick_background_feed: native_sdk.EffectTimer,
+    tick_directory_status: native_sdk.EffectTimer,
+    got_directory_status: native_sdk.EffectResponse,
+    tick_request_return: native_sdk.EffectTimer,
     tick_reconnect: native_sdk.EffectTimer,
     tick_theme: native_sdk.EffectTimer,
     tick_signal: native_sdk.EffectTimer,
@@ -1526,6 +1579,7 @@ pub const Msg = union(enum) {
     // app-level lifecycle (SDK 0.6.0 on_lifecycle), not window focus
     app_activated,
     app_deactivated,
+    main_occlusion: bool,
 
     // onboarding
     ob_pick_scheme: bool,
@@ -1536,6 +1590,8 @@ pub const Msg = union(enum) {
 
     // Effect-result Msgs dispatched by the runtime/fx, not markup.
     pub const view_unbound = .{
+        "tick_background_feed", "tick_directory_status", "got_directory_status", "tick_request_return",
+        "main_occlusion",
         "tick_feed",     "tick_reconnect", "tick_theme",  "tick_reqpoll",
         "tick_signal",   "tick_second",    "tick_ob_step", "got_np",
         "got_state",     "got_themes",     "got_cover",   "got_session",
@@ -1660,6 +1716,116 @@ fn fetchFeed(model: *Model, fx: *Effects) void {
     if (api.session(&b3, model.base)) |u| fx.fetch(.{ .key = keys.fetch_session, .url = u, .on_response = Effects.responseMsg(.got_session) }) else |_| {}
 }
 
+fn fetchNowPlaying(model: *Model, fx: *Effects) void {
+    var b: [256]u8 = undefined;
+    if (api.nowPlaying(&b, model.base)) |u| fx.fetch(.{ .key = keys.fetch_np, .url = u, .on_response = Effects.responseMsg(.got_np) }) else |_| {}
+}
+
+fn fetchStateSession(model: *Model, fx: *Effects) void {
+    var b1: [256]u8 = undefined;
+    var b2: [256]u8 = undefined;
+    if (api.state(&b1, model.base)) |u| fx.fetch(.{ .key = keys.fetch_state, .url = u, .on_response = Effects.responseMsg(.got_state) }) else |_| {}
+    if (api.session(&b2, model.base)) |u| fx.fetch(.{ .key = keys.fetch_session, .url = u, .on_response = Effects.responseMsg(.got_session) }) else |_| {}
+}
+
+fn pollCadence(model: *const Model) polling.Cadence {
+    return polling.cadence(model.phase == .player, feedActive(model), model.transport != .stopped, model.transport == .playing, model.probe_slow);
+}
+
+fn feedActive(model: *const Model) bool {
+    // Mini mode explicitly minimizes main, including on GTK where the host
+    // cannot report occlusion. Its small view needs the track, not the feeds.
+    return model.app_active and !model.main_occluded and !model.mini_open;
+}
+
+fn syncPolling(model: *Model, fx: *Effects) void {
+    const next = pollCadence(model);
+    if (std.meta.eql(next, model.poll_cadence)) return;
+    const old = model.poll_cadence;
+    model.poll_cadence = next;
+    if (old.now_playing_ms != next.now_playing_ms) {
+        fx.cancelTimer(keys.feed_timer);
+        if (next.now_playing_ms > 0)
+            fx.startTimer(.{ .key = keys.feed_timer, .interval_ms = next.now_playing_ms, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_feed) })
+        else
+            fx.cancel(keys.fetch_np);
+    }
+    if (old.state_session_ms != next.state_session_ms) {
+        fx.cancelTimer(keys.background_feed_timer);
+        if (next.state_session_ms > 0 and next.state_session_ms != next.now_playing_ms)
+            fx.startTimer(.{ .key = keys.background_feed_timer, .interval_ms = next.state_session_ms, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_background_feed) });
+        if (next.state_session_ms == 0) {
+            fx.cancel(keys.fetch_state);
+            fx.cancel(keys.fetch_session);
+        }
+    }
+    if (old.themes_ms != next.themes_ms) {
+        fx.cancelTimer(keys.theme_timer);
+        if (next.themes_ms > 0)
+            fx.startTimer(.{ .key = keys.theme_timer, .interval_ms = next.themes_ms, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_theme) })
+        else
+            fx.cancel(keys.fetch_themes);
+    }
+    if (old.signal_ms != next.signal_ms) {
+        fx.cancelTimer(keys.signal_timer);
+        if (next.signal_ms > 0)
+            fx.startTimer(.{ .key = keys.signal_timer, .interval_ms = next.signal_ms, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_signal) })
+        else {
+            fx.cancel(keys.fetch_health);
+            model.probe_inflight = false;
+        }
+    }
+}
+
+fn directoryVisible(model: *const Model) bool {
+    if (!model.app_active or model.main_occluded or model.mini_open) return false;
+    return if (model.phase == .onboarding) !model.ob_checking else model.sidebar_open and !model.station_locked();
+}
+
+fn pumpDirectoryStatus(model: *Model, fx: *Effects) void {
+    while (model.directory_status.next()) |i| {
+        var b: [320]u8 = undefined;
+        if (api.nowPlaying(&b, model.directory_status.entries[i].url())) |u| {
+            fx.fetch(.{ .key = keys.directory_status_base + i, .url = u, .timeout_ms = 8000, .on_response = Effects.responseMsg(.got_directory_status) });
+        } else |_| {
+            model.directory_status.entries[i].pending = false;
+            model.directory_status.entries[i].setStatus(false, "", "");
+        }
+    }
+}
+
+fn syncDirectoryStatus(model: *Model, fx: *Effects, force: bool) void {
+    const visible = directoryVisible(model);
+    if (!force and visible == model.directory_status.enabled) return;
+    model.directory_status.enabled = visible;
+    model.directory_status.begin();
+    if (visible) {
+        if (model.phase == .onboarding) model.directory_status.want(api.default_base);
+        for (model.recents[0..model.recents_count]) |st| model.directory_status.want(st.url);
+        for (model.discover_rows[0..model.discover_count]) |st| model.directory_status.want(st.url);
+    }
+    for (&model.directory_status.entries, 0..) |*entry, i| {
+        if (!entry.wanted and entry.pending) fx.cancel(keys.directory_status_base + i);
+    }
+    fx.cancelTimer(keys.directory_status_timer);
+    if (visible) {
+        fx.startTimer(.{ .key = keys.directory_status_timer, .interval_ms = station_status.interval_ms, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_directory_status) });
+        pumpDirectoryStatus(model, fx);
+    }
+}
+
+fn cancelRequestReturn(model: *Model, fx: *Effects) void {
+    model.req_return_allowed = false;
+    model.req_return_armed = false;
+    fx.cancelTimer(keys.request_return);
+}
+
+fn scheduleRequestReturn(model: *Model, fx: *Effects) void {
+    if (!model.req_return_allowed or model.active_tab != .request or model.req_return_armed) return;
+    model.req_return_armed = true;
+    fx.startTimer(.{ .key = keys.request_return, .interval_ms = 2800, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick_request_return) });
+}
+
 // Minimal JSON string escape (quotes/backslashes/newlines; drops other
 // control bytes).
 fn jsonEscape(buf: []u8, s: []const u8) []const u8 {
@@ -1693,6 +1859,7 @@ fn jsonEscape(buf: []u8, s: []const u8) []const u8 {
 }
 
 fn fetchThemes(model: *Model, fx: *Effects) void {
+    if (!feedActive(model)) return;
     var b: [256]u8 = undefined;
     if (api.themes(&b, model.base)) |u| fx.fetch(.{ .key = keys.fetch_themes, .url = u, .on_response = Effects.responseMsg(.got_themes) }) else |_| {}
 }
@@ -2084,6 +2251,9 @@ fn loadCover(model: *Model, fx: *Effects, sid: []const u8) void {
 // nothing left over from the old one. `url` must already be normalized into
 // model.base by the caller.
 fn retune(model: *Model, fx: *Effects) void {
+    cancelRequestReturn(model, fx);
+    // The switch closes the list; cancel its old station probes as well.
+    syncDirectoryStatus(model, fx, true);
     dropCover(model, fx);
     model.cover_sid = "";
     model.title = "Tuning in…";
@@ -2122,6 +2292,7 @@ fn retune(model: *Model, fx: *Effects) void {
     model.ctx_vibe = "";
     model.ctx_cond = "";
     model.ctx_temp = -999;
+    model.ctx_festival = "";
     model.like_song = "";
     model.like_available = false;
     model.like_liked = false;
@@ -2217,10 +2388,8 @@ fn refreshTrayStatus(model: *Model) void {
     } else |_| {}
 }
 
-fn startPlayerTimers(fx: *Effects) void {
-    fx.startTimer(.{ .key = keys.feed_timer, .interval_ms = 5000, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_feed) });
-    fx.startTimer(.{ .key = keys.theme_timer, .interval_ms = 30_000, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_theme) });
-    fx.startTimer(.{ .key = keys.signal_timer, .interval_ms = 5000, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_signal) });
+fn startPlayerTimers(model: *Model, fx: *Effects) void {
+    syncPolling(model, fx);
 }
 
 fn armSleep(model: *Model, fx: *Effects, minutes: i64) void {
@@ -2278,15 +2447,18 @@ pub fn boot(model: *Model, fx: *Effects) void {
         fetchSchedule(model, fx);
         fetchDj(model, fx);
         postBeacon(model, fx);
-        startPlayerTimers(fx);
+        startPlayerTimers(model, fx);
         model.day_sel = utcWeekday(native_sdk.nowMs());
     } else {
         model.transport = .stopped;
     }
+    syncDirectoryStatus(model, fx, true);
 }
 
 // ---------------------------------------------------------------- update
 pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
+    defer syncPolling(model, fx);
+    defer syncDirectoryStatus(model, fx, false);
     // While the privacy gate is up, transport/mini/like verbs are dead —
     // the gate owns the window, and an unauthenticated stream would just
     // 401-loop against Icecast. (Keyboard fallbacks land here too.)
@@ -2296,12 +2468,12 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
     };
     switch (msg) {
         .tick_feed => |t| {
-            if (t.outcome != .fired) return;
+            if (t.outcome != .fired or pollCadence(model).now_playing_ms == 0) return;
             // fetchFeed runs on EVERY fired tick regardless of the heartbeat
             // cadence below — the poll must not be coupled to diagnostics.
             //
-            // The heartbeat itself only emits every 12th fired tick (feed_timer
-            // is 5000ms, so 12 ticks = 60s). At the 5s cadence this used to run
+            // The heartbeat itself only emits every 12th fired tick (60s in
+            // foreground, 120s in background). At the 5s cadence this used to run
             // at, a ~72-byte line every tick fills diag's 256 KB cap in about
             // 3640 beats — just over 5 hours — which would silence the log
             // long before issue #23's multi-day sessions ever hang. Slowing to
@@ -2324,13 +2496,43 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 });
                 model.hb_audio_events = 0;
             }
-            fetchFeed(model, fx);
+            if (feedActive(model)) fetchFeed(model, fx) else fetchNowPlaying(model, fx);
+        },
+        .tick_background_feed => |t| {
+            if (t.outcome == .fired and !feedActive(model) and pollCadence(model).state_session_ms > 0)
+                fetchStateSession(model, fx);
+        },
+        .tick_directory_status => |t| {
+            if (t.outcome != .fired or !directoryVisible(model)) return;
+            model.directory_status.refresh();
+            pumpDirectoryStatus(model, fx);
+        },
+        .got_directory_status => |r| {
+            if (r.key < keys.directory_status_base or r.key >= keys.directory_status_base + station_status.capacity) return;
+            const entry = &model.directory_status.entries[r.key - keys.directory_status_base];
+            if (!entry.pending) return;
+            entry.pending = false;
+            if (r.outcome == .cancelled and entry.wanted and directoryVisible(model)) entry.waiting = true;
+            if (directoryVisible(model) and entry.wanted and r.outcome != .cancelled and r.outcome != .rejected) {
+                entry.setStatus(false, "", "");
+                if (r.outcome == .ok and r.status == 200 and !r.truncated) {
+                    const parsed = json.parse(json.NowPlaying, std.heap.page_allocator, r.body) catch {
+                        pumpDirectoryStatus(model, fx);
+                        return;
+                    };
+                    defer parsed.deinit();
+                    const np = parsed.value;
+                    const tr = np.nowPlaying orelse json.Track{};
+                    entry.setStatus(np.streamOnline orelse true, tr.artist orelse "", tr.title orelse "");
+                }
+            }
+            pumpDirectoryStatus(model, fx);
         },
         .tick_reconnect => |t| {
             if (t.outcome == .fired and model.transport == .playing) startStream(model, fx);
         },
         .tick_theme => |t| {
-            if (t.outcome == .fired) fetchThemes(model, fx);
+            if (t.outcome == .fired and pollCadence(model).themes_ms > 0) fetchThemes(model, fx);
         },
         .tick_update => |t| {
             if (t.outcome == .fired) checkForUpdate(fx);
@@ -2348,7 +2550,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .opener_exited => model.opener_inflight = false,
         .tick_signal => |t| {
             if (t.outcome != .fired) return;
-            if (model.transport != .playing or model.probe_inflight) return;
+            if (pollCadence(model).signal_ms == 0 or model.probe_inflight) return;
             var b: [256]u8 = undefined;
             if (api.health(&b, model.base)) |u| {
                 model.probe_t0 = native_sdk.monotonicMs();
@@ -2364,7 +2566,6 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 if (model.probe_slow) {
                     // Back to the brisk cadence after recovery.
                     model.probe_slow = false;
-                    fx.startTimer(.{ .key = keys.signal_timer, .interval_ms = 5000, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_signal) });
                 }
             } else {
                 model.probe_fails +|= 1;
@@ -2372,7 +2573,6 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 if (model.probe_fails >= probe_backoff_after and !model.probe_slow) {
                     // The link is just down — probe gently instead of hammering.
                     model.probe_slow = true;
-                    fx.startTimer(.{ .key = keys.signal_timer, .interval_ms = 15_000, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_signal) });
                 }
             }
         },
@@ -2449,14 +2649,26 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 }
             }
             if (np.context) |ctx| {
+                model.ctx_festival = "";
+                if (ctx.festival) |festival| if (festival.name) |name| {
+                    setStr(&model.ctx_festival_store, &model.ctx_festival, name);
+                };
                 if (ctx.time) |tc| {
-                    if (tc.show) |v| setStr(&model.ctx_show_buf, &model.ctx_show, v);
-                    if (tc.vibe) |v| setStr(&model.ctx_vibe_buf, &model.ctx_vibe, v);
+                    setStr(&model.ctx_show_buf, &model.ctx_show, tc.show orelse "");
+                    setStr(&model.ctx_vibe_buf, &model.ctx_vibe, tc.vibe orelse "");
+                } else {
+                    model.ctx_show = "";
+                    model.ctx_vibe = "";
                 }
                 if (ctx.weather) |wc| {
-                    if (wc.condition) |v| setStr(&model.ctx_cond_buf, &model.ctx_cond, v);
+                    setStr(&model.ctx_cond_buf, &model.ctx_cond, wc.condition orelse "");
                     if (wc.temp) |v| model.ctx_temp = displayInteger(@round(v), -999);
-                }
+                } else model.ctx_cond = "";
+            } else {
+                model.ctx_festival = "";
+                model.ctx_show = "";
+                model.ctx_vibe = "";
+                model.ctx_cond = "";
             }
             if (np.dj) |d| {
                 if (d.name) |v| setStr(&model.dj_buf, &model.dj, v);
@@ -2806,6 +3018,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 setStr(&model.discover_sub_store[i], &model.discover_rows[i].sub, sub[0..w]);
                 model.discover_count += 1;
             }
+            syncDirectoryStatus(model, fx, true);
         },
         .got_beacon => {}, // fire-and-forget
         .chrome_changed => |c| {
@@ -2838,6 +3051,8 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     return;
                 };
                 if (std.fmt.bufPrint(&body_buf, "{{\"text\":\"{s}\",\"name\":\"{s}\"}}", .{ esc, name_esc })) |body| {
+                    cancelRequestReturn(model, fx);
+                    model.req_return_allowed = model.active_tab == .request;
                     fx.fetch(.{
                         .key = keys.post_request,
                         .method = .POST,
@@ -2875,6 +3090,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             }
             const parsed = json.parse(json.RequestPost, std.heap.page_allocator, r.body) catch {
                 model.req_phase = .done;
+                scheduleRequestReturn(model, fx);
                 return;
             };
             defer parsed.deinit();
@@ -2884,6 +3100,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 fx.startTimer(.{ .key = keys.request_poll, .interval_ms = 2000, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick_reqpoll) });
             } else {
                 model.req_phase = .done;
+                scheduleRequestReturn(model, fx);
             }
         },
         .tick_reqpoll => |t| {
@@ -2910,6 +3127,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     if (tr.artist) |v| setStr(&model.req_track_artist_buf, &model.req_track_artist, v);
                 }
                 if (parsed.value.queuePosition) |pos| model.req_queue_pos = pos;
+                scheduleRequestReturn(model, fx);
             } else if (std.mem.eql(u8, st, "failed")) {
                 model.req_phase = .failed;
                 model.req_status = "couldn't find that one";
@@ -2920,6 +3138,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             }
         },
         .reset_request => {
+            cancelRequestReturn(model, fx);
             model.req_phase = .idle;
             model.req_status = "";
             model.req_ack = "";
@@ -2927,6 +3146,20 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.req_track_artist = "";
             model.req_queue_pos = 0;
             model.req_id = "";
+            model.req_buffer.clear();
+        },
+        .tick_request_return => |t| {
+            if (t.outcome != .fired or !model.req_return_armed) return;
+            cancelRequestReturn(model, fx);
+            if (model.active_tab != .request or model.req_phase != .done) return;
+            model.active_tab = .live;
+            model.req_phase = .idle;
+            model.req_status = "";
+            model.req_ack = "";
+            model.req_id = "";
+            model.req_track_title = "";
+            model.req_track_artist = "";
+            model.req_queue_pos = 0;
             model.req_buffer.clear();
         },
 
@@ -3045,12 +3278,22 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
 
         // -------------------------------------------------------- navigation
         .pick_tab => |tab| {
+            cancelRequestReturn(model, fx);
             model.active_tab = tab;
             if (tab == .schedule) model.day_sel = utcWeekday(native_sdk.nowMs());
         },
-        .open_timeline => model.active_tab = .timeline,
-        .open_booth => model.active_tab = .booth,
-        .close_panel => model.active_tab = .live,
+        .open_timeline => {
+            cancelRequestReturn(model, fx);
+            model.active_tab = .timeline;
+        },
+        .open_booth => {
+            cancelRequestReturn(model, fx);
+            model.active_tab = .booth;
+        },
+        .close_panel => {
+            cancelRequestReturn(model, fx);
+            model.active_tab = .live;
+        },
         .toggle_sidebar => {
             model.sidebar_open = !model.sidebar_open;
             if (model.sidebar_open) fetchDirectory(fx); // refresh Discover
@@ -3061,6 +3304,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             } else if (model.sidebar_open) {
                 model.sidebar_open = false;
             } else {
+                cancelRequestReturn(model, fx);
                 model.active_tab = .live;
             }
         },
@@ -3115,10 +3359,15 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         // Coming back to the app (from the tray, the Dock, cmd+tab) should show
         // the truth immediately rather than up to one poll interval of stale
         // track. The feed poll keeps running while we are away, so this is a
-        // freshness nudge, not a repair.
+        // freshness nudge after the slower background cadence.
         .app_activated => {
             model.app_active = true;
-            if (model.phase == .player) fetchFeed(model, fx);
+            if (model.phase == .player and feedActive(model)) {
+                fetchFeed(model, fx);
+                fetchThemes(model, fx);
+            } else if (model.phase == .player and model.transport != .stopped) {
+                fetchNowPlaying(model, fx);
+            }
         },
         // Going away stops the FFT feed (the SDK gates it on the window being
         // visibly on screen), and that feed is also the visualizer's clock. Zero
@@ -3128,6 +3377,13 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .app_deactivated => {
             model.app_active = false;
             model.band_levels = [_]f32{0} ** spectrum.band_count;
+        },
+        .main_occlusion => |occluded| {
+            model.main_occluded = occluded;
+            if (!occluded and feedActive(model) and model.phase == .player) {
+                fetchFeed(model, fx);
+                fetchThemes(model, fx);
+            }
         },
 
         // ------------------------------------------------------- sleep timer
@@ -3234,7 +3490,10 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             } else |_| {}
         },
         .forget_recent => |url| {
-            if (forgetRecent(model, url)) saveSettings(model, fx);
+            if (forgetRecent(model, url)) {
+                saveSettings(model, fx);
+                syncDirectoryStatus(model, fx, true);
+            }
         },
         .press_like => {
             // Guarded so the L key (and a stale heart) is a no-op when there
@@ -3475,7 +3734,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 diag.print("phase player (onboarding complete)", .{});
                 model.ob_checking = false;
                 model.day_sel = utcWeekday(native_sdk.nowMs());
-                startPlayerTimers(fx);
+                startPlayerTimers(model, fx);
                 retune(model, fx);
             } else |_| {}
         },
@@ -3484,6 +3743,202 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
 
 pub fn initialModel() Model {
     return .{};
+}
+
+fn timerInterval(fx: *Effects, key: u64) ?u64 {
+    for (0..fx.pendingTimerCount()) |i| {
+        const timer = fx.pendingTimerAt(i).?;
+        if (timer.key == key) return timer.interval_ms;
+    }
+    return null;
+}
+
+test "request resolves, holds for 2.8 seconds, and returns to LIVE with a fresh slip" {
+    var fx = Effects.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{ .phase = .player, .active_tab = .request, .req_id = "request-1", .req_phase = .pending, .req_return_allowed = true };
+    update(&m, .{ .got_reqstat = .{ .key = keys.fetch_reqstat, .status = 200, .body = "{\"status\":\"resolved\",\"track\":{\"title\":\"Jóga\"}}" } }, &fx);
+    try std.testing.expectEqual(ReqPhase.done, m.req_phase);
+    try std.testing.expectEqual(Tab.request, m.active_tab);
+    try std.testing.expectEqual(@as(?u64, 2800), timerInterval(&fx, keys.request_return));
+    update(&m, .{ .tick_request_return = .{ .key = keys.request_return, .outcome = .fired, .timestamp_ns = 0 } }, &fx);
+    try std.testing.expectEqual(Tab.live, m.active_tab);
+    try std.testing.expectEqual(ReqPhase.idle, m.req_phase);
+    try std.testing.expectEqualStrings("", m.req_id);
+    try std.testing.expectEqualStrings("", m.req_track_title);
+}
+
+test "manual navigation cancels return even when resolving later or revisiting REQUEST" {
+    var fx = Effects.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{ .phase = .player, .active_tab = .request, .req_id = "request-1", .req_return_allowed = true };
+    update(&m, .{ .got_reqstat = .{ .key = keys.fetch_reqstat, .status = 200, .body = "{\"status\":\"resolved\"}" } }, &fx);
+    update(&m, .{ .pick_tab = .timeline }, &fx);
+    try std.testing.expect(timerInterval(&fx, keys.request_return) == null);
+    update(&m, .{ .pick_tab = .request }, &fx);
+    update(&m, .{ .tick_request_return = .{ .key = keys.request_return, .outcome = .fired, .timestamp_ns = 0 } }, &fx);
+    try std.testing.expectEqual(Tab.request, m.active_tab);
+    update(&m, .{ .got_reqstat = .{ .key = keys.fetch_reqstat, .status = 200, .body = "{\"status\":\"resolved\"}" } }, &fx);
+    try std.testing.expect(timerInterval(&fx, keys.request_return) == null);
+}
+
+test "successful immediate request schedules return, failed request stays open" {
+    var fx = Effects.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{ .phase = .player, .active_tab = .request, .req_return_allowed = true };
+    update(&m, .{ .got_reqpost = .{ .key = keys.post_request, .status = 200, .body = "{}" } }, &fx);
+    try std.testing.expectEqual(@as(?u64, 2800), timerInterval(&fx, keys.request_return));
+    update(&m, .reset_request, &fx);
+    m.req_return_allowed = true;
+    update(&m, .{ .got_reqpost = .{ .key = keys.post_request, .status = 429 } }, &fx);
+    try std.testing.expect(timerInterval(&fx, keys.request_return) == null);
+    try std.testing.expectEqual(Tab.request, m.active_tab);
+}
+
+test "background polling slows, stops when tuned out, and activates immediately" {
+    var fx = Effects.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{ .phase = .player };
+    update(&m, .app_deactivated, &fx);
+    try std.testing.expectEqual(@as(?u64, 10_000), timerInterval(&fx, keys.feed_timer));
+    try std.testing.expectEqual(@as(?u64, 30_000), timerInterval(&fx, keys.background_feed_timer));
+    try std.testing.expect(timerInterval(&fx, keys.theme_timer) == null);
+    try std.testing.expect(timerInterval(&fx, keys.signal_timer) == null);
+    update(&m, .{ .tick_feed = .{ .key = keys.feed_timer, .outcome = .fired, .timestamp_ns = 0 } }, &fx);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
+    try std.testing.expectEqual(keys.fetch_np, fx.pendingFetchAt(0).?.key);
+    update(&m, .{ .tick_background_feed = .{ .key = keys.background_feed_timer, .outcome = .fired, .timestamp_ns = 0 } }, &fx);
+    try std.testing.expectEqual(@as(usize, 3), fx.pendingFetchCount());
+    update(&m, .tune_out, &fx);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingTimerCount());
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingFetchCount());
+    update(&m, .{ .tick_feed = .{ .key = keys.feed_timer, .outcome = .fired, .timestamp_ns = 0 } }, &fx);
+    update(&m, .{ .tick_background_feed = .{ .key = keys.background_feed_timer, .outcome = .fired, .timestamp_ns = 0 } }, &fx);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingFetchCount());
+    while (fx.takeMsg()) |msg| update(&m, msg, &fx);
+    update(&m, .app_activated, &fx);
+    try std.testing.expectEqual(@as(usize, 4), fx.pendingFetchCount());
+    try std.testing.expectEqual(@as(?u64, 5000), timerInterval(&fx, keys.feed_timer));
+    try std.testing.expectEqual(@as(?u64, 30_000), timerInterval(&fx, keys.theme_timer));
+    try std.testing.expect(timerInterval(&fx, keys.background_feed_timer) == null);
+}
+
+test "host occlusion and mini mode throttle even while the app keeps focus" {
+    var fx = Effects.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{ .phase = .player };
+    update(&m, .{ .main_occlusion = true }, &fx);
+    try std.testing.expectEqual(@as(?u64, 10_000), timerInterval(&fx, keys.feed_timer));
+    update(&m, .toggle_mini, &fx);
+    try std.testing.expectEqual(@as(?u64, 10_000), timerInterval(&fx, keys.feed_timer));
+    m.main_occluded = false;
+    update(&m, .expand_mini, &fx);
+    try std.testing.expectEqual(@as(?u64, 5000), timerInterval(&fx, keys.feed_timer));
+    update(&m, .app_deactivated, &fx);
+    try std.testing.expectEqual(@as(?u64, 10_000), timerInterval(&fx, keys.feed_timer));
+}
+
+test "background theme flips and late health responses cannot restart paused polling" {
+    var fx = Effects.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{ .phase = .player, .app_active = false, .probe_slow = true };
+    update(&m, .{ .got_state = .{ .key = keys.fetch_state, .status = 200, .body = "{\"theme\":{\"active\":\"classic-dark\"}}" } }, &fx);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingFetchCount());
+    update(&m, .{ .got_health = .{ .key = keys.fetch_health, .status = 200 } }, &fx);
+    try std.testing.expect(timerInterval(&fx, keys.signal_timer) == null);
+    try std.testing.expect(timerInterval(&fx, keys.theme_timer) == null);
+}
+
+test "directory probes only visible lists, labels live and offline, and cancels on close" {
+    var fx = Effects.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{ .phase = .player };
+    m.recents[0] = .{ .name = "One", .url = "https://one.test" };
+    m.recents_count = 1;
+    m.discover_rows[0] = .{ .name = "Two", .url = "https://two.test" };
+    m.discover_count = 1;
+    update(&m, .toggle_sidebar, &fx);
+    try std.testing.expectEqual(@as(?u64, 30_000), timerInterval(&fx, keys.directory_status_timer));
+    try fx.feedResponse(keys.directory_status_base, 200, "{\"nowPlaying\":{\"artist\":\"Björk\",\"title\":\"Jóga\"}}");
+    try fx.feedResponseOutcome(keys.directory_status_base + 1, .timed_out, 0, "");
+    while (fx.takeMsg()) |msg| update(&m, msg, &fx);
+    try std.testing.expectEqualStrings("on air · Björk — Jóga", m.directory_status.find("https://one.test").?.label());
+    try std.testing.expectEqualStrings("offline", m.directory_status.find("https://two.test").?.label());
+    update(&m, .{ .tick_directory_status = .{ .key = keys.directory_status_timer, .outcome = .fired, .timestamp_ns = 0 } }, &fx);
+    update(&m, .toggle_sidebar, &fx);
+    try std.testing.expect(timerInterval(&fx, keys.directory_status_timer) == null);
+    try std.testing.expect(!m.directory_status.enabled);
+    while (fx.takeMsg()) |msg| update(&m, msg, &fx);
+    for (m.directory_status.entries) |entry| try std.testing.expect(!entry.pending);
+    update(&m, .{ .tick_directory_status = .{ .key = keys.directory_status_timer, .outcome = .fired, .timestamp_ns = 0 } }, &fx);
+    for (m.directory_status.entries) |entry| try std.testing.expect(!entry.pending);
+}
+
+test "onboarding check, mini player and station switch close directory polling" {
+    var fx = Effects.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    syncDirectoryStatus(&m, &fx, true);
+    try std.testing.expect(m.directory_status.find(api.default_base) != null);
+    update(&m, .{ .ob_pick_known = api.default_base }, &fx);
+    try std.testing.expect(!m.directory_status.enabled);
+    update(&m, .ob_back, &fx);
+    try std.testing.expect(m.directory_status.enabled);
+    m.phase = .player;
+    m.sidebar_open = true;
+    update(&m, .toggle_mini, &fx);
+    try std.testing.expect(!m.directory_status.enabled);
+    update(&m, .expand_mini, &fx);
+    try std.testing.expect(m.directory_status.enabled);
+    update(&m, .{ .pick_recent = "https://another.test" }, &fx);
+    try std.testing.expect(!m.directory_status.enabled);
+    try std.testing.expect(timerInterval(&fx, keys.directory_status_timer) == null);
+}
+
+test "reopening a list before cancellation settles immediately reprobes the row" {
+    var fx = Effects.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{ .phase = .player };
+    m.recents[0] = .{ .name = "One", .url = "https://one.test" };
+    m.recents_count = 1;
+    update(&m, .toggle_sidebar, &fx);
+    update(&m, .toggle_sidebar, &fx);
+    update(&m, .toggle_sidebar, &fx);
+    while (fx.takeMsg()) |msg| update(&m, msg, &fx);
+    try std.testing.expect(m.directory_status.entries[0].pending);
+    var found = false;
+    for (0..fx.pendingFetchCount()) |i| {
+        const req = fx.pendingFetchAt(i).?;
+        if (req.key == keys.directory_status_base) {
+            found = true;
+            try std.testing.expectEqualStrings("https://one.test/api/now-playing", req.url);
+        }
+    }
+    try std.testing.expect(found);
+}
+
+test "suggestion context is copied and disappears when absent" {
+    var fx = Effects.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{ .phase = .player };
+    update(&m, .{ .got_np = .{ .key = keys.fetch_np, .status = 200, .body = "{\"context\":{\"festival\":{\"name\":\"Diwali\"},\"time\":{\"show\":\"Night Shift\",\"vibe\":\"slow burn\"},\"weather\":{\"condition\":\"rain\"}}}" } }, &fx);
+    try std.testing.expectEqualStrings("Diwali", m.ctx_festival);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectEqual(@as(usize, 4), m.chips(arena.allocator()).len);
+    update(&m, .{ .got_np = .{ .key = keys.fetch_np, .status = 200, .body = "{}" } }, &fx);
+    try std.testing.expectEqualStrings("", m.ctx_festival);
+    try std.testing.expectEqual(@as(usize, 1), m.chips(arena.allocator()).len);
 }
 
 // -------------------------------------------------------------- tests
@@ -4643,7 +5098,7 @@ test "the feed-poll heartbeat resets the audio-event count only every 12th fired
     var fx = Effects.init(testing.allocator);
     defer fx.deinit();
     fx.executor = .fake;
-    var m: Model = .{};
+    var m: Model = .{ .phase = .player };
 
     // Audio events are counted, never logged — the arm must not emit per event.
     var i: usize = 0;
@@ -4684,7 +5139,7 @@ test "fetchFeed's fetch keys occupy their slots on the very first fired tick_fee
     var fx = Effects.init(testing.allocator);
     defer fx.deinit();
     fx.executor = .fake;
-    var m: Model = .{};
+    var m: Model = .{ .phase = .player };
     m.base = "http://example.test";
 
     try testing.expectEqual(@as(usize, 0), fx.pendingFetchCount());

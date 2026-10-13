@@ -65,7 +65,7 @@
     </stack>
     <stack>
       <button variant="outline" icon="app:power" label="{tune_label}" on-press="tune_toggle"/>
-      <tooltip anchor="below">{tune_label} · Space</tooltip>
+      <tooltip anchor="below">{tune_label}</tooltip>
     </stack>
   </row>
   <column padding="8">
