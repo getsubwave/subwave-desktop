@@ -1,0 +1,1567 @@
+--- a/src/platform/linux/gtk_host.c
++++ b/src/platform/linux/gtk_host.c
+@@ -285,6 +285,8 @@
+  * marshalling is needed. The one worker, the cache-fill download
+  * thread, touches only files, the network, and its own GCancellable. */
+ typedef struct native_sdk_gtk_audio {
++    uint64_t load_id;
++    void *callback_context;
+     int active;
+     int url_source;
+     /* Preroll complete (the pipeline's first async-done): transport
+@@ -326,6 +328,12 @@
+     gulong bus_handlers[6];
+     GCancellable *download_cancel;
+ } native_sdk_gtk_audio_t;
++
++typedef struct native_sdk_audio_callback_context {
++    struct native_sdk_gtk_host *host;
++    void *bus;
++    uint64_t load_id;
++} native_sdk_audio_callback_context_t;
+ 
+ typedef struct native_sdk_gtk_window {
+     uint64_t id;
+@@ -5766,6 +5774,7 @@
+     native_sdk_emit(host, (native_sdk_gtk_event_t){
+         .kind = NATIVE_SDK_GTK_EVENT_AUDIO,
+         .timestamp_ns = native_sdk_gpu_timestamp_ns(),
++        .audio_load_id = host->audio.load_id,
+         .audio_kind = kind,
+         .audio_position_ms = position_ms,
+         .audio_duration_ms = duration_ms,
+@@ -5812,6 +5821,7 @@
+     native_sdk_gtk_event_t event = {
+         .kind = NATIVE_SDK_GTK_EVENT_AUDIO,
+         .timestamp_ns = native_sdk_gpu_timestamp_ns(),
++        .audio_load_id = audio->load_id,
+         .audio_kind = NATIVE_SDK_AUDIO_EVENT_SPECTRUM,
+         .audio_position_ms = native_sdk_audio_position_ms(host),
+         .audio_duration_ms = audio->duration_ms,
+@@ -5827,7 +5837,9 @@
+  * itself. Streams may learn their real duration late — re-query while
+  * it is still unknown so the tick's readout converges on the truth. */
+ static gboolean native_sdk_audio_position_tick(gpointer data) {
+-    native_sdk_gtk_host_t *host = data;
++    native_sdk_audio_callback_context_t *context = data;
++    native_sdk_gtk_host_t *host = context->host;
++    if (host->audio.callback_context != context || host->audio.load_id != context->load_id || host->audio.bus != context->bus) return G_SOURCE_REMOVE;
+     native_sdk_gtk_audio_t *audio = &host->audio;
+     if (!audio->active) {
+         audio->position_timer = 0;
+@@ -5853,7 +5865,7 @@
+ 
+ static void native_sdk_audio_start_position_timer(native_sdk_gtk_host_t *host) {
+     if (host->audio.position_timer) return;
+-    host->audio.position_timer = g_timeout_add(NATIVE_SDK_AUDIO_POSITION_INTERVAL_MS, native_sdk_audio_position_tick, host);
++    host->audio.position_timer = g_timeout_add(NATIVE_SDK_AUDIO_POSITION_INTERVAL_MS, native_sdk_audio_position_tick, host->audio.callback_context);
+ }
+ 
+ /* Release the whole pipeline. The bus watch comes off first, so no
+@@ -5892,8 +5904,12 @@
+         g_object_unref(audio->download_cancel);
+         audio->download_cancel = NULL;
+     }
++    free(audio->callback_context);
++    audio->callback_context = NULL;
+     free(audio->cache_entry_path);
++    const uint64_t released_load_id = audio->load_id;
+     memset(audio, 0, sizeof(*audio));
++    audio->load_id = released_load_id;
+     audio->volume = 1.0;
+ }
+ 
+@@ -5909,9 +5925,10 @@
+  * exactly like the other hosts. Later async-done messages (each
+  * flushing seek produces one) change nothing here. */
+ static void native_sdk_audio_on_async_done(void *bus, void *message, gpointer data) {
+-    (void)bus;
+     (void)message;
+-    native_sdk_gtk_host_t *host = data;
++    native_sdk_audio_callback_context_t *context = data;
++    native_sdk_gtk_host_t *host = context->host;
++    if (host->audio.callback_context != context || bus != context->bus || host->audio.load_id != context->load_id) return;
+     native_sdk_gtk_audio_t *audio = &host->audio;
+     native_sdk_gst_api_t *gst = native_sdk_load_gst_api();
+     if (!gst || !audio->active || !audio->playbin || audio->ready) return;
+@@ -5939,8 +5956,9 @@
+  * tick), the same transition report the other hosts make when their
+  * transport starts rolling. */
+ static void native_sdk_audio_on_state_changed(void *bus, void *message, gpointer data) {
+-    (void)bus;
+-    native_sdk_gtk_host_t *host = data;
++    native_sdk_audio_callback_context_t *context = data;
++    native_sdk_gtk_host_t *host = context->host;
++    if (host->audio.callback_context != context || bus != context->bus || host->audio.load_id != context->load_id) return;
+     native_sdk_gtk_audio_t *audio = &host->audio;
+     native_sdk_gst_api_t *gst = native_sdk_load_gst_api();
+     if (!gst || !audio->active || !audio->buffering || audio->refilling) return;
+@@ -5992,8 +6010,9 @@
+  * borrow the bin that covers their center frequency, so the bass bars
+  * read the real (coarser) magnitude instead of resting at the floor. */
+ static void native_sdk_audio_on_element(void *bus, void *message, gpointer data) {
+-    (void)bus;
+-    native_sdk_gtk_host_t *host = data;
++    native_sdk_audio_callback_context_t *context = data;
++    native_sdk_gtk_host_t *host = context->host;
++    if (host->audio.callback_context != context || bus != context->bus || host->audio.load_id != context->load_id) return;
+     native_sdk_gtk_audio_t *audio = &host->audio;
+     native_sdk_gst_spectrum_api_t *api = native_sdk_load_gst_spectrum_api();
+     if (!api || !audio->active || !audio->spectrum) return;
+@@ -6057,8 +6076,9 @@
+  * keep saying playing+buffering, the honest stall shape) until the
+  * 100% report resumes it. */
+ static void native_sdk_audio_on_buffering(void *bus, void *message, gpointer data) {
+-    (void)bus;
+-    native_sdk_gtk_host_t *host = data;
++    native_sdk_audio_callback_context_t *context = data;
++    native_sdk_gtk_host_t *host = context->host;
++    if (host->audio.callback_context != context || bus != context->bus || host->audio.load_id != context->load_id) return;
+     native_sdk_gtk_audio_t *audio = &host->audio;
+     native_sdk_gst_api_t *gst = native_sdk_load_gst_api();
+     if (!gst || !audio->active || !audio->playbin) return;
+@@ -6110,9 +6130,10 @@
+  * download is orphaned, not cancelled — completion is what earned the
+  * cache entry. */
+ static void native_sdk_audio_on_eos(void *bus, void *message, gpointer data) {
+-    (void)bus;
+     (void)message;
+-    native_sdk_gtk_host_t *host = data;
++    native_sdk_audio_callback_context_t *context = data;
++    native_sdk_gtk_host_t *host = context->host;
++    if (host->audio.callback_context != context || bus != context->bus || host->audio.load_id != context->load_id) return;
+     if (!host->audio.active) return;
+     const uint64_t duration_ms = host->audio.duration_ms;
+     native_sdk_audio_release(host, 0);
+@@ -6125,9 +6146,10 @@
+  * cache entry that failed to play is corrupt: deleted here so it never
+  * fools the next lookup (that play streams and refills). */
+ static void native_sdk_audio_on_error(void *bus, void *message, gpointer data) {
+-    (void)bus;
+     (void)message;
+-    native_sdk_gtk_host_t *host = data;
++    native_sdk_audio_callback_context_t *context = data;
++    native_sdk_gtk_host_t *host = context->host;
++    if (host->audio.callback_context != context || bus != context->bus || host->audio.load_id != context->load_id) return;
+     if (!host->audio.active) return;
+     if (host->audio.cache_entry_path) g_remove(host->audio.cache_entry_path);
+     native_sdk_audio_release(host, 1);
+@@ -6178,15 +6200,25 @@
+         g_object_unref(playbin);
+         return 0;
+     }
+-    gst->bus_add_signal_watch(bus);
+-    audio->bus_handlers[0] = g_signal_connect(bus, "message::eos", G_CALLBACK(native_sdk_audio_on_eos), host);
+-    audio->bus_handlers[1] = g_signal_connect(bus, "message::error", G_CALLBACK(native_sdk_audio_on_error), host);
+-    audio->bus_handlers[2] = g_signal_connect(bus, "message::buffering", G_CALLBACK(native_sdk_audio_on_buffering), host);
+-    audio->bus_handlers[3] = g_signal_connect(bus, "message::async-done", G_CALLBACK(native_sdk_audio_on_async_done), host);
+-    audio->bus_handlers[4] = g_signal_connect(bus, "message::state-changed", G_CALLBACK(native_sdk_audio_on_state_changed), host);
+-    if (audio->spectrum) audio->bus_handlers[5] = g_signal_connect(bus, "message::element", G_CALLBACK(native_sdk_audio_on_element), host);
++    native_sdk_audio_callback_context_t *context = calloc(1, sizeof(*context));
++    if (!context) {
++        g_object_unref(bus);
++        g_object_unref(playbin);
++        return 0;
++    }
++    context->host = host;
++    context->bus = bus;
++    context->load_id = audio->load_id;
++    audio->callback_context = context;
+     audio->playbin = playbin;
+     audio->bus = bus;
++    gst->bus_add_signal_watch(bus);
++    audio->bus_handlers[0] = g_signal_connect(bus, "message::eos", G_CALLBACK(native_sdk_audio_on_eos), context);
++    audio->bus_handlers[1] = g_signal_connect(bus, "message::error", G_CALLBACK(native_sdk_audio_on_error), context);
++    audio->bus_handlers[2] = g_signal_connect(bus, "message::buffering", G_CALLBACK(native_sdk_audio_on_buffering), context);
++    audio->bus_handlers[3] = g_signal_connect(bus, "message::async-done", G_CALLBACK(native_sdk_audio_on_async_done), context);
++    audio->bus_handlers[4] = g_signal_connect(bus, "message::state-changed", G_CALLBACK(native_sdk_audio_on_state_changed), context);
++    if (audio->spectrum) audio->bus_handlers[5] = g_signal_connect(bus, "message::element", G_CALLBACK(native_sdk_audio_on_element), context);
+     if (gst->element_set_state(playbin, NATIVE_SDK_GST_STATE_PAUSED) == NATIVE_SDK_GST_STATE_CHANGE_FAILURE) {
+         native_sdk_audio_release(host, 0);
+         return 0;
+@@ -6201,7 +6233,6 @@
+  * asynchronous FAILED report (resolution here is asynchronous by
+  * design). */
+ static int native_sdk_audio_load_path_internal(native_sdk_gtk_host_t *host, const char *path) {
+-    native_sdk_audio_release(host, 1);
+     if (!native_sdk_load_gst_api()) return 3;
+     if (!g_file_test(path, G_FILE_TEST_IS_REGULAR)) return 1;
+     char *absolute = g_canonicalize_filename(path, NULL);
+@@ -6225,7 +6256,6 @@
+  * asynchronous — readiness, stalls, natural end, network death —
+  * arrives as audio reports. */
+ static int native_sdk_audio_load_url_internal(native_sdk_gtk_host_t *host, const char *url, const char *cache_path, uint64_t expected_bytes) {
+-    native_sdk_audio_release(host, 1);
+     if (!native_sdk_load_gst_api()) return 3;
+     if (!strstr(url, "://")) return 2;
+     if (cache_path && cache_path[0]) {
+@@ -6299,6 +6329,8 @@
+ 
+ int native_sdk_gtk_audio_load(native_sdk_gtk_host_t *host, const char *path, size_t path_len) {
+     if (!host || !path || path_len == 0) return 2;
++    native_sdk_audio_release(host, 1);
++    host->audio.load_id = 0;
+     char *copy = native_sdk_strndup(path, path_len);
+     if (!copy) return 2;
+     const int result = native_sdk_audio_load_path_internal(host, copy);
+@@ -6308,6 +6340,8 @@
+ 
+ int native_sdk_gtk_audio_load_url(native_sdk_gtk_host_t *host, const char *url, size_t url_len, const char *cache_path, size_t cache_path_len, uint64_t expected_bytes) {
+     if (!host || !url || url_len == 0) return 2;
++    native_sdk_audio_release(host, 1);
++    host->audio.load_id = 0;
+     char *url_copy = native_sdk_strndup(url, url_len);
+     char *cache_copy = cache_path_len > 0 ? native_sdk_strndup(cache_path, cache_path_len) : NULL;
+     if (!url_copy) {
+@@ -6317,6 +6351,17 @@
+     const int result = native_sdk_audio_load_url_internal(host, url_copy, cache_copy ? cache_copy : "", expected_bytes);
+     free(url_copy);
+     free(cache_copy);
++    return result;
++}
++
++int native_sdk_gtk_audio_load_request(native_sdk_gtk_host_t *host, uint64_t load_id, const char *url, size_t url_len) {
++    if (!host || !url || url_len == 0 || load_id == 0) return 2;
++    native_sdk_audio_release(host, 1);
++    host->audio.load_id = load_id;
++    char *url_copy = native_sdk_strndup(url, url_len);
++    if (!url_copy) { native_sdk_audio_release(host, 1); return 2; }
++    const int result = native_sdk_audio_load_url_internal(host, url_copy, "", 0);
++    free(url_copy);
+     return result;
+ }
+ 
+--- a/src/platform/linux/gtk_host.h
++++ b/src/platform/linux/gtk_host.h
+@@ -84,6 +84,7 @@
+      * ordinal plus the live transport readout. audio_buffering is the
+      * honest stream-stall mirror (an un-paused stream waiting for
+      * bytes), distinct from audio_playing (the transport intent). */
++    uint64_t audio_load_id;
+     int audio_kind;
+     uint64_t audio_position_ms;
+     uint64_t audio_duration_ms;
+@@ -275,6 +276,7 @@
+ int native_sdk_gtk_audio_spectrum_available(native_sdk_gtk_host_t *host);
+ int native_sdk_gtk_audio_load(native_sdk_gtk_host_t *host, const char *path, size_t path_len);
+ int native_sdk_gtk_audio_load_url(native_sdk_gtk_host_t *host, const char *url, size_t url_len, const char *cache_path, size_t cache_path_len, uint64_t expected_bytes);
++int native_sdk_gtk_audio_load_request(native_sdk_gtk_host_t *host, uint64_t load_id, const char *url, size_t url_len);
+ int native_sdk_gtk_audio_play(native_sdk_gtk_host_t *host);
+ int native_sdk_gtk_audio_pause(native_sdk_gtk_host_t *host);
+ int native_sdk_gtk_audio_stop(native_sdk_gtk_host_t *host);
+--- a/src/platform/linux/root.zig
++++ b/src/platform/linux/root.zig
+@@ -87,6 +87,7 @@
+     /// ordinal plus the live transport readout. `audio_buffering` is the
+     /// honest stream-stall mirror (an un-paused stream waiting for
+     /// bytes), distinct from `audio_playing` (the transport intent).
++    audio_load_id: u64,
+     audio_kind: c_int,
+     audio_position_ms: u64,
+     audio_duration_ms: u64,
+@@ -169,6 +170,7 @@
+ extern fn native_sdk_gtk_audio_spectrum_available(host: *GtkHost) c_int;
+ extern fn native_sdk_gtk_audio_load(host: *GtkHost, path: [*]const u8, path_len: usize) c_int;
+ extern fn native_sdk_gtk_audio_load_url(host: *GtkHost, url: [*]const u8, url_len: usize, cache_path: [*]const u8, cache_path_len: usize, expected_bytes: u64) c_int;
++extern fn native_sdk_gtk_audio_load_request(host: *GtkHost, load_id: u64, url: [*]const u8, url_len: usize) c_int;
+ extern fn native_sdk_gtk_audio_play(host: *GtkHost) c_int;
+ extern fn native_sdk_gtk_audio_pause(host: *GtkHost) c_int;
+ extern fn native_sdk_gtk_audio_stop(host: *GtkHost) c_int;
+@@ -402,6 +404,7 @@
+                 .format_local_time_fn = formatLocalTime,
+                 .audio_load_fn = audioLoad,
+                 .audio_load_url_fn = audioLoadUrl,
++                .audio_load_request_fn = audioLoadRequest,
+                 .audio_play_fn = audioPlay,
+                 .audio_pause_fn = audioPause,
+                 .audio_stop_fn = audioStop,
+@@ -648,6 +651,7 @@
+             .high_contrast = event.high_contrast != 0,
+         } }),
+         .audio => state.emit(.{ .audio = .{
++            .load_id = event.audio_load_id,
+             .kind = audioEventKindFromInt(event.audio_kind),
+             .position_ms = event.audio_position_ms,
+             .duration_ms = event.audio_duration_ms,
+@@ -1461,6 +1465,18 @@
+     };
+ }
+ 
++fn audioLoadRequest(context: ?*anyopaque, request: platform_mod.AudioUrlRequest) anyerror!platform_mod.AudioLoadResolution {
++    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
++    if (self.web_engine != .system) return error.UnsupportedService;
++    if (request.headers.len != 0 or !request.allow_redirects) return error.UnsupportedService;
++    return switch (native_sdk_gtk_audio_load_request(self.host, request.load_id, request.url.ptr, request.url.len)) {
++        0 => .stream,
++        1 => .cache,
++        3 => error.UnsupportedService,
++        else => error.InvalidAudioOptions,
++    };
++}
++
+ fn audioPlay(context: ?*anyopaque) anyerror!void {
+     const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+     if (native_sdk_gtk_audio_play(self.host) == 0) return error.InvalidAudioOptions;
+--- a/src/platform/macos/appkit_host.h
++++ b/src/platform/macos/appkit_host.h
+@@ -329,6 +329,7 @@
+      * (native_sdk_appkit_audio_event_kind_t) plus the player's
+      * position/duration readout in milliseconds at emit time. */
+     int audio_kind;
++    uint64_t audio_load_id;
+     uint64_t audio_position_ms;
+     uint64_t audio_duration_ms;
+     int audio_playing;
+@@ -565,6 +566,7 @@
+  * host, mid-stream network loss, undecodable payload) arrive as one
+  * EVENT_AUDIO/FAILED on the run loop. Loop-thread only. */
+ int native_sdk_appkit_audio_load_url(native_sdk_appkit_host_t *host, const char *url, size_t url_len, const char *cache_path, size_t cache_path_len, uint64_t expected_bytes);
++int native_sdk_appkit_audio_load_request(native_sdk_appkit_host_t *host, const char *url, size_t url_len, uint64_t load_id);
+ int native_sdk_appkit_audio_play(native_sdk_appkit_host_t *host);
+ int native_sdk_appkit_audio_pause(native_sdk_appkit_host_t *host);
+ int native_sdk_appkit_audio_stop(native_sdk_appkit_host_t *host);
+--- a/src/platform/macos/appkit_host.m
++++ b/src/platform/macos/appkit_host.m
+@@ -17,6 +17,7 @@
+ #import <ImageIO/ImageIO.h>
+ #import <dispatch/dispatch.h>
+ #import <Security/Security.h>
++#import <objc/runtime.h>
+ #include <dlfcn.h>
+ #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+ #include <math.h>
+@@ -97,6 +98,8 @@
+  * is not paused, but no audio comes out until bytes arrive). */
+ static void *NativeSdkAppKitAudioItemStatusContext = &NativeSdkAppKitAudioItemStatusContext;
+ static void *NativeSdkAppKitAudioTimeControlContext = &NativeSdkAppKitAudioTimeControlContext;
++static char NativeSdkAppKitAudioItemLoadIdKey;
++static char NativeSdkAppKitAudioPlayerLoadIdKey;
+ static void *NativeSdkAppKitVideoItemStatusContext = &NativeSdkAppKitVideoItemStatusContext;
+ static void *NativeSdkAppKitVideoTimeControlContext = &NativeSdkAppKitVideoTimeControlContext;
+ /* Render-thread ring state for the spectrum tap; defined with the rest
+@@ -904,6 +907,7 @@
+ /* The LOADED acknowledgment fires once per load (item status can
+  * bounce through readyToPlay again after a stall). */
+ @property(nonatomic, assign) BOOL audioLoadedEmitted;
++@property(nonatomic, assign) uint64_t audioLoadId;
+ /* The honest buffering mirror emitted with every audio event: YES from
+  * stream start (no bytes yet) until the player reports it is actually
+  * rolling, then follows timeControlStatus. Never set for local files. */
+@@ -1165,13 +1169,14 @@
+ - (void)invalidateAppTimers;
+ - (int)audioLoadPath:(NSString *)path;
+ - (int)audioLoadURL:(NSString *)urlString cachePath:(NSString *)cachePath expectedBytes:(uint64_t)expectedBytes;
+-- (void)audioInstallItem:(AVPlayerItem *)item asset:(AVURLAsset *)asset localSource:(BOOL)localSource;
++- (int)audioLoadURL:(NSString *)urlString cachePath:(NSString *)cachePath expectedBytes:(uint64_t)expectedBytes loadId:(uint64_t)loadId;
++- (void)audioInstallItem:(AVPlayerItem *)item asset:(AVURLAsset *)asset localSource:(BOOL)localSource loadId:(uint64_t)loadId;
+ - (void)startAudioCacheDownloadFrom:(NSURL *)url toPath:(NSString *)cachePath expectedBytes:(uint64_t)expectedBytes;
+ - (void)audioTearDownPlayerCancellingDownload:(BOOL)cancelDownload;
+-- (void)audioItemStatusChanged;
+-- (void)audioTimeControlChanged;
+-- (void)audioDidPlayToEnd;
+-- (void)audioDidFail;
++- (void)audioItemStatusChangedForItem:(AVPlayerItem *)item loadId:(uint64_t)loadId;
++- (void)audioTimeControlChangedForPlayer:(AVPlayer *)player loadId:(uint64_t)loadId;
++- (void)audioDidPlayToEndForItem:(AVPlayerItem *)item loadId:(uint64_t)loadId;
++- (void)audioDidFailForItem:(AVPlayerItem *)item loadId:(uint64_t)loadId;
+ - (int)audioPlay;
+ - (int)audioPause;
+ - (int)audioStop;
+@@ -10679,15 +10684,21 @@
+      * player state or emitting. */
+     if (context == NativeSdkAppKitAudioItemStatusContext) {
+         __weak NativeSdkAppKitHost *weakSelf = self;
++        AVPlayerItem *sourceItem = (AVPlayerItem *)object;
++        NSNumber *sourceLoadIdValue = objc_getAssociatedObject(sourceItem, &NativeSdkAppKitAudioItemLoadIdKey);
++        uint64_t sourceLoadId = sourceLoadIdValue.unsignedLongLongValue;
+         dispatch_async(dispatch_get_main_queue(), ^{
+-            [weakSelf audioItemStatusChanged];
++            [weakSelf audioItemStatusChangedForItem:sourceItem loadId:sourceLoadId];
+         });
+         return;
+     }
+     if (context == NativeSdkAppKitAudioTimeControlContext) {
+         __weak NativeSdkAppKitHost *weakSelf = self;
++        AVPlayer *sourcePlayer = (AVPlayer *)object;
++        NSNumber *sourceLoadIdValue = objc_getAssociatedObject(sourcePlayer, &NativeSdkAppKitAudioPlayerLoadIdKey);
++        uint64_t sourceLoadId = sourceLoadIdValue.unsignedLongLongValue;
+         dispatch_async(dispatch_get_main_queue(), ^{
+-            [weakSelf audioTimeControlChanged];
++            [weakSelf audioTimeControlChangedForPlayer:sourcePlayer loadId:sourceLoadId];
+         });
+         return;
+     }
+@@ -11089,6 +11100,7 @@
+     [self emitEvent:(native_sdk_appkit_event_t){
+         .kind = NATIVE_SDK_APPKIT_EVENT_AUDIO,
+         .audio_kind = kind,
++        .audio_load_id = self.audioLoadId,
+         .audio_position_ms = position_ms,
+         .audio_duration_ms = duration_ms,
+         .audio_playing = playing,
+@@ -11103,6 +11115,8 @@
+ }
+ 
+ - (void)audioPositionTimerFired:(NSTimer *)timer {
++    NSNumber *loadId = (NSNumber *)timer.userInfo;
++    if (self.audioPositionTimer != timer || !loadId || loadId.unsignedLongLongValue != self.audioLoadId) return;
+     if (!self.audioPlayer) {
+         [self stopAudioPositionTimer];
+         return;
+@@ -11142,7 +11156,8 @@
+  * a row of floor bytes, emitted: the cadence follows the transport,
+  * the magnitudes tell the truth. */
+ - (void)audioSpectrumTimerFired:(NSTimer *)timer {
+-    (void)timer;
++    NSNumber *loadId = (NSNumber *)timer.userInfo;
++    if (self.audioSpectrumTimer != timer || !loadId || loadId.unsignedLongLongValue != self.audioLoadId) return;
+     AVPlayer *player = self.audioPlayer;
+     native_sdk_spectrum_tap_state_t *state = self.audioSpectrumState;
+     if (!player) {
+@@ -11193,6 +11208,7 @@
+     native_sdk_appkit_event_t event = {
+         .kind = NATIVE_SDK_APPKIT_EVENT_AUDIO,
+         .audio_kind = NATIVE_SDK_APPKIT_AUDIO_EVENT_SPECTRUM,
++        .audio_load_id = self.audioLoadId,
+         .timestamp_ns = NativeSdkTimestampNanoseconds(),
+     };
+     if (!NativeSdkSpectrumComputeBands(state, self.audioSpectrumFft, window, event.audio_bands)) return;
+@@ -11230,7 +11246,7 @@
+     if (![probe prepareToPlay]) return 2;
+     AVURLAsset *asset = [AVURLAsset URLAssetWithURL:[NSURL fileURLWithPath:resolved] options:nil];
+     AVPlayerItem *item = [AVPlayerItem playerItemWithAsset:asset];
+-    [self audioInstallItem:item asset:asset localSource:YES];
++    [self audioInstallItem:item asset:asset localSource:YES loadId:0];
+     return 0;
+ }
+ 
+@@ -11241,6 +11257,10 @@
+  * asynchronous — readiness, stalls, natural end, network death —
+  * arrives as EVENT_AUDIO reports. */
+ - (int)audioLoadURL:(NSString *)urlString cachePath:(NSString *)cachePath expectedBytes:(uint64_t)expectedBytes {
++    return [self audioLoadURL:urlString cachePath:cachePath expectedBytes:expectedBytes loadId:0];
++}
++
++- (int)audioLoadURL:(NSString *)urlString cachePath:(NSString *)cachePath expectedBytes:(uint64_t)expectedBytes loadId:(uint64_t)loadId {
+     [self audioStop];
+     NSURL *url = [NSURL URLWithString:urlString];
+     if (!url || !url.scheme) return 2;
+@@ -11261,7 +11281,7 @@
+     }
+     AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url options:nil];
+     AVPlayerItem *item = [AVPlayerItem playerItemWithAsset:asset];
+-    [self audioInstallItem:item asset:asset localSource:NO];
++    [self audioInstallItem:item asset:asset localSource:NO loadId:loadId];
+     if (cachePath.length > 0) {
+         [self startAudioCacheDownloadFrom:url toPath:cachePath expectedBytes:expectedBytes];
+     }
+@@ -11274,8 +11294,13 @@
+  * contract (readyToPlay KVO -> audioItemStatusChanged): emitting inside
+  * the service call would re-enter the runtime while it is still
+  * dispatching the command that asked for the load. */
+-- (void)audioInstallItem:(AVPlayerItem *)item asset:(AVURLAsset *)asset localSource:(BOOL)localSource {
++- (void)audioInstallItem:(AVPlayerItem *)item asset:(AVURLAsset *)asset localSource:(BOOL)localSource loadId:(uint64_t)loadId {
+     AVPlayer *player = [AVPlayer playerWithPlayerItem:item];
++    /* KVO may arrive off the main thread after a replacement has changed the
++     * host's current load id. Bind immutable source identity to the exact
++     * observed objects before installing either observer. */
++    objc_setAssociatedObject(item, &NativeSdkAppKitAudioItemLoadIdKey, @(loadId), OBJC_ASSOCIATION_RETAIN);
++    objc_setAssociatedObject(player, &NativeSdkAppKitAudioPlayerLoadIdKey, @(loadId), OBJC_ASSOCIATION_RETAIN);
+     /* Stall policy by source: a local file has all its bytes, so
+      * playback starts immediately; a stream keeps the default — start
+      * as soon as sustained playback is likely, roll through short gaps.
+@@ -11284,6 +11309,7 @@
+     player.automaticallyWaitsToMinimizeStalling = localSource ? NO : YES;
+     self.audioItem = item;
+     self.audioPlayer = player;
++    self.audioLoadId = loadId;
+     self.audioSourceIsLocal = localSource;
+     /* A stream starts with no bytes; a local file never buffers. */
+     self.audioBuffering = localSource ? NO : YES;
+@@ -11298,13 +11324,14 @@
+                 context:NativeSdkAppKitAudioTimeControlContext];
+     self.audioObservingStatus = YES;
+     __weak NativeSdkAppKitHost *weakSelf = self;
++    const uint64_t sourceLoadId = loadId;
+     self.audioEndObserver = [[NSNotificationCenter defaultCenter]
+         addObserverForName:AVPlayerItemDidPlayToEndTimeNotification
+                     object:item
+                      queue:[NSOperationQueue mainQueue]
+                 usingBlock:^(NSNotification *note) {
+                     (void)note;
+-                    [weakSelf audioDidPlayToEnd];
++                    [weakSelf audioDidPlayToEndForItem:item loadId:sourceLoadId];
+                 }];
+     self.audioFailObserver = [[NSNotificationCenter defaultCenter]
+         addObserverForName:AVPlayerItemFailedToPlayToEndTimeNotification
+@@ -11312,7 +11339,7 @@
+                      queue:[NSOperationQueue mainQueue]
+                 usingBlock:^(NSNotification *note) {
+                     (void)note;
+-                    [weakSelf audioDidFail];
++                    [weakSelf audioDidFailForItem:item loadId:sourceLoadId];
+                 }];
+     [self audioInstallSpectrumTapForItem:item asset:asset];
+ }
+@@ -11459,9 +11486,8 @@
+  * the load's LOADED acknowledgment — the duration is decoded and
+  * playback is rolling or about to; failed is the honest terminal
+  * report for an unreachable host or an undecodable payload. */
+-- (void)audioItemStatusChanged {
+-    AVPlayerItem *item = self.audioItem;
+-    if (!item) return;
++- (void)audioItemStatusChangedForItem:(AVPlayerItem *)item loadId:(uint64_t)loadId {
++    if (!item || self.audioItem != item || self.audioLoadId != loadId) return;
+     if (item.status == AVPlayerItemStatusReadyToPlay) {
+         if (self.audioLoadedEmitted) return;
+         self.audioLoadedEmitted = YES;
+@@ -11469,7 +11495,7 @@
+         return;
+     }
+     if (item.status == AVPlayerItemStatusFailed) {
+-        [self audioDidFail];
++        [self audioDidFailForItem:item loadId:loadId];
+     }
+ }
+ 
+@@ -11479,9 +11505,8 @@
+  * (waits-to-minimize-stalling is off for them anyway). Emit the
+  * transition immediately as a position report so the UI flips its
+  * buffering state now, not at the next 500ms tick. */
+-- (void)audioTimeControlChanged {
+-    AVPlayer *player = self.audioPlayer;
+-    if (!player || self.audioSourceIsLocal) return;
++- (void)audioTimeControlChangedForPlayer:(AVPlayer *)player loadId:(uint64_t)loadId {
++    if (!player || self.audioPlayer != player || self.audioLoadId != loadId || self.audioSourceIsLocal) return;
+     BOOL buffering = player.timeControlStatus == AVPlayerTimeControlStatusWaitingToPlayAtSpecifiedRate;
+     if (buffering == self.audioBuffering) return;
+     self.audioBuffering = buffering;
+@@ -11494,8 +11519,8 @@
+  * would destroy the player that load just installed. The duration is
+  * captured first so the event still carries the honest terminal
+  * position. */
+-- (void)audioDidPlayToEnd {
+-    if (!self.audioPlayer) return;
++- (void)audioDidPlayToEndForItem:(AVPlayerItem *)item loadId:(uint64_t)loadId {
++    if (!self.audioPlayer || self.audioItem != item || self.audioLoadId != loadId) return;
+     [self stopAudioPositionTimer];
+     uint64_t duration_ms = 0;
+     if (self.audioItem) {
+@@ -11506,6 +11531,7 @@
+     [self emitEvent:(native_sdk_appkit_event_t){
+         .kind = NATIVE_SDK_APPKIT_EVENT_AUDIO,
+         .audio_kind = NATIVE_SDK_APPKIT_AUDIO_EVENT_COMPLETED,
++        .audio_load_id = loadId,
+         .audio_position_ms = duration_ms,
+         .audio_duration_ms = duration_ms,
+         .audio_playing = 0,
+@@ -11519,13 +11545,14 @@
+  * cold cache): one FAILED event, player retired first. The cache
+  * download is cancelled too — bytes from a failing source are not
+  * trustworthy. */
+-- (void)audioDidFail {
+-    if (!self.audioPlayer) return;
++- (void)audioDidFailForItem:(AVPlayerItem *)item loadId:(uint64_t)loadId {
++    if (!self.audioPlayer || self.audioItem != item || self.audioLoadId != loadId) return;
+     [self stopAudioPositionTimer];
+     [self audioTearDownPlayerCancellingDownload:YES];
+     [self emitEvent:(native_sdk_appkit_event_t){
+         .kind = NATIVE_SDK_APPKIT_EVENT_AUDIO,
+         .audio_kind = NATIVE_SDK_APPKIT_AUDIO_EVENT_FAILED,
++        .audio_load_id = loadId,
+         .audio_position_ms = 0,
+         .audio_duration_ms = 0,
+         .audio_playing = 0,
+@@ -11548,7 +11575,7 @@
+         NSTimer *tick = [NSTimer timerWithTimeInterval:0.5
+                                                 target:self
+                                               selector:@selector(audioPositionTimerFired:)
+-                                              userInfo:nil
++                                              userInfo:@(self.audioLoadId)
+                                                repeats:YES];
+         [[NSRunLoop mainRunLoop] addTimer:tick forMode:NSRunLoopCommonModes];
+         self.audioPositionTimer = tick;
+@@ -11561,7 +11588,7 @@
+         NSTimer *tick = [NSTimer timerWithTimeInterval:NATIVE_SDK_SPECTRUM_INTERVAL_SECONDS
+                                                 target:self
+                                               selector:@selector(audioSpectrumTimerFired:)
+-                                              userInfo:nil
++                                              userInfo:@(self.audioLoadId)
+                                                repeats:YES];
+         [[NSRunLoop mainRunLoop] addTimer:tick forMode:NSRunLoopCommonModes];
+         self.audioSpectrumTimer = tick;
+@@ -13081,6 +13108,13 @@
+         if (!cache_string) return 2;
+     }
+     return [object audioLoadURL:url_string cachePath:cache_string expectedBytes:expected_bytes];
++}
++
++int native_sdk_appkit_audio_load_request(native_sdk_appkit_host_t *host, const char *url, size_t url_len, uint64_t load_id) {
++    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
++    NSString *url_string = [[NSString alloc] initWithBytes:url length:url_len encoding:NSUTF8StringEncoding];
++    if (!url_string) return 2;
++    return [object audioLoadURL:url_string cachePath:@"" expectedBytes:0 loadId:load_id];
+ }
+ 
+ int native_sdk_appkit_audio_play(native_sdk_appkit_host_t *host) {
+--- a/src/platform/macos/cef_host.mm
++++ b/src/platform/macos/cef_host.mm
+@@ -2950,6 +2950,14 @@
+     return 2;
+ }
+ 
++int native_sdk_appkit_audio_load_request(native_sdk_appkit_host_t *host, const char *url, size_t url_len, uint64_t load_id) {
++    (void)host;
++    (void)url;
++    (void)url_len;
++    (void)load_id;
++    return 2;
++}
++
+ int native_sdk_appkit_audio_play(native_sdk_appkit_host_t *host) {
+     (void)host;
+     return 0;
+--- a/src/platform/macos/root.zig
++++ b/src/platform/macos/root.zig
+@@ -121,6 +121,7 @@
+     /// `AudioEventKind` ordinal plus the player's position/duration
+     /// readout at emit time.
+     audio_kind: c_int,
++    audio_load_id: u64,
+     audio_position_ms: u64,
+     audio_duration_ms: u64,
+     audio_playing: c_int,
+@@ -226,6 +227,7 @@
+ extern fn native_sdk_appkit_cancel_timer(host: *AppKitHost, timer_id: u64) void;
+ extern fn native_sdk_appkit_audio_load(host: *AppKitHost, path: [*]const u8, path_len: usize) c_int;
+ extern fn native_sdk_appkit_audio_load_url(host: *AppKitHost, url: [*]const u8, url_len: usize, cache_path: [*]const u8, cache_path_len: usize, expected_bytes: u64) c_int;
++extern fn native_sdk_appkit_audio_load_request(host: *AppKitHost, url: [*]const u8, url_len: usize, load_id: u64) c_int;
+ extern fn native_sdk_appkit_audio_play(host: *AppKitHost) c_int;
+ extern fn native_sdk_appkit_audio_pause(host: *AppKitHost) c_int;
+ extern fn native_sdk_appkit_audio_stop(host: *AppKitHost) c_int;
+@@ -830,6 +832,7 @@
+                 .cancel_timer_fn = cancelTimer,
+                 .audio_load_fn = audioLoad,
+                 .audio_load_url_fn = audioLoadUrl,
++                .audio_load_request_fn = audioLoadRequest,
+                 .audio_play_fn = audioPlay,
+                 .audio_pause_fn = audioPause,
+                 .audio_stop_fn = audioStop,
+@@ -1095,14 +1098,7 @@
+             .token = event.widget_id,
+             .item_id = event.menu_item_id,
+         } }),
+-        .audio => state.emit(.{ .audio = .{
+-            .kind = audioEventKindFromInt(event.audio_kind),
+-            .position_ms = event.audio_position_ms,
+-            .duration_ms = event.audio_duration_ms,
+-            .playing = event.audio_playing != 0,
+-            .buffering = event.audio_buffering != 0,
+-            .bands = event.audio_bands,
+-        } }),
++        .audio => state.emit(.{ .audio = audioEventFromAppKitEvent(event) }),
+         .video => state.emit(.{ .video = .{
+             .kind = videoEventKindFromInt(event.video_kind),
+             .token = event.video_token,
+@@ -1124,6 +1120,18 @@
+             } });
+         },
+     }
++}
++
++fn audioEventFromAppKitEvent(event: *const AppKitEvent) platform_mod.AudioEvent {
++    return .{
++        .kind = audioEventKindFromInt(event.audio_kind),
++        .load_id = event.audio_load_id,
++        .position_ms = event.audio_position_ms,
++        .duration_ms = event.audio_duration_ms,
++        .playing = event.audio_playing != 0,
++        .buffering = event.audio_buffering != 0,
++        .bands = event.audio_bands,
++    };
+ }
+ 
+ fn appKitColorScheme(value: c_int) platform_mod.ColorScheme {
+@@ -1763,6 +1771,20 @@
+         1 => .cache,
+         else => error.InvalidAudioOptions,
+     };
++}
++
++fn audioLoadRequest(context: ?*anyopaque, request: platform_mod.AudioUrlRequest) anyerror!platform_mod.AudioLoadResolution {
++    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
++    if (self.web_engine != .system) return error.UnsupportedService;
++    if (!audioRequestUsesStockLoader(request)) return error.UnsupportedService;
++    return switch (native_sdk_appkit_audio_load_request(self.host, request.url.ptr, request.url.len, request.load_id)) {
++        0 => .stream,
++        else => error.InvalidAudioOptions,
++    };
++}
++
++fn audioRequestUsesStockLoader(request: platform_mod.AudioUrlRequest) bool {
++    return request.headers.len == 0 and request.allow_redirects;
+ }
+ 
+ fn audioPlay(context: ?*anyopaque) anyerror!void {
+@@ -3495,6 +3517,40 @@
+     try std.testing.expectEqual(platform_mod.ColorScheme.light, appKitColorScheme(42));
+ }
+ 
++test "mac audio event preserves source load identity" {
++    var event = std.mem.zeroes(AppKitEvent);
++    event.audio_kind = 1;
++    event.audio_load_id = 41;
++    event.audio_position_ms = 1_500;
++    const translated = audioEventFromAppKitEvent(&event);
++    try std.testing.expectEqual(platform_mod.AudioEventKind.position, translated.kind);
++    try std.testing.expectEqual(@as(u64, 41), translated.load_id);
++    try std.testing.expectEqual(@as(u64, 1_500), translated.position_ms);
++}
++
++test "mac stock audio loader accepts only plain redirect-following URL requests" {
++    try std.testing.expect(audioRequestUsesStockLoader(.{ .load_id = 41, .url = "http://127.0.0.1/audio", .allow_redirects = true }));
++    try std.testing.expect(!audioRequestUsesStockLoader(.{ .load_id = 42, .url = "https://station.invalid/audio", .allow_redirects = false }));
++    const headers = [_]std.http.Header{.{ .name = "authorization", .value = "sentinel" }};
++    try std.testing.expect(!audioRequestUsesStockLoader(.{ .load_id = 43, .url = "https://station.invalid/audio", .headers = &headers, .allow_redirects = true }));
++}
++
++test "mac audio timers retain and check their source load identity" {
++    const source = @embedFile("appkit_host.m");
++    try std.testing.expect(std.mem.count(u8, source, "userInfo:@(self.audioLoadId)") == 2);
++    try std.testing.expect(std.mem.indexOf(u8, source, "self.audioPositionTimer != timer || !loadId || loadId.unsignedLongLongValue != self.audioLoadId") != null);
++    try std.testing.expect(std.mem.indexOf(u8, source, "self.audioSpectrumTimer != timer || !loadId || loadId.unsignedLongLongValue != self.audioLoadId") != null);
++}
++
++test "mac audio kvo reads identity from the observed source" {
++    const source = @embedFile("appkit_host.m");
++    try std.testing.expect(std.mem.count(u8, source, "objc_setAssociatedObject(") == 2);
++    try std.testing.expect(std.mem.indexOf(u8, source, "objc_getAssociatedObject(sourceItem, &NativeSdkAppKitAudioItemLoadIdKey)") != null);
++    try std.testing.expect(std.mem.indexOf(u8, source, "objc_getAssociatedObject(sourcePlayer, &NativeSdkAppKitAudioPlayerLoadIdKey)") != null);
++    try std.testing.expect(std.mem.indexOf(u8, source, "AVPlayerItem *sourceItem = (AVPlayerItem *)object;\n        uint64_t sourceLoadId = self.audioLoadId;") == null);
++    try std.testing.expect(std.mem.indexOf(u8, source, "AVPlayer *sourcePlayer = (AVPlayer *)object;\n        uint64_t sourceLoadId = self.audioLoadId;") == null);
++}
++
+ test "mac appearance event carries accessibility preferences" {
+     var event = std.mem.zeroes(AppKitEvent);
+     event.color_scheme = 1;
+--- a/src/platform/null_platform.zig
++++ b/src/platform/null_platform.zig
+@@ -706,6 +706,8 @@
+     audio_cached_url_count: usize = 0,
+     audio_load_count: usize = 0,
+     audio_load_url_count: usize = 0,
++    audio_load_request_count: usize = 0,
++    audio_load_id: u64 = 0,
+     audio_play_count: usize = 0,
+     audio_pause_count: usize = 0,
+     audio_stop_count: usize = 0,
+@@ -959,6 +961,7 @@
+                 .cancel_timer_fn = cancelTimer,
+                 .audio_load_fn = if (self.audio_playback) audioLoad else null,
+                 .audio_load_url_fn = if (self.audio_playback and self.audio_streaming) audioLoadUrl else null,
++                .audio_load_request_fn = if (self.audio_playback and self.audio_streaming) audioLoadRequest else null,
+                 .audio_play_fn = if (self.audio_playback) audioPlay else null,
+                 .audio_pause_fn = if (self.audio_playback) audioPause else null,
+                 .audio_stop_fn = if (self.audio_playback) audioStop else null,
+@@ -1993,6 +1996,15 @@
+         return if (cached) .cache else .stream;
+     }
+ 
++    fn audioLoadRequest(context: ?*anyopaque, request: types.AudioUrlRequest) anyerror!types.AudioLoadResolution {
++        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
++        if (request.headers.len != 0 or !request.allow_redirects) return error.UnsupportedService;
++        self.audio_load_request_count += 1;
++        self.audio_load_id = request.load_id;
++        // NullPlatform models the contract; system backends prove transport.
++        return audioLoadUrl(context, request.url, "", 0);
++    }
++
+     fn audioPlay(context: ?*anyopaque) anyerror!void {
+         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+         self.audio_play_count += 1;
+@@ -2123,6 +2135,7 @@
+         if (!self.audio_loaded_pending) return null;
+         self.audio_loaded_pending = false;
+         return .{ .audio = .{
++            .load_id = self.audio_load_id,
+             .kind = .loaded,
+             .position_ms = self.audio.position_ms,
+             .duration_ms = self.audio.duration_ms,
+@@ -2148,6 +2161,7 @@
+                 self.audioRecordCached(self.audio.path());
+             }
+             return .{ .audio = .{
++                .load_id = self.audio_load_id,
+                 .kind = .completed,
+                 .position_ms = self.audio.position_ms,
+                 .duration_ms = self.audio.duration_ms,
+@@ -2155,6 +2169,7 @@
+             } };
+         }
+         return .{ .audio = .{
++            .load_id = self.audio_load_id,
+             .kind = .position,
+             .position_ms = self.audio.position_ms,
+             .duration_ms = self.audio.duration_ms,
+@@ -2170,6 +2185,7 @@
+     pub fn stallAudio(self: *NullPlatform) ?Event {
+         if (!self.audio.loaded or !self.audio.playing or !self.audio.streaming) return null;
+         return .{ .audio = .{
++            .load_id = self.audio_load_id,
+             .kind = .position,
+             .position_ms = self.audio.position_ms,
+             .duration_ms = self.audio.duration_ms,
+@@ -2200,6 +2216,7 @@
+         // window-less harnesses keep their deterministic reports.
+         if (self.allOpenWindowsOccluded()) return null;
+         var event = Event{ .audio = .{
++            .load_id = self.audio_load_id,
+             .kind = .spectrum,
+             .position_ms = self.audio.position_ms,
+             .duration_ms = self.audio.duration_ms,
+@@ -2226,7 +2243,7 @@
+         if (!self.audio.loaded) return null;
+         self.audio = .{ .volume = self.audio.volume };
+         self.audio_loaded_pending = false;
+-        return .{ .audio = .{ .kind = .failed } };
++        return .{ .audio = .{ .load_id = self.audio_load_id, .kind = .failed } };
+     }
+ 
+     fn videoLoad(context: ?*anyopaque, path: []const u8, token: u64, sink: types.VideoFrameSink) anyerror!void {
+--- a/src/platform/null_platform_tests.zig
++++ b/src/platform/null_platform_tests.zig
+@@ -962,3 +962,44 @@
+     try std.testing.expect(null_platform.fireTimer(2, 50_000) != null);
+     try std.testing.expect(null_platform.fireTimer(2, 51_000) == null);
+ }
++
++test "identified relay audio requests validate headers and echo source load id" {
++    var null_platform = NullPlatform.init(.{});
++    const services = null_platform.platform().services;
++    try std.testing.expectEqual(types.AudioLoadResolution.stream, try services.audioLoadRequest(.{
++        .load_id = 41,
++        .url = "http://127.0.0.1:43127/stream/41",
++        .allow_redirects = true,
++    }));
++    try std.testing.expectEqual(@as(u64, 41), null_platform.takeAudioLoaded().?.audio.load_id);
++
++    const credential = [_]std.http.Header{.{ .name = "Authorization", .value = "Basic w7xzZWNyZXQ=" }};
++    try std.testing.expectError(error.UnsupportedService, services.audioLoadRequest(.{
++        .load_id = 42,
++        .url = "https://radio.example/stream.mp3",
++        .headers = &credential,
++        .allow_redirects = true,
++    }));
++    try std.testing.expectError(error.UnsupportedService, services.audioLoadRequest(.{
++        .load_id = 42,
++        .url = "https://radio.example/stream.mp3",
++        .allow_redirects = false,
++    }));
++
++    inline for (.{ "Bad Header", "Bad:Header", "Bad\x00Header", "Bad\rHeader", "Bad\nHeader" }) |name| {
++        const malformed = [_]std.http.Header{.{ .name = name, .value = "x" }};
++        try std.testing.expectError(error.InvalidAudioOptions, services.audioLoadRequest(.{
++            .load_id = 42,
++            .url = "https://radio.example/stream.mp3",
++            .headers = &malformed,
++        }));
++    }
++    inline for (.{ "bad\x00value", "bad\rvalue", "bad\nvalue" }) |value| {
++        const malformed = [_]std.http.Header{.{ .name = "Authorization", .value = value }};
++        try std.testing.expectError(error.InvalidAudioOptions, services.audioLoadRequest(.{
++            .load_id = 42,
++            .url = "https://radio.example/stream.mp3",
++            .headers = &malformed,
++        }));
++    }
++}
+--- a/src/platform/root.zig
++++ b/src/platform/root.zig
+@@ -165,6 +165,7 @@
+ pub const TimerEvent = types.TimerEvent;
+ pub const AudioEvent = types.AudioEvent;
+ pub const AudioEventKind = types.AudioEventKind;
++pub const AudioUrlRequest = types.AudioUrlRequest;
+ pub const AudioLoadResolution = types.AudioLoadResolution;
+ pub const AudioCaptureSource = types.AudioCaptureSource;
+ pub const AudioCaptureFormat = types.AudioCaptureFormat;
+@@ -174,6 +175,8 @@
+ pub const AudioCaptureSink = types.AudioCaptureSink;
+ pub const max_audio_capture_pcm_bytes = types.max_audio_capture_pcm_bytes;
+ pub const max_audio_path_bytes = types.max_audio_path_bytes;
++pub const max_audio_request_headers = types.max_audio_request_headers;
++pub const max_audio_request_header_bytes = types.max_audio_request_header_bytes;
+ pub const audio_spectrum_band_count = types.audio_spectrum_band_count;
+ pub const audio_spectrum_floor_db = types.audio_spectrum_floor_db;
+ pub const VideoEvent = types.VideoEvent;
+--- a/src/platform/types.zig
++++ b/src/platform/types.zig
+@@ -1705,6 +1705,7 @@
+ /// intent; a stream can be "playing" (not paused) yet buffering (silent
+ /// until bytes arrive). Local-file playback never buffers.
+ pub const AudioEvent = struct {
++    load_id: u64 = 0,
+     kind: AudioEventKind,
+     position_ms: u64 = 0,
+     duration_ms: u64 = 0,
+@@ -1727,6 +1728,15 @@
+ pub const AudioLoadResolution = enum(u8) {
+     cache,
+     stream,
++};
++
++pub const max_audio_request_headers: usize = 8;
++pub const max_audio_request_header_bytes: usize = 4096;
++pub const AudioUrlRequest = struct {
++    load_id: u64,
++    url: []const u8,
++    headers: []const std.http.Header = &.{},
++    allow_redirects: bool = false,
+ };
+ 
+ /// The two independently-addressable capture sources. A host may run one
+@@ -2824,6 +2834,7 @@
+     /// flags on position ticks, completion, and mid-stream network
+     /// failures (`.failed`) all arrive as ordinary `.audio` events.
+     audio_load_url_fn: ?*const fn (context: ?*anyopaque, url: []const u8, cache_path: []const u8, expected_bytes: u64) anyerror!AudioLoadResolution = null,
++    audio_load_request_fn: ?*const fn (context: ?*anyopaque, request: AudioUrlRequest) anyerror!AudioLoadResolution = null,
+     /// Start or resume the loaded player. While playing the platform
+     /// emits `.audio`/`.position` events at a coarse honest cadence
+     /// (about every 500ms — position is a readout, not a frame clock)
+@@ -3502,6 +3513,28 @@
+         return load_fn(self.context, url, cache_path, expected_bytes);
+     }
+ 
++    pub fn audioLoadRequest(self: PlatformServices, request: AudioUrlRequest) anyerror!AudioLoadResolution {
++        if (request.load_id == 0 or request.url.len == 0) return error.InvalidAudioOptions;
++        if (request.url.len > max_audio_path_bytes) return error.AudioPathTooLarge;
++        if (request.headers.len > max_audio_request_headers) return error.InvalidAudioOptions;
++        var total: usize = 0;
++        for (request.headers) |header| {
++            total = std.math.add(usize, total, header.name.len) catch return error.InvalidAudioOptions;
++            total = std.math.add(usize, total, header.value.len) catch return error.InvalidAudioOptions;
++            if (header.name.len == 0) return error.InvalidAudioOptions;
++            for (header.name) |byte| {
++                if (byte <= 0x20 or byte >= 0x7f or std.mem.indexOfScalar(u8, "()<>@,;:\\\"/[]?={}", byte) != null)
++                    return error.InvalidAudioOptions;
++            }
++            for (header.value) |byte| {
++                if (byte == 0 or byte == '\r' or byte == '\n') return error.InvalidAudioOptions;
++            }
++        }
++        if (total > max_audio_request_header_bytes) return error.InvalidAudioOptions;
++        const load_fn = self.audio_load_request_fn orelse return error.UnsupportedService;
++        return load_fn(self.context, request);
++    }
++
+     pub fn audioPlay(self: PlatformServices) anyerror!void {
+         const play_fn = self.audio_play_fn orelse return error.UnsupportedService;
+         return play_fn(self.context);
+--- a/src/platform/windows/root.zig
++++ b/src/platform/windows/root.zig
+@@ -110,6 +110,7 @@
+     /// honest stream-stall mirror (an un-paused stream waiting for
+     /// bytes), distinct from `audio_playing` (the transport intent).
+     audio_kind: c_int,
++    audio_load_id: u64,
+     audio_position_ms: u64,
+     audio_duration_ms: u64,
+     audio_playing: c_int,
+@@ -205,6 +206,7 @@
+ extern fn native_sdk_windows_clipboard_write_data(host: *WindowsHost, mime_type: [*]const u8, mime_type_len: usize, bytes: [*]const u8, bytes_len: usize) c_int;
+ extern fn native_sdk_windows_audio_load(host: *WindowsHost, path: [*]const u8, path_len: usize) c_int;
+ extern fn native_sdk_windows_audio_load_url(host: *WindowsHost, url: [*]const u8, url_len: usize, cache_path: [*]const u8, cache_path_len: usize, expected_bytes: u64) c_int;
++extern fn native_sdk_windows_audio_load_request(host: *WindowsHost, url: [*]const u8, url_len: usize, load_id: u64) c_int;
+ extern fn native_sdk_windows_audio_play(host: *WindowsHost) c_int;
+ extern fn native_sdk_windows_audio_pause(host: *WindowsHost) c_int;
+ extern fn native_sdk_windows_audio_stop(host: *WindowsHost) c_int;
+@@ -481,6 +483,7 @@
+                 .format_local_time_fn = formatLocalTime,
+                 .audio_load_fn = audioLoad,
+                 .audio_load_url_fn = audioLoadUrl,
++                .audio_load_request_fn = audioLoadRequest,
+                 .audio_play_fn = audioPlay,
+                 .audio_pause_fn = audioPause,
+                 .audio_stop_fn = audioStop,
+@@ -703,16 +706,21 @@
+             .reduce_motion = event.reduce_motion != 0,
+             .high_contrast = event.high_contrast != 0,
+         } }),
+-        .audio => state.emit(.{ .audio = .{
+-            .kind = audioEventKindFromInt(event.audio_kind),
+-            .position_ms = event.audio_position_ms,
+-            .duration_ms = event.audio_duration_ms,
+-            .playing = event.audio_playing != 0,
+-            .buffering = event.audio_buffering != 0,
+-            .bands = event.audio_bands,
+-        } }),
++        .audio => state.emit(.{ .audio = audioEventFromWindowsEvent(event) }),
+         .context_menu_action => state.emit(.{ .context_menu_action = contextMenuActionEventFromWindowsEvent(event) }),
+     }
++}
++
++fn audioEventFromWindowsEvent(event: *const WindowsEvent) platform_mod.AudioEvent {
++    return .{
++        .kind = audioEventKindFromInt(event.audio_kind),
++        .load_id = event.audio_load_id,
++        .position_ms = event.audio_position_ms,
++        .duration_ms = event.audio_duration_ms,
++        .playing = event.audio_playing != 0,
++        .buffering = event.audio_buffering != 0,
++        .bands = event.audio_bands,
++    };
+ }
+ 
+ fn gpuSurfaceFrameEventFromWindowsEvent(event: *const WindowsEvent) platform_mod.GpuSurfaceFrameEvent {
+@@ -1748,6 +1756,20 @@
+     };
+ }
+ 
++fn audioLoadRequest(context: ?*anyopaque, request: platform_mod.AudioUrlRequest) anyerror!platform_mod.AudioLoadResolution {
++    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
++    if (self.web_engine != .system) return error.UnsupportedService;
++    if (!audioRequestUsesStockLoader(request)) return error.UnsupportedService;
++    return switch (native_sdk_windows_audio_load_request(self.host, request.url.ptr, request.url.len, request.load_id)) {
++        0 => .stream,
++        else => error.InvalidAudioOptions,
++    };
++}
++
++fn audioRequestUsesStockLoader(request: platform_mod.AudioUrlRequest) bool {
++    return request.headers.len == 0 and request.allow_redirects;
++}
++
+ fn audioPlay(context: ?*anyopaque) anyerror!void {
+     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+     if (native_sdk_windows_audio_play(self.host) == 0) return error.InvalidAudioOptions;
+@@ -2688,12 +2710,23 @@
+     event.audio_duration_ms = 120_000;
+     event.audio_playing = 1;
+     event.audio_buffering = 1;
++    event.audio_load_id = 41;
++    const translated = audioEventFromWindowsEvent(&event);
++    try std.testing.expectEqual(@as(u64, 41), translated.load_id);
++    try std.testing.expectEqual(@as(u64, 1_500), translated.position_ms);
+     try std.testing.expectEqual(platform_mod.AudioEventKind.position, audioEventKindFromInt(event.audio_kind));
+     try std.testing.expectEqual(platform_mod.AudioEventKind.loaded, audioEventKindFromInt(0));
+     try std.testing.expectEqual(platform_mod.AudioEventKind.completed, audioEventKindFromInt(2));
+     // Unknown ordinals degrade loudly to failed, never to silence.
+     try std.testing.expectEqual(platform_mod.AudioEventKind.failed, audioEventKindFromInt(3));
+     try std.testing.expectEqual(platform_mod.AudioEventKind.failed, audioEventKindFromInt(99));
++}
++
++test "windows stock audio loader accepts only plain redirect-following URL requests" {
++    try std.testing.expect(audioRequestUsesStockLoader(.{ .load_id = 41, .url = "http://127.0.0.1/audio", .allow_redirects = true }));
++    try std.testing.expect(!audioRequestUsesStockLoader(.{ .load_id = 42, .url = "https://station.invalid/audio", .allow_redirects = false }));
++    const headers = [_]std.http.Header{.{ .name = "authorization", .value = "sentinel" }};
++    try std.testing.expect(!audioRequestUsesStockLoader(.{ .load_id = 43, .url = "https://station.invalid/audio", .headers = &headers, .allow_redirects = true }));
+ }
+ 
+ fn testPlatformWithEngine(web_engine: platform_mod.WebEngine) WindowsPlatform {
+--- a/src/platform/windows/webview2_host.cpp
++++ b/src/platform/windows/webview2_host.cpp
+@@ -264,6 +264,7 @@
+     int reduce_motion;
+     int high_contrast;
+     int audio_kind;
++    uint64_t audio_load_id;
+     uint64_t audio_position_ms;
+     uint64_t audio_duration_ms;
+     int audio_playing;
+@@ -607,6 +608,7 @@
+     uint8_t bands[kAudioSpectrumBandCount] = {};
+     HWND hwnd = nullptr;
+     uint64_t generation = 0;
++    uint64_t load_id = 0;
+ };
+ 
+ /* The loop-thread half of spectrum analysis: the live capture handle
+@@ -646,6 +648,8 @@
+      * completions, retired-session events) carry the generation they
+      * were born with and are ignored when it no longer matches. */
+     uint64_t generation = 0;
++    /* Application load identity, distinct from the internal generation. */
++    uint64_t load_id = 0;
+     bool active = false;
+     bool url_source = false;
+     /* Topology resolved: transport calls apply directly; before this
+@@ -3646,6 +3650,18 @@
+ constexpr WPARAM kAudioNoteBufferingStopped = 7;
+ constexpr WPARAM kAudioNoteError = 8;
+ 
++struct AudioSessionNote {
++    WPARAM kind;
++    uint64_t generation;
++    uint64_t load_id;
++};
++
++static void audioPostSessionNote(HWND hwnd, WPARAM kind, uint64_t generation, uint64_t load_id) {
++    AudioSessionNote *note = new (std::nothrow) AudioSessionNote{kind, generation, load_id};
++    if (!note) return;
++    if (!PostMessageW(hwnd, kAudioSessionMessage, 0, reinterpret_cast<LPARAM>(note))) delete note;
++}
++
+ /* Position tick on the first top-level window, outside the app-timer id
+  * range; 500 ms is the shared coarse cadence (macOS and the null
+  * platform tick the same), so frame-clock scrubber interpolation
+@@ -3693,9 +3709,10 @@
+     IMFMediaSource *source = nullptr;
+     HWND hwnd = nullptr;
+     uint64_t generation = 0;
+-
+-    AudioSessionEventForwarder(IMFMediaSession *session_in, IMFMediaSource *source_in, HWND hwnd_in, uint64_t generation_in)
+-        : session(session_in), source(source_in), hwnd(hwnd_in), generation(generation_in) {
++    uint64_t load_id = 0;
++
++    AudioSessionEventForwarder(IMFMediaSession *session_in, IMFMediaSource *source_in, HWND hwnd_in, uint64_t generation_in, uint64_t load_id_in)
++        : session(session_in), source(source_in), hwnd(hwnd_in), generation(generation_in), load_id(load_id_in) {
+         session->AddRef();
+         source->AddRef();
+     }
+@@ -3758,7 +3775,7 @@
+         }
+         event->Release();
+         /* A destroyed window makes this a harmless no-op. */
+-        if (note != 0) PostMessageW(hwnd, kAudioSessionMessage, note, (LPARAM)generation);
++        if (note != 0) audioPostSessionNote(hwnd, note, generation, load_id);
+         if (FAILED(session->BeginGetEvent(this, nullptr))) retire();
+         return S_OK;
+     }
+@@ -3781,9 +3798,10 @@
+     std::shared_ptr<HostLifetime> lifetime;
+     HWND hwnd = nullptr;
+     uint64_t generation = 0;
+-
+-    AudioSourceResolveForwarder(IMFSourceResolver *resolver_in, Host *host_in, std::shared_ptr<HostLifetime> lifetime_in, HWND hwnd_in, uint64_t generation_in)
+-        : resolver(resolver_in), host(host_in), lifetime(std::move(lifetime_in)), hwnd(hwnd_in), generation(generation_in) {
++    uint64_t load_id = 0;
++
++    AudioSourceResolveForwarder(IMFSourceResolver *resolver_in, Host *host_in, std::shared_ptr<HostLifetime> lifetime_in, HWND hwnd_in, uint64_t generation_in, uint64_t load_id_in)
++        : resolver(resolver_in), host(host_in), lifetime(std::move(lifetime_in)), hwnd(hwnd_in), generation(generation_in), load_id(load_id_in) {
+         resolver->AddRef();
+     }
+     ~AudioSourceResolveForwarder() { resolver->Release(); }
+@@ -3816,7 +3834,8 @@
+         if (SUCCEEDED(hr) && object) object->QueryInterface(IID_IMFMediaSource, reinterpret_cast<void **>(&source));
+         if (object) object->Release();
+         std::lock_guard<std::recursive_mutex> guard(lifetime->mutex);
+-        const bool current = lifetime->alive && host->audio.active && host->audio.generation == generation;
++        const bool current = lifetime->alive && host->audio.active &&
++            host->audio.generation == generation && host->audio.load_id == load_id;
+         if (!current) {
+             if (source) {
+                 source->Shutdown();
+@@ -3825,13 +3844,13 @@
+             return S_OK;
+         }
+         if (!source) {
+-            PostMessageW(hwnd, kAudioSessionMessage, kAudioNoteSourceFailed, (LPARAM)generation);
++            audioPostSessionNote(hwnd, kAudioNoteSourceFailed, generation, load_id);
+             return S_OK;
+         }
+         /* Reference transferred; the loop thread attaches or (if it
+          * bumps the generation first) releases it in teardown. */
+         host->audio.source = source;
+-        PostMessageW(hwnd, kAudioSessionMessage, kAudioNoteSourceResolved, (LPARAM)generation);
++        audioPostSessionNote(hwnd, kAudioNoteSourceResolved, generation, load_id);
+         return S_OK;
+     }
+ };
+@@ -3959,11 +3978,12 @@
+     return (uint64_t)time / 10000ull;
+ }
+ 
+-static void audioEmitReport(Host *host, int kind, uint64_t position_ms, uint64_t duration_ms, int playing, int buffering) {
++static void audioEmitReport(Host *host, int kind, uint64_t load_id, uint64_t position_ms, uint64_t duration_ms, int playing, int buffering) {
+     if (!host || !host->callback) return;
+     WindowsEvent event = {};
+     event.kind = kAudio;
+     event.audio_kind = kind;
++    event.audio_load_id = load_id;
+     event.audio_position_ms = position_ms;
+     event.audio_duration_ms = duration_ms;
+     event.audio_playing = playing;
+@@ -3974,18 +3994,19 @@
+ 
+ static void audioEmitEvent(Host *host, int kind) {
+     AudioState &audio = host->audio;
+-    audioEmitReport(host, kind, audioPositionMs(audio), audio.duration_ms, audio.playing ? 1 : 0, audio.buffering ? 1 : 0);
++    audioEmitReport(host, kind, audio.load_id, audioPositionMs(audio), audio.duration_ms, audio.playing ? 1 : 0, audio.buffering ? 1 : 0);
+ }
+ 
+ /* SPECTRUM report: the band snapshot plus the same live transport
+  * readout a position tick carries, so a consumer can bind bars and
+  * scrubber off one event. */
+-static void audioEmitSpectrum(Host *host, const uint8_t bands[kAudioSpectrumBandCount]) {
++static void audioEmitSpectrum(Host *host, uint64_t load_id, const uint8_t bands[kAudioSpectrumBandCount]) {
+     if (!host || !host->callback) return;
+     AudioState &audio = host->audio;
+     WindowsEvent event = {};
+     event.kind = kAudio;
+     event.audio_kind = kAudioEventSpectrum;
++    event.audio_load_id = load_id;
+     event.audio_position_ms = audioPositionMs(audio);
+     event.audio_duration_ms = audio.duration_ms;
+     event.audio_playing = audio.playing ? 1 : 0;
+@@ -4408,6 +4429,7 @@
+     spectrum.shared = std::make_shared<AudioSpectrumShared>();
+     spectrum.shared->hwnd = hwnd;
+     spectrum.shared->generation = spectrum.generation;
++    spectrum.shared->load_id = host->audio.load_id;
+     std::thread(audioSpectrumCaptureThread, spectrum.shared).detach();
+ }
+ 
+@@ -4446,14 +4468,14 @@
+     AudioState &audio = host->audio;
+     AudioSpectrumState &spectrum = host->spectrum;
+     if (!spectrum.shared || (uint64_t)generation != spectrum.generation) return;
+-    if (!audio.active || !audio.playing || audio.buffering) return;
++    if (!audio.active || audio.load_id != spectrum.shared->load_id || !audio.playing || audio.buffering) return;
+     if (!audioAnyWindowReachesGlass(host)) return;
+     uint8_t bands[kAudioSpectrumBandCount];
+     {
+         std::lock_guard<std::mutex> guard(spectrum.shared->mutex);
+         memcpy(bands, spectrum.shared->bands, sizeof(bands));
+     }
+-    audioEmitSpectrum(host, bands);
++    audioEmitSpectrum(host, spectrum.shared->load_id, bands);
+ }
+ 
+ /* ------------------------------------------------------- audio capture
+@@ -4692,7 +4714,7 @@
+     audio.session = session;
+     /* The pump owns its refs (constructor AddRefs) and self-releases at
+      * MESessionClosed or on pump failure. */
+-    AudioSessionEventForwarder *pump = new AudioSessionEventForwarder(session, source, hwnd, audio.generation);
++    AudioSessionEventForwarder *pump = new AudioSessionEventForwarder(session, source, hwnd, audio.generation, audio.load_id);
+     if (FAILED(session->BeginGetEvent(pump, nullptr))) {
+         pump->Release();
+         source->Shutdown();
+@@ -4741,7 +4763,7 @@
+ /* Synchronous local-file load: 0 loaded (the asynchronous LOADED
+  * acknowledgment follows at topology ready), 1 missing file, 2
+  * undecodable — the macOS host's result contract. */
+-static int audioLoadPathInternal(Host *host, const std::string &path) {
++static int audioLoadPathInternal(Host *host, const std::string &path, uint64_t load_id) {
+     audioReleaseSession(host, true);
+     std::wstring wide = widen(path);
+     if (!regularFileExists(wide)) return 1;
+@@ -4760,6 +4782,7 @@
+     object->Release();
+     if (!source) return 2;
+     AudioState &audio = host->audio;
++    audio.load_id = load_id;
+     audio.active = true;
+     audio.source = source;
+     if (!audioAttachSession(host)) {
+@@ -4775,7 +4798,7 @@
+  * a started stream, 2 when the URL cannot be used; everything
+  * asynchronous — readiness, stalls, natural end, network death —
+  * arrives as audio reports. */
+-static int audioLoadUrlInternal(Host *host, const std::string &url, const std::string &cache_path, uint64_t expected_bytes) {
++static int audioLoadUrlInternal(Host *host, const std::string &url, const std::string &cache_path, uint64_t expected_bytes, uint64_t load_id) {
+     audioReleaseSession(host, true);
+     if (url.find("://") == std::string::npos) return 2;
+     if (!cache_path.empty()) {
+@@ -4784,7 +4807,7 @@
+         const uint64_t size = audioFileSize(cache_wide, &exists);
+         if (exists) {
+             if (expected_bytes == 0 || size == expected_bytes) {
+-                if (audioLoadPathInternal(host, cache_path) == 0) return 1;
++                if (audioLoadPathInternal(host, cache_path, load_id) == 0) return 1;
+                 /* An entry with the right size that will not decode is
+                  * corrupt — fall through to discard and re-stream. */
+             }
+@@ -4799,12 +4822,13 @@
+     IMFSourceResolver *resolver = nullptr;
+     if (FAILED(MFCreateSourceResolver(&resolver)) || !resolver) return 2;
+     AudioState &audio = host->audio;
++    audio.load_id = load_id;
+     audio.active = true;
+     audio.url_source = true;
+     /* A fresh stream has no bytes yet: buffering starts true and drops
+      * when the session actually starts rolling. */
+     audio.buffering = true;
+-    AudioSourceResolveForwarder *forwarder = new AudioSourceResolveForwarder(resolver, host, host->lifetime, hwnd, audio.generation);
++    AudioSourceResolveForwarder *forwarder = new AudioSourceResolveForwarder(resolver, host, host->lifetime, hwnd, audio.generation, audio.load_id);
+     const HRESULT hr = resolver->BeginCreateObjectFromURL(widen(url).c_str(), MF_RESOLUTION_MEDIASOURCE, nullptr, nullptr, forwarder, nullptr);
+     forwarder->Release();
+     resolver->Release();
+@@ -4847,26 +4871,28 @@
+  * cache entry. */
+ static void audioCompleted(Host *host) {
+     const uint64_t duration_ms = host->audio.duration_ms;
++    const uint64_t load_id = host->audio.load_id;
+     audioReleaseSession(host, false);
+-    audioEmitReport(host, kAudioEventCompleted, duration_ms, duration_ms, 0, 0);
++    audioEmitReport(host, kAudioEventCompleted, load_id, duration_ms, duration_ms, 0, 0);
+ }
+ 
+ /* A load that never became playable or a pipeline that died mid-flight:
+  * one FAILED report, player retired first. The cache download dies too
+  * — bytes from a failing source are not trustworthy. */
+ static void audioFailed(Host *host) {
++    const uint64_t load_id = host->audio.load_id;
+     audioReleaseSession(host, true);
+-    audioEmitReport(host, kAudioEventFailed, 0, 0, 0, 0);
++    audioEmitReport(host, kAudioEventFailed, load_id, 0, 0, 0, 0);
+ }
+ 
+ /* Distilled session notes, marshalled from Media Foundation worker
+  * threads via PostMessage; loop thread. Stale generations (a replaced
+  * or stopped playback's stragglers) are dropped here. */
+-static void audioHandleSessionMessage(Host *host, WPARAM note, LPARAM generation) {
++static void audioHandleSessionMessage(Host *host, const AudioSessionNote &note) {
+     std::lock_guard<std::recursive_mutex> guard(host->lifetime->mutex);
+     AudioState &audio = host->audio;
+-    if (!audio.active || (uint64_t)generation != audio.generation) return;
+-    switch (note) {
++    if (!audio.active || note.generation != audio.generation || note.load_id != audio.load_id) return;
++    switch (note.kind) {
+         case kAudioNoteSourceResolved:
+             if (!audioAttachSession(host)) audioFailed(host);
+             break;
+@@ -5699,7 +5725,10 @@
+             }
+             return 0;
+         case kAudioSessionMessage:
+-            if (host) audioHandleSessionMessage(host, wparam, lparam);
++            if (lparam) {
++                std::unique_ptr<AudioSessionNote> note(reinterpret_cast<AudioSessionNote *>(lparam));
++                if (host) audioHandleSessionMessage(host, *note);
++            }
+             return 0;
+         case kAudioSpectrumMessage:
+             if (host) audioHandleSpectrumMessage(host, wparam);
+@@ -7982,12 +8011,17 @@
+ 
+ int native_sdk_windows_audio_load(Host *host, const char *path, size_t path_len) {
+     if (!host) return 2;
+-    return audioLoadPathInternal(host, slice(path, path_len));
++    return audioLoadPathInternal(host, slice(path, path_len), 0);
+ }
+ 
+ int native_sdk_windows_audio_load_url(Host *host, const char *url, size_t url_len, const char *cache_path, size_t cache_path_len, uint64_t expected_bytes) {
+     if (!host) return 2;
+-    return audioLoadUrlInternal(host, slice(url, url_len), slice(cache_path, cache_path_len), expected_bytes);
++    return audioLoadUrlInternal(host, slice(url, url_len), slice(cache_path, cache_path_len), expected_bytes, 0);
++}
++
++int native_sdk_windows_audio_load_request(Host *host, const char *url, size_t url_len, uint64_t load_id) {
++    if (!host) return 2;
++    return audioLoadUrlInternal(host, slice(url, url_len), std::string(), 0, load_id);
+ }
+ 
+ int native_sdk_windows_audio_play(Host *host) {
+--- a/src/runtime/effects.zig
++++ b/src/runtime/effects.zig
+@@ -811,6 +811,7 @@
+ /// slices other effect families carry.
+ pub const EffectAudio = struct {
+     key: u64,
++    load_id: u64 = 0,
+     kind: EffectAudioEventKind,
+     position_ms: u64 = 0,
+     duration_ms: u64 = 0,
+@@ -3012,6 +3013,7 @@
+             /// Extra request headers; names and values are copied into
+             /// slot storage at call time.
+             headers: []const std.http.Header = &.{},
++            follow_redirects: bool = true,
+             /// Request payload (sent with a content-length). `null`
+             /// sends no body.
+             body: ?[]const u8 = null,
+@@ -3045,6 +3047,7 @@
+             method: std.http.Method,
+             url: []const u8,
+             headers: []const std.http.Header,
++            follow_redirects: bool,
+             body: []const u8,
+             response: FetchResponseMode = .buffered,
+             max_line_bytes: usize = max_effect_line_bytes,
+@@ -4616,6 +4619,7 @@
+             /// `.stream` frames the response body into line entries;
+             /// `.buffered` delivers it whole on the terminal entry.
+             fetch_response_mode: FetchResponseMode = .buffered,
++            fetch_follow_redirects: bool = true,
+             method: std.http.Method = .GET,
+             /// A fetch's URL — and a file effect's path (they never
+             /// coexist in one slot; `max_effect_file_path_bytes` fits).
+@@ -6978,6 +6982,7 @@
+             slot.on_exit = null;
+             slot.on_response = options.on_response;
+             slot.fetch_response_mode = options.response;
++            slot.fetch_follow_redirects = options.follow_redirects;
+             slot.method = options.method;
+             slot.timeout_ms = options.timeout_ms;
+             slot.line_limit = options.max_line_bytes;
+@@ -10438,6 +10443,7 @@
+             const audio_fn = self.audio.on_event;
+             const event = self.applyAudioEvent(.{
+                 .key = 0,
++                .load_id = platform_event.load_id,
+                 .kind = kind,
+                 .position_ms = clampAudioScalar(platform_event.position_ms),
+                 .duration_ms = clampAudioScalar(platform_event.duration_ms),
+@@ -12754,6 +12760,7 @@
+                         .method = slot.method,
+                         .url = slot.fetchUrl(),
+                         .headers = slot.fetchHeaders(),
++                        .follow_redirects = slot.fetch_follow_redirects,
+                         .body = slot.fetchPayload(),
+                         .response = slot.fetch_response_mode,
+                         .max_line_bytes = slot.line_limit,
+@@ -16149,7 +16156,7 @@
+                 .extra_headers = slot.fetchHeaders(),
+                 // Mirrors `std.http.Client.fetch`: payloads cannot be
+                 // replayed across redirects.
+-                .redirect_behavior = if (slot.payload_len > 0) .unhandled else @enumFromInt(3),
++                .redirect_behavior = if (!slot.fetch_follow_redirects or slot.payload_len > 0) .unhandled else @enumFromInt(3),
+             }) catch |err| {
+                 // Establishing the connection is what `request` does, so
+                 // an UNTYPED failure here is a connect failure. (The
+--- a/src/runtime/effects_fetch_tests.zig
++++ b/src/runtime/effects_fetch_tests.zig
+@@ -101,6 +101,7 @@
+ var test_timeout_ms: u32 = effects_mod.default_effect_fetch_timeout_ms;
+ var test_response_mode: effects_mod.FetchResponseMode = .buffered;
+ var test_max_line_bytes: usize = effects_mod.max_effect_line_bytes;
++var test_follow_redirects: bool = true;
+ /// The poll idiom (one-shot): when set, the update reacts to a response
+ /// by immediately fetching the same key again.
+ var test_refetch_on_response: bool = false;
+@@ -112,6 +113,7 @@
+             .method = test_method,
+             .url = test_url,
+             .headers = test_headers,
++            .follow_redirects = test_follow_redirects,
+             .body = test_payload,
+             .timeout_ms = test_timeout_ms,
+             .response = test_response_mode,
+@@ -215,6 +217,7 @@
+     try std.testing.expectEqual(@as(usize, 1), request.headers.len);
+     try std.testing.expectEqualStrings("authorization", request.headers[0].name);
+     try std.testing.expectEqualStrings("Bearer token", request.headers[0].value);
++    try std.testing.expect(request.follow_redirects);
+     try std.testing.expectEqualStrings("{\"prompt\":\"hi\"}", request.body);
+     try std.testing.expectEqual(@as(usize, 1), fx.activeCount());
+ 
+@@ -230,6 +233,18 @@
+     // The response is terminal: the slot is free and the key is gone.
+     try std.testing.expectEqual(@as(usize, 0), fx.pendingFetchCount());
+     try std.testing.expectError(error.EffectNotFound, fx.feedResponse(fetch_key, 200, "late"));
++}
++
++test "fetch records explicit redirect refusal" {
++    var h = try Harness.create();
++    defer h.destroy();
++    const fx = &h.app_state.effects;
++    fx.executor = .fake;
++    test_url = "https://private.example.test/api/health";
++    test_follow_redirects = false;
++    defer test_follow_redirects = true;
++    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
++    try std.testing.expect(!fx.pendingFetchAt(0).?.follow_redirects);
+ }
+ 
+ test "binary bodies with zeros and high bits round-trip through the fake executor" {
+@@ -599,6 +614,9 @@
+     saw_request: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+     head_storage: [4096]u8 = undefined,
+     head_len: usize = 0,
++    redirect_storage: [128]u8 = undefined,
++    redirect_len: usize = 0,
++    request_count: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+ 
+     fn start(allocator: std.mem.Allocator) !*Fixture {
+         const self = try allocator.create(Fixture);
+@@ -642,6 +660,12 @@
+         return std.mem.indexOf(u8, self.head_storage[0..self.head_len], needle) != null;
+     }
+ 
++    fn redirectTo(self: *Fixture, destination_url: []const u8) void {
++        std.debug.assert(destination_url.len <= self.redirect_storage.len);
++        @memcpy(self.redirect_storage[0..destination_url.len], destination_url);
++        self.redirect_len = destination_url.len;
++    }
++
+     fn serverMain(self: *Fixture) void {
+         const io = self.threaded.io();
+         while (!self.stopping.load(.acquire)) {
+@@ -663,9 +687,16 @@
+         @memcpy(self.head_storage[0..head_len], request.head_buffer[0..head_len]);
+         self.head_len = head_len;
+         self.saw_request.store(true, .release);
++        _ = self.request_count.fetchAdd(1, .acq_rel);
+ 
+         const target = request.head.target;
+-        if (std.mem.eql(u8, target, "/hello")) {
++        if (std.mem.eql(u8, target, "/redirect")) {
++            try request.respond("redirect denied by caller", .{
++                .status = .temporary_redirect,
++                .keep_alive = false,
++                .extra_headers = &.{.{ .name = "location", .value = self.redirect_storage[0..self.redirect_len] }},
++            });
++        } else if (std.mem.eql(u8, target, "/hello")) {
+             try request.respond("hello from the fixture", .{ .keep_alive = false });
+         } else if (std.mem.eql(u8, target, "/teapot")) {
+             try request.respond("short and stout", .{ .status = .teapot, .keep_alive = false });
+@@ -883,6 +914,58 @@
+     try std.testing.expectEqual(@as(usize, 0), h.app_state.effects.activeCount());
+ }
+ 
++test "real authenticated GET with redirects disabled returns 307 without contacting destination" {
++    var h = try Harness.create();
++    defer h.destroy();
++    const source = try Fixture.start(std.testing.allocator);
++    defer source.stop();
++    const destination = try Fixture.start(std.testing.allocator);
++    defer destination.stop();
++
++    var destination_url: [128]u8 = undefined;
++    source.redirectTo(destination.url(&destination_url, "/hello"));
++    var source_url: [128]u8 = undefined;
++    test_url = source.url(&source_url, "/redirect");
++    test_method = .GET;
++    test_headers = &.{.{ .name = "authorization", .value = "Basic c3ludGhldGljOnNlY3JldA==" }};
++    test_payload = null;
++    test_follow_redirects = false;
++    defer test_follow_redirects = true;
++    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
++    try waitForResponse(&h);
++
++    try std.testing.expectEqual(effects_mod.EffectFetchOutcome.ok, h.app_state.model.outcome.?);
++    try std.testing.expectEqual(@as(u16, 307), h.app_state.model.status);
++    try std.testing.expect(source.headContains("authorization: Basic c3ludGhldGljOnNlY3JldA=="));
++    try std.testing.expectEqual(@as(usize, 0), destination.request_count.load(.acquire));
++}
++
++test "real authenticated POST with redirects disabled returns 307 without contacting destination" {
++    var h = try Harness.create();
++    defer h.destroy();
++    const source = try Fixture.start(std.testing.allocator);
++    defer source.stop();
++    const destination = try Fixture.start(std.testing.allocator);
++    defer destination.stop();
++
++    var destination_url: [128]u8 = undefined;
++    source.redirectTo(destination.url(&destination_url, "/echo"));
++    var source_url: [128]u8 = undefined;
++    test_url = source.url(&source_url, "/redirect");
++    test_method = .POST;
++    test_headers = &.{.{ .name = "authorization", .value = "Basic c3ludGhldGljOnNlY3JldA==" }};
++    test_payload = "private request";
++    test_follow_redirects = false;
++    defer test_follow_redirects = true;
++    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
++    try waitForResponse(&h);
++
++    try std.testing.expectEqual(effects_mod.EffectFetchOutcome.ok, h.app_state.model.outcome.?);
++    try std.testing.expectEqual(@as(u16, 307), h.app_state.model.status);
++    try std.testing.expect(source.headContains("authorization: Basic c3ludGhldGljOnNlY3JldA=="));
++    try std.testing.expectEqual(@as(usize, 0), destination.request_count.load(.acquire));
++}
++
+ test "real fetch reports non-2xx statuses as delivered responses" {
+     var h = try Harness.create();
+     defer h.destroy();

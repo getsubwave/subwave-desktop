@@ -1,0 +1,80 @@
+{
+  "version": "0.10.1",
+  "files": [
+    {
+      "path": "src/platform/linux/gtk_host.c",
+      "before": "f6f1f606e36c0c5590415c1b112412fbb4a815963b32f92d727f42a77685d621",
+      "after": "f2313c98fe11baced0f645051acffdf09ed6c0c255bb9bf1d7833844c42eda79"
+    },
+    {
+      "path": "src/platform/linux/gtk_host.h",
+      "before": "a797b5f5596c5f77f5fba783d1ef0d446bfa7f35388e853652b652349e196a65",
+      "after": "f20db8c2ab41fe1a57ec1e6af142e97ceecc60625549c61d7813b428cec64f1e"
+    },
+    {
+      "path": "src/platform/linux/root.zig",
+      "before": "311122a4a679dbdd8046bfae99e3a2d204abb37f69cb950a5a61db1ecfa43f3d",
+      "after": "d170e39a4bc4616bd9eb46441aa7b56423752d2f8b89bc46f51d688943f6b837"
+    },
+    {
+      "path": "src/platform/macos/appkit_host.h",
+      "before": "a4c763a8cf55ce366489a20043a5b65bdeb06b23ac1b0897ff44216d6ce1356c",
+      "after": "7adecaf485b87e565ea223c5a4e772710a97fdecfc2723cbe9901d06182adb09"
+    },
+    {
+      "path": "src/platform/macos/appkit_host.m",
+      "before": "8945735609c072ff20a44086192d91062dc3703c9e22022489a371ec82b7882a",
+      "after": "c2491322af579b22da8ace9da0d11319b482583155de4b5fcc8cc75b12780793"
+    },
+    {
+      "path": "src/platform/macos/cef_host.mm",
+      "before": "cd1f1cff4e6341b517618614aa8ed7244988d4cceb744ffdad74de0d7b751376",
+      "after": "ca817a57ff71f9e7e8e040aeac894bbc00efc13f9d40ec735e1e4caab8fcb9a1"
+    },
+    {
+      "path": "src/platform/macos/root.zig",
+      "before": "1b5a040dcc0ce39ed73ad76d3110ccb1731a3a698059f921cc163e647cbfefbe",
+      "after": "0cdb6ad54dd4671086b3c48edc3ec4dcede4934047544b723311b466c8a37775"
+    },
+    {
+      "path": "src/platform/null_platform.zig",
+      "before": "3d3f7a36cf2056aa59c6e152277f82b0fc9b6a1c762786a2fc6ffefc327cb806",
+      "after": "545c789e2981982daf6e3baceaf30461b535a5ea73bf3b1ba37f7b2219185830"
+    },
+    {
+      "path": "src/platform/null_platform_tests.zig",
+      "before": "ae0e4e9798473da0a359f55d61b3babc169d1d5cb153137f6bd85e03370aa0a2",
+      "after": "5b60c48a94c89015b798843e2f7e1fb61c587d1c8ef0166ee435c9f961849df8"
+    },
+    {
+      "path": "src/platform/root.zig",
+      "before": "759827a12f43d9f11613d6fa4a0e23523cb52c1899bb03020819c81c77a93509",
+      "after": "e14e03d62acc405d36fa5da60f269e18d39d4a515a6184e67439bee074a6e5e5"
+    },
+    {
+      "path": "src/platform/types.zig",
+      "before": "258983259c0dad17660c8a49405ecd6ccb97dd9ab5edc0e75a4c2048bfabfc2c",
+      "after": "164fceabe8c1b04a4f0c02e052961423dae00f47ed8dc71ec916a0786bde9948"
+    },
+    {
+      "path": "src/platform/windows/root.zig",
+      "before": "bab2f6db46489aeb14d4f5173aadc73b3ff133fd3c383a15c209fb054f0a6518",
+      "after": "55079ab78e58ee0b99c080d9d66fe34be3af1a68d54e6efa0b1224871d589280"
+    },
+    {
+      "path": "src/platform/windows/webview2_host.cpp",
+      "before": "e9b75486789c550f6741126f76d777a8c20a8ef84cf71fe3bd76119d14732b2a",
+      "after": "787962fb05d1f4d10e23f199aa90c74be51c82fe18570cc90398329cb945888f"
+    },
+    {
+      "path": "src/runtime/effects.zig",
+      "before": "ab918cdc7b8b4e93db26378326d8056d4ca1f3e00c5cc2cc8d8e6e8822d9c11f",
+      "after": "e0dab84f5ed2dd1f8b6321e00cb3db4c3a5e6e926003d712b582467d314e6e7d"
+    },
+    {
+      "path": "src/runtime/effects_fetch_tests.zig",
+      "before": "56fb44df338ed4416bc5d932fbda1a46bba7f18ee57e4dd7a4bccf55d2a83ae1",
+      "after": "7dd8231bb58a104e79c6d23fad82ccd1529b4aa0e2096a2f1749a6d569c9b1c2"
+    }
+  ]
+}

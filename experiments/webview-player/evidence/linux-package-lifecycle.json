@@ -1,0 +1,419 @@
+[
+  {
+    "event": "diagnostics",
+    "result": {
+      "loadCount": 0,
+      "playCount": 0,
+      "spectrumReceived": 0,
+      "spectrumDelivered": 0,
+      "spectrumAcked": 0,
+      "maxPendingPerView": 0,
+      "mainVisible": true,
+      "miniVisible": false,
+      "views": [
+        {
+          "windowId": 1,
+          "ready": true,
+          "visible": true,
+          "awaitingAck": false,
+          "deliveredSequence": 0,
+          "pendingSequence": 0,
+          "snapshotCount": 1,
+          "lastSnapshotRevision": 0
+        },
+        {
+          "windowId": 0,
+          "ready": false,
+          "visible": true,
+          "awaitingAck": false,
+          "deliveredSequence": 0,
+          "pendingSequence": 0,
+          "snapshotCount": 0,
+          "lastSnapshotRevision": 0
+        }
+      ]
+    }
+  },
+  {
+    "assertion": "bundled main ready before automation snapshot",
+    "pass": true
+  },
+  {
+    "event": "command",
+    "payload": {
+      "kind": "play"
+    },
+    "result": {
+      "ok": true,
+      "snapshot": {
+        "protocol": 1,
+        "revision": 1,
+        "generation": 1,
+        "playback": "loading",
+        "volume": 1,
+        "error": null
+      }
+    }
+  },
+  {
+    "event": "snapshot",
+    "result": {
+      "protocol": 1,
+      "revision": 2,
+      "generation": 1,
+      "playback": "playing",
+      "volume": 1,
+      "error": null
+    }
+  },
+  {
+    "assertion": "native loaded and playing",
+    "pass": true
+  },
+  {
+    "event": "window",
+    "payload": {
+      "action": "openMini"
+    },
+    "result": {
+      "ok": true,
+      "snapshot": {
+        "protocol": 1,
+        "revision": 2,
+        "generation": 1,
+        "playback": "playing",
+        "volume": 1,
+        "error": null
+      }
+    }
+  },
+  {
+    "event": "diagnostics",
+    "result": {
+      "loadCount": 1,
+      "playCount": 1,
+      "spectrumReceived": 128,
+      "spectrumDelivered": 203,
+      "spectrumAcked": 203,
+      "maxPendingPerView": 1,
+      "mainVisible": true,
+      "miniVisible": true,
+      "views": [
+        {
+          "windowId": 1,
+          "ready": true,
+          "visible": true,
+          "awaitingAck": false,
+          "deliveredSequence": 128,
+          "pendingSequence": 128,
+          "snapshotCount": 20,
+          "lastSnapshotRevision": 2
+        },
+        {
+          "windowId": 2,
+          "ready": true,
+          "visible": true,
+          "awaitingAck": false,
+          "deliveredSequence": 128,
+          "pendingSequence": 128,
+          "snapshotCount": 7,
+          "lastSnapshotRevision": 2
+        }
+      ]
+    }
+  },
+  {
+    "assertion": "both bundled WebViews ready",
+    "pass": true
+  },
+  {
+    "assertion": "both receive native FFT",
+    "pass": true
+  },
+  {
+    "event": "window",
+    "payload": {
+      "action": "hideMain"
+    },
+    "result": {
+      "automationResponse": "overwritten by live bridge response; validate state separately"
+    }
+  },
+  {
+    "event": "command",
+    "payload": {
+      "kind": "volume",
+      "value": 0.35
+    },
+    "result": {
+      "automationResponse": "overwritten by live bridge response; validate state separately"
+    }
+  },
+  {
+    "event": "diagnostics",
+    "result": {
+      "loadCount": 1,
+      "playCount": 1,
+      "spectrumReceived": 149,
+      "spectrumDelivered": 225,
+      "spectrumAcked": 225,
+      "maxPendingPerView": 1,
+      "mainVisible": false,
+      "miniVisible": true,
+      "views": [
+        {
+          "windowId": 1,
+          "ready": true,
+          "visible": false,
+          "awaitingAck": false,
+          "deliveredSequence": 129,
+          "pendingSequence": 129,
+          "snapshotCount": 20,
+          "lastSnapshotRevision": 2
+        },
+        {
+          "windowId": 2,
+          "ready": true,
+          "visible": true,
+          "awaitingAck": false,
+          "deliveredSequence": 149,
+          "pendingSequence": 149,
+          "snapshotCount": 10,
+          "lastSnapshotRevision": 3
+        }
+      ]
+    }
+  },
+  {
+    "assertion": "hidden main snapshot suspended",
+    "pass": true
+  },
+  {
+    "event": "window",
+    "payload": {
+      "action": "showMain"
+    },
+    "result": {
+      "ok": true,
+      "snapshot": {
+        "protocol": 1,
+        "revision": 3,
+        "generation": 1,
+        "playback": "playing",
+        "volume": 0.35,
+        "error": null
+      }
+    }
+  },
+  {
+    "event": "diagnostics",
+    "result": {
+      "loadCount": 1,
+      "playCount": 1,
+      "spectrumReceived": 162,
+      "spectrumDelivered": 250,
+      "spectrumAcked": 250,
+      "maxPendingPerView": 1,
+      "mainVisible": true,
+      "miniVisible": true,
+      "views": [
+        {
+          "windowId": 1,
+          "ready": true,
+          "visible": true,
+          "awaitingAck": false,
+          "deliveredSequence": 162,
+          "pendingSequence": 162,
+          "snapshotCount": 22,
+          "lastSnapshotRevision": 3
+        },
+        {
+          "windowId": 2,
+          "ready": true,
+          "visible": true,
+          "awaitingAck": false,
+          "deliveredSequence": 162,
+          "pendingSequence": 162,
+          "snapshotCount": 12,
+          "lastSnapshotRevision": 3
+        }
+      ]
+    }
+  },
+  {
+    "event": "snapshot",
+    "result": {
+      "protocol": 1,
+      "revision": 3,
+      "generation": 1,
+      "playback": "playing",
+      "volume": 0.35,
+      "error": null
+    }
+  },
+  {
+    "assertion": "show main pushes latest snapshot without reload",
+    "pass": true
+  },
+  {
+    "event": "window",
+    "payload": {
+      "action": "hideMain"
+    },
+    "result": {
+      "automationResponse": "overwritten by live bridge response; validate state separately"
+    }
+  },
+  {
+    "event": "command",
+    "payload": {
+      "kind": "volume",
+      "value": 0.6
+    },
+    "result": {
+      "ok": true,
+      "snapshot": {
+        "protocol": 1,
+        "revision": 4,
+        "generation": 1,
+        "playback": "playing",
+        "volume": 0.6,
+        "error": null
+      }
+    }
+  },
+  {
+    "event": "window",
+    "payload": {
+      "action": "closeMini"
+    },
+    "result": {
+      "ok": true,
+      "snapshot": {
+        "protocol": 1,
+        "revision": 4,
+        "generation": 1,
+        "playback": "playing",
+        "volume": 0.6,
+        "error": null
+      }
+    }
+  },
+  {
+    "event": "diagnostics",
+    "result": {
+      "loadCount": 1,
+      "playCount": 1,
+      "spectrumReceived": 195,
+      "spectrumDelivered": 285,
+      "spectrumAcked": 285,
+      "maxPendingPerView": 1,
+      "mainVisible": true,
+      "miniVisible": false,
+      "views": [
+        {
+          "windowId": 1,
+          "ready": true,
+          "visible": true,
+          "awaitingAck": false,
+          "deliveredSequence": 195,
+          "pendingSequence": 195,
+          "snapshotCount": 24,
+          "lastSnapshotRevision": 4
+        },
+        {
+          "windowId": 0,
+          "ready": false,
+          "visible": true,
+          "awaitingAck": false,
+          "deliveredSequence": 0,
+          "pendingSequence": 0,
+          "snapshotCount": 0,
+          "lastSnapshotRevision": 0
+        }
+      ]
+    }
+  },
+  {
+    "event": "snapshot",
+    "result": {
+      "protocol": 1,
+      "revision": 4,
+      "generation": 1,
+      "playback": "playing",
+      "volume": 0.6,
+      "error": null
+    }
+  },
+  {
+    "assertion": "close mini restores fresh main snapshot",
+    "pass": true
+  },
+  {
+    "event": "fixture",
+    "result": {
+      "activeConnections": 1,
+      "totalConnections": 1
+    }
+  },
+  {
+    "assertion": "lifecycle preserves one native load and stream",
+    "pass": true
+  },
+  {
+    "event": "window",
+    "payload": {
+      "action": "openMini"
+    },
+    "result": {
+      "ok": true,
+      "snapshot": {
+        "protocol": 1,
+        "revision": 4,
+        "generation": 1,
+        "playback": "playing",
+        "volume": 0.6,
+        "error": null
+      }
+    }
+  },
+  {
+    "event": "diagnostics",
+    "result": {
+      "loadCount": 1,
+      "playCount": 1,
+      "spectrumReceived": 257,
+      "spectrumDelivered": 403,
+      "spectrumAcked": 403,
+      "maxPendingPerView": 1,
+      "mainVisible": true,
+      "miniVisible": true,
+      "views": [
+        {
+          "windowId": 1,
+          "ready": true,
+          "visible": true,
+          "awaitingAck": false,
+          "deliveredSequence": 257,
+          "pendingSequence": 257,
+          "snapshotCount": 30,
+          "lastSnapshotRevision": 4
+        },
+        {
+          "windowId": 3,
+          "ready": true,
+          "visible": true,
+          "awaitingAck": false,
+          "deliveredSequence": 257,
+          "pendingSequence": 257,
+          "snapshotCount": 5,
+          "lastSnapshotRevision": 4
+        }
+      ]
+    }
+  },
+  {
+    "assertion": "reopened mini ready",
+    "pass": true
+  }
+]
