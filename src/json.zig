@@ -126,12 +126,44 @@ pub const CurrentTrack = struct {
     startedAt: ?[]const u8 = null,
 };
 
+// The operator's Lyrics panel switch. A station from before the panel omits
+// the object, which reads as off: it has no /lyrics/current to ask.
+pub const LyricsSwitch = struct {
+    enabled: ?bool = null,
+};
+
 pub const StationState = struct {
     current: ?CurrentTrack = null,
     theme: ?Theme = null,
     upcoming: ?[]QueueEntry = null,
     history: ?[]QueueEntry = null,
     privacy: ?Privacy = null,
+    lyrics: ?LyricsSwitch = null,
+};
+
+// /api/lyrics/current. `startMs` is on the played timeline and null on an
+// untimed line; `offsetMs` is the station's per-track correction, added to the
+// clock rather than folded into the lines. `source` and `pending` arrived with
+// the LRCLIB fallback, so an older station omits both.
+pub const LyricLine = struct {
+    startMs: ?f64 = null,
+    text: ?[]const u8 = null,
+};
+
+pub const Lyrics = struct {
+    songId: ?[]const u8 = null,
+    synced: ?bool = null,
+    offsetMs: ?f64 = null,
+    lines: ?[]LyricLine = null,
+    source: ?[]const u8 = null,
+    pending: ?bool = null,
+};
+
+// A /lyrics/current outage (503) repeats its Retry-After in the body, in
+// seconds: the one place the model can read it, as the SDK hands it no
+// response headers.
+pub const LyricsOutage = struct {
+    retryAfter: ?f64 = null,
 };
 
 // /api/dj — station identity for the masthead + onboarding booth step.
@@ -318,6 +350,11 @@ pub const Settings = struct {
     discordClientId: ?[]const u8 = null,
     // Desktop track-change notifications; absent = off (opt-in).
     notifyTrack: ?bool = null,
+    // Lyrics on the stage; absent = shown, as on the web. The timing nudge is
+    // a whole number of milliseconds, read as a float so a hand-edited
+    // fraction cannot fail the whole file.
+    showLyrics: ?bool = null,
+    lyricsOffsetMs: ?f64 = null,
 };
 
 // Parse `body` into T, tolerating unknown/extra fields. Caller owns the result

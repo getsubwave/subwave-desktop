@@ -544,8 +544,11 @@ test "a resolved hold releases while the next poll is still outstanding" {
 // Cancelled effect keys stay occupied until their terminal is delivered. A
 // station generation also rejects queued replies after the key pair wraps.
 pub const FetchSlots = struct {
-    busy: [59]bool = [_]bool{false} ** 59,
-    generation: [59]u64 = [_]u64{0} ** 59,
+    /// Every key handed to a slot sits below this (asserted at the key table).
+    pub const capacity = 59;
+
+    busy: [capacity]bool = [_]bool{false} ** capacity,
+    generation: [capacity]u64 = [_]u64{0} ** capacity,
 
     pub fn start(self: *FetchSlots, key: u64, generation: u64) bool {
         if (key >= self.busy.len or self.busy[@intCast(key)]) return false;
@@ -564,6 +567,72 @@ pub const FetchSlots = struct {
         return key < self.busy.len and !self.busy[@intCast(key)];
     }
 };
+
+/// One listener-track ask (the like status, the lyrics) that a track change
+/// abandons. It takes two keys in turn, so the abandoned ask's terminal, which
+/// may already be queued, can never be taken for the new track's answer; its
+/// generation rejects one that lands after a wrap; and an ask whose key still
+/// waits on an old terminal is deferred until that terminal frees it.
+pub const TrackAsk = struct {
+    key: u64,
+    a: u64,
+    b: u64,
+    generation: u64 = 0,
+    deferred: bool = false,
+
+    /// Drop the current ask, whatever its state. Returns the key to cancel.
+    pub fn invalidate(self: *TrackAsk) u64 {
+        const previous = self.key;
+        self.generation +%= 1;
+        self.deferred = false;
+        return previous;
+    }
+
+    /// Drop the current ask and move to the other key for the next track.
+    /// Returns the key to cancel.
+    pub fn abandon(self: *TrackAsk) u64 {
+        const previous = self.invalidate();
+        self.key = if (self.key == self.a) self.b else self.a;
+        return previous;
+    }
+
+    /// Claim the key for an ask. False defers it: the key still waits on an
+    /// old terminal, whose arrival should ask again.
+    pub fn start(self: *TrackAsk, slots: *FetchSlots) bool {
+        self.deferred = !slots.start(self.key, self.generation);
+        return !self.deferred;
+    }
+
+    /// Settle a terminal on `key`. True only for this ask's current reply.
+    pub fn finish(self: *const TrackAsk, slots: *FetchSlots, key: u64) bool {
+        return slots.finish(key, self.generation) and key == self.key;
+    }
+};
+
+test "a track ask swaps keys, defers behind a busy key, and takes only its own reply" {
+    var slots: FetchSlots = .{};
+    var ask: TrackAsk = .{ .key = 36, .a = 57, .b = 58 };
+    try testing.expect(ask.start(&slots));
+    try testing.expectEqual(@as(u64, 36), ask.abandon());
+    try testing.expectEqual(@as(u64, 57), ask.key);
+    try testing.expect(ask.start(&slots));
+    // The abandoned ask's terminal frees its key but is not this ask's reply.
+    try testing.expect(!ask.finish(&slots, 36));
+    try testing.expectEqual(@as(u64, 57), ask.abandon());
+    try testing.expectEqual(@as(u64, 58), ask.key);
+    _ = ask.abandon();
+    // Back on 57, whose cancelled ask has not delivered its terminal yet.
+    try testing.expect(!ask.start(&slots));
+    try testing.expect(ask.deferred);
+    try testing.expect(!ask.finish(&slots, 57));
+    try testing.expect(ask.start(&slots));
+    try testing.expect(!ask.deferred);
+    try testing.expect(ask.finish(&slots, 57));
+    // Invalidating keeps the key and rejects the reply in flight.
+    try testing.expect(ask.start(&slots));
+    try testing.expectEqual(@as(u64, 57), ask.invalidate());
+    try testing.expect(!ask.finish(&slots, 57));
+}
 
 test "fetch slots wait for terminals before key reuse and reject old generations" {
     var slots: FetchSlots = .{};

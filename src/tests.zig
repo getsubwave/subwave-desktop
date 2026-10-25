@@ -22,6 +22,7 @@ comptime {
     _ = @import("station_time.zig");
     _ = @import("station_schedule.zig");
     _ = @import("listener_time.zig");
+    _ = @import("lyrics.zig");
     _ = @import("iso8601.zig");
     _ = @import("utf8.zig");
     _ = @import("request_suggestions.zig");
@@ -180,6 +181,28 @@ test "player fragments build and lay out (every panel + sheets)" {
         try buildAndLayout(arena9.allocator(), player_sheets_markup, &model, 980, 660);
     }
     model.support_link = true;
+    // The station has its Lyrics panel on: the switch and the note on what
+    // this track has, then with synced lines showing, the device timing row
+    // with a nudge to reset.
+    model.lyrics_enabled = true;
+    model.lyrics_device_offset_ms = -300;
+    {
+        var arena10 = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena10.deinit();
+        try buildAndLayout(arena10.allocator(), player_sheets_markup, &model, 980, 660);
+    }
+    var timed = [_]@import("json.zig").LyricLine{.{ .startMs = 0, .text = "A timed line" }};
+    model.track_lyrics.begin("s1");
+    _ = model.track_lyrics.accept(.{ .songId = "s1", .synced = true, .lines = &timed });
+    try testing.expect(model.lyrics_synced());
+    {
+        var arena11 = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena11.deinit();
+        try buildAndLayout(arena11.allocator(), player_sheets_markup, &model, 980, 660);
+    }
+    model.track_lyrics.begin("");
+    model.lyrics_enabled = false;
+    model.lyrics_device_offset_ms = 0;
 }
 
 // The dial strip carries full words (SHOWS / TIMELINE / LIVE / BOOTH /
@@ -483,5 +506,85 @@ test "booth carried tail and boundary branches build and lay out in every filter
         var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
         defer arena_state.deinit();
         try buildAndLayout(arena_state.allocator(), player_panel_markup, &model, 880, 560);
+    }
+}
+
+// Lyrics share the LIVE stage with the track, so it has to hold three lines
+// of them, a long one wrapped, down to app.zon's minimum window, and lay out
+// as cleanly for a line sung through, an intro's rest, the untimed scroller,
+// and the band lingering empty while the next track's lyrics load; with them
+// hidden, the stage is back to its own shape under the crossed-out captions
+// button. The SDK's layout audit referees: no paragraph painting past its
+// box, no overlap, nothing leaving the window.
+test "lyrics fit the LIVE stage from the minimum window up" {
+    const views = @import("views.zig");
+    const LyricLine = @import("json.zig").LyricLine;
+    var synced = [_]LyricLine{
+        .{ .startMs = 0, .text = "The line before this one" },
+        .{ .startMs = 1_000, .text = "A rather long line that is being sung right now and might well wrap onto a second line here" },
+        .{ .startMs = 9_000, .text = "The next line waiting" },
+    };
+    var plain: [40]LyricLine = undefined;
+    for (&plain, 0..) |*line, i| line.* = .{ .text = if (i % 5 == 4) "" else "A line with no timing, to read by hand" };
+    // Runtime loops, not inline ones: each unrolled pass would take its own
+    // Model and layout buffer on the stack, and a dozen of them overflow it.
+    for ([_][2]f32{ .{ 880, 560 }, .{ 980, 660 } }) |size| {
+        for ([_][]const u8{ "synced", "sung", "resting", "plain", "lingering", "hidden" }) |case| {
+            var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena_state.deinit();
+            const arena = arena_state.allocator();
+            var model: Model = .{ .phase = .player, .lyrics_enabled = true };
+            model.title = "A Rather Long Title For The Song";
+            model.artist = "Artist";
+            model.album = "Album";
+            model.genre = "AMBIENT";
+            model.moods = "calm";
+            model.booth_line = "Talking over the intro";
+            model.stream_failed = true; // the state line, the tallest the column gets
+            model.like_available = true;
+            model.track_lyrics.begin("s1");
+            if (std.mem.eql(u8, case, "plain")) {
+                _ = model.track_lyrics.accept(.{ .songId = "s1", .synced = false, .lines = &plain });
+            } else if (std.mem.eql(u8, case, "lingering")) {
+                model.lyrics_lingering = true;
+            } else if (std.mem.eql(u8, case, "hidden")) {
+                model.lyrics_shown = false;
+                model.track_lyrics.begin("");
+            } else {
+                _ = model.track_lyrics.accept(.{ .songId = "s1", .synced = true, .lines = &synced });
+                model.track_elapsed_ms = if (std.mem.eql(u8, case, "synced")) 2_000 else if (std.mem.eql(u8, case, "sung")) 8_900 else 60_000;
+            }
+            if (std.mem.eql(u8, case, "sung")) try testing.expectEqualStrings("", model.lyric_now().word);
+            try testing.expectEqual(!std.mem.eql(u8, case, "hidden"), model.lyrics_on_stage());
+            registerAppIcons();
+            var ui = AppUi.init(arena);
+            const tree = try ui.finalize(views.rootView(&ui, &model));
+            var nodes: [1024]canvas.WidgetLayoutNode = undefined;
+            const bounds = native_sdk.geometry.RectF.init(0, 0, size[0], size[1]);
+            const layout = try canvas.layoutWidgetTree(tree.root, bounds, &nodes);
+            var storage: [16]canvas.LayoutAuditFinding = undefined;
+            const issues = canvas.auditWidgetLayout(layout, bounds, .{}, &storage);
+            for (issues.findings) |finding| {
+                var buffer: [1024]u8 = undefined;
+                var writer = std.Io.Writer.fixed(&buffer);
+                canvas.formatLayoutAuditFinding(layout, finding, &writer) catch {};
+                std.debug.print("{d}x{d} {s}: {s}\n", .{ size[0], size[1], case, writer.buffered() });
+            }
+            try testing.expectEqual(@as(usize, 0), issues.total);
+            // The spectrum keeps its full height under the band.
+            var spectrum_height: f32 = 0;
+            for (layout.nodes) |node| {
+                if (std.mem.eql(u8, node.widget.semantics.label, "Spectrum")) spectrum_height = node.frame.height;
+            }
+            try testing.expectEqual(@as(f32, 44), spectrum_height);
+            // Hidden, the captions button offers to show them again.
+            if (std.mem.eql(u8, case, "hidden")) {
+                var offered = false;
+                for (layout.nodes) |node| {
+                    if (std.mem.eql(u8, node.widget.semantics.label, "Show lyrics")) offered = true;
+                }
+                try testing.expect(offered);
+            }
+        }
     }
 }
