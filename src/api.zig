@@ -70,11 +70,15 @@ pub fn withStreamAuth(buf: []u8, url: []const u8, token: []const u8) ![]const u8
     return w.buffered();
 }
 
+// The header a station-gated read carries the station password in. It keeps
+// the password out of the query string, which would land in proxy logs.
+pub const station_auth_header = "x-station-auth";
+
 // GET the lyrics of the track the LISTENER is hearing — now-playing's
 // subsonic_id, a stream buffer behind the live edge. The station answers for
 // the on-air track or one of the three before it. The id is opaque, so it is
-// encoded like a password. Station-gated: the password rides the
-// x-station-auth header, never this query string.
+// encoded like a password. Station-gated: the password rides
+// `station_auth_header`, never this query string.
 pub fn lyricsCurrent(buf: []u8, base: []const u8, song_id: []const u8) ![]const u8 {
     var w = std.Io.Writer.fixed(buf);
     try w.print("{s}/api/lyrics/current?songId=", .{std.mem.trimEnd(u8, base, "/")});

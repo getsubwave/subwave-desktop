@@ -17,8 +17,8 @@ pub const offset_max_ms: i64 = 30_000;
 pub const offset_nudge_ms: i64 = 100;
 
 // A station that did not answer is asked again after 5, 10, 20 and 40 s, then
-// every minute. The web also honours Retry-After; the SDK hands the model no
-// response headers, so the backoff alone paces it here.
+// every minute, and never sooner than its Retry-After. The SDK hands the model
+// no response headers, so that is read from the 503's body, which repeats it.
 const retry_base_ms: u64 = 5_000;
 const retry_max_ms: u64 = 60_000;
 
@@ -35,6 +35,15 @@ const word_ms: i64 = 380;
 const min_sung_ms: i64 = 900;
 pub const line_hold_ms: i64 = 9_000;
 pub const tease_ms: i64 = 3_500;
+
+// How long the stage stays laid out for lyrics after they stop showing.
+// Between two tracks that both have them the new lines take a moment to load,
+// and dropping out of the lyrics layout for that moment would flick the page.
+pub const layout_hold_ms: u64 = 1_500;
+
+// The model's listener-track id buffer is this size too (asserted there): a
+// shorter copy here would never equal the id it was asked about.
+pub const song_capacity = 64;
 
 pub const Status = enum {
     /// Nothing to ask about: lyrics are off, or no library track is on.
@@ -77,8 +86,25 @@ pub const Moment = struct {
     resting: bool = false,
 };
 
+/// The three lines the stage shows: the one just sung, the one being sung cut
+/// around its newest lit word, and the next one waiting.
+pub const Stage = struct {
+    before: []const u8 = "",
+    sung: []const u8 = "",
+    word: []const u8 = "",
+    rest: []const u8 = "",
+    next: []const u8 = "",
+    resting: bool = false,
+};
+
+/// An untimed line for the hand scroller; a blank one is a stanza break.
+pub const Row = struct {
+    text: []const u8 = "",
+    blank: bool = false,
+};
+
 pub const Store = struct {
-    song_buf: [64]u8 = undefined,
+    song_buf: [song_capacity]u8 = undefined,
     song_len: usize = 0,
     status: Status = .idle,
     synced: bool = false,
@@ -123,7 +149,7 @@ pub const Store = struct {
     /// at most; null once the answer is settled.
     pub fn accept(self: *Store, payload: json.Lyrics) ?u64 {
         if (!std.mem.eql(u8, payload.songId orelse "", self.song())) {
-            self.refuse(.gone);
+            self.forget(.gone);
             return null;
         }
         self.count = 0;
@@ -144,7 +170,7 @@ pub const Store = struct {
         }
         self.status = .ready;
         self.synced = payload.synced orelse false;
-        self.station_offset_ms = clampOffset(wholeMs(payload.offsetMs) orelse 0);
+        self.station_offset_ms = offsetMs(payload.offsetMs);
         self.source = source(payload.source orelse "");
         self.pending = payload.pending orelse false;
         return self.recheck();
@@ -156,31 +182,31 @@ pub const Store = struct {
     pub fn reply(self: *Store, status: u16, body: []const u8) ?u64 {
         switch (status) {
             200 => {
-                const parsed = json.parse(json.Lyrics, std.heap.page_allocator, body) catch return self.miss();
+                const parsed = json.parse(json.Lyrics, std.heap.page_allocator, body) catch return self.miss(null);
                 defer parsed.deinit();
                 return self.accept(parsed.value);
             },
-            401 => self.refuse(.locked),
-            403 => self.refuse(.disabled),
-            409 => self.refuse(.gone),
-            else => return self.miss(),
+            401 => self.forget(.locked),
+            403 => self.forget(.disabled),
+            409 => self.forget(.gone),
+            else => return self.miss(retryAfterMs(body)),
         }
         return null;
     }
 
-    /// The station or the network did not answer. Lines already in hand stay
-    /// up and the pending budget paces the next ask; otherwise the backoff
-    /// does. Returns the delay before asking again.
-    pub fn miss(self: *Store) ?u64 {
-        if (self.status == .ready) return self.recheck();
-        self.status = .unavailable;
-        const delay = retryDelayMs(self.misses);
+    /// The station or the network did not answer: whatever was showing goes,
+    /// as on the web, and the backoff paces the next ask, never sooner than
+    /// the station's Retry-After. Returns the delay before asking again.
+    pub fn miss(self: *Store, retry_after_ms: ?u64) u64 {
+        self.forget(.unavailable);
+        const delay = retryDelayMs(self.misses, retry_after_ms);
         self.misses +|= 1;
         return delay;
     }
 
-    /// An answer asking again cannot change.
-    pub fn refuse(self: *Store, status: Status) void {
+    /// Drop the lines and stand at `status`: a refusal asking again cannot
+    /// change, or an outage.
+    pub fn forget(self: *Store, status: Status) void {
         self.status = status;
         self.count = 0;
         self.text_len = 0;
@@ -251,6 +277,30 @@ pub const Store = struct {
     fn teased(self: *const Store, index: usize, position_ms: i64) ?usize {
         return if (self.startAt(index).? - position_ms <= tease_ms) index else null;
     }
+
+    /// The lines the stage shows `position_ms` into the track.
+    pub fn stage(self: *const Store, position_ms: i64) Stage {
+        const at = self.moment(position_ms);
+        var out: Stage = .{ .resting = at.resting };
+        if (at.current) |current| {
+            const cut = split(self.line(current), at.progress);
+            out.sung = cut.sung;
+            out.word = cut.word;
+            out.rest = cut.rest;
+            if (current > 0) out.before = self.line(current - 1);
+        }
+        if (at.next) |next| out.next = self.line(next);
+        return out;
+    }
+
+    /// Every line at once, for untimed lyrics. `out` holds at least `count`.
+    pub fn rows(self: *const Store, out: []Row) []Row {
+        for (out[0..self.count], 0..) |*row, i| {
+            const text = std.mem.trim(u8, self.line(i), " \t\r\n");
+            row.* = .{ .text = text, .blank = text.len == 0 };
+        }
+        return out[0..self.count];
+    }
 };
 
 fn source(id: []const u8) Source {
@@ -271,11 +321,26 @@ pub fn clampOffset(ms: i64) i64 {
     return std.math.clamp(ms, offset_min_ms, offset_max_ms);
 }
 
+/// A timing correction as the station sends it or the settings file keeps it:
+/// whole milliseconds within the bound, and none when it is missing or bad.
+pub fn offsetMs(value: ?f64) i64 {
+    return clampOffset(wholeMs(value) orelse 0);
+}
+
 /// How long to wait before asking again after the `misses`th unanswered ask
-/// (0-based).
-pub fn retryDelayMs(misses: u8) u64 {
-    const doubled = std.math.shl(u64, retry_base_ms, @min(misses, 8));
-    return @min(doubled, retry_max_ms);
+/// (0-based): the backoff, or the station's Retry-After if that is longer.
+pub fn retryDelayMs(misses: u8, retry_after_ms: ?u64) u64 {
+    const backoff = @min(std.math.shl(u64, retry_base_ms, @min(misses, 8)), retry_max_ms);
+    return @max(backoff, @min(retry_after_ms orelse 0, retry_max_ms));
+}
+
+// The Retry-After a station's outage repeats in its body, in seconds.
+fn retryAfterMs(body: []const u8) ?u64 {
+    const parsed = json.parse(json.LyricsOutage, std.heap.page_allocator, body) catch return null;
+    defer parsed.deinit();
+    const seconds = parsed.value.retryAfter orelse return null;
+    if (!std.math.isFinite(seconds) or seconds <= 0) return null;
+    return @intFromFloat(@min(seconds * 1000, @as(f64, @floatFromInt(retry_max_ms))));
 }
 
 /// "0.00s", "+1.20s", "-0.10s": a device or station correction.
@@ -289,20 +354,38 @@ pub fn formatOffset(buf: []u8, ms: i64) []const u8 {
     }) catch "";
 }
 
-fn isSpace(c: u8) bool {
-    return std.ascii.isWhitespace(c);
+/// The byte length of the whitespace at `text[i]`, 0 if there is none. The
+/// set is JavaScript's `\s`, which the web splits a line's words on, so a
+/// no-break or ideographic space parts words here as it does there.
+fn spaceLen(text: []const u8, i: usize) usize {
+    const c = text[i];
+    if (c < 0x80) return if (std.ascii.isWhitespace(c)) 1 else 0;
+    const len = std.unicode.utf8ByteSequenceLength(c) catch return 0;
+    if (len > text.len - i) return 0;
+    const cp = std.unicode.utf8Decode(text[i..][0..len]) catch return 0;
+    return switch (cp) {
+        0x00A0, 0x1680, 0x2000...0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF => len,
+        else => 0,
+    };
+}
+
+fn wordEnd(text: []const u8, start: usize) usize {
+    var i = start;
+    while (i < text.len and spaceLen(text, i) == 0) i += 1;
+    return i;
 }
 
 pub fn wordCount(text: []const u8) usize {
     var count: usize = 0;
-    var in_word = false;
-    for (text) |c| {
-        if (isSpace(c)) {
-            in_word = false;
-        } else if (!in_word) {
-            in_word = true;
-            count += 1;
+    var i: usize = 0;
+    while (i < text.len) {
+        const space = spaceLen(text, i);
+        if (space > 0) {
+            i += space;
+            continue;
         }
+        count += 1;
+        i = wordEnd(text, i);
     }
     return count;
 }
@@ -317,6 +400,7 @@ pub const Split = struct {
 };
 
 /// `progress` lights at least the first word, then words in step with it.
+/// A line sung through has no newest word, so the accent lets go of it.
 pub fn split(text: []const u8, progress: f32) Split {
     const words = wordCount(text);
     if (words == 0) return .{ .rest = text };
@@ -325,14 +409,17 @@ pub fn split(text: []const u8, progress: f32) Split {
     var seen: usize = 0;
     var i: usize = 0;
     while (i < text.len) {
-        if (isSpace(text[i])) {
-            i += 1;
+        const space = spaceLen(text, i);
+        if (space > 0) {
+            i += space;
             continue;
         }
         const start = i;
-        while (i < text.len and !isSpace(text[i])) i += 1;
+        i = wordEnd(text, i);
         seen += 1;
-        if (seen == lit) return .{ .sung = text[0..start], .word = text[start..i], .rest = text[i..] };
+        if (seen < lit) continue;
+        if (progress >= 1) return .{ .sung = text[0..i], .rest = text[i..] };
+        return .{ .sung = text[0..start], .word = text[start..i], .rest = text[i..] };
     }
     return .{ .sung = text };
 }
@@ -413,24 +500,38 @@ test "untimed lines are plain, and a pending answer is asked again ten times" {
     try testing.expectEqualStrings("Not timed, so they don’t follow the song. Scroll through them.", note(&store, true));
 }
 
-test "an unanswered ask backs off to a minute, and keeps lines already in hand" {
+test "an unanswered ask backs off to a minute, never sooner than Retry-After" {
     var store: Store = .{};
     store.begin("s1");
-    try testing.expectEqual(@as(?u64, 5_000), store.miss());
-    try testing.expectEqual(@as(?u64, 10_000), store.miss());
-    try testing.expectEqual(@as(?u64, 20_000), store.miss());
-    try testing.expectEqual(@as(?u64, 40_000), store.miss());
-    try testing.expectEqual(@as(?u64, 60_000), store.miss());
-    try testing.expectEqual(@as(u64, 60_000), retryDelayMs(255));
+    try testing.expectEqual(@as(u64, 5_000), store.miss(null));
+    try testing.expectEqual(@as(u64, 10_000), store.miss(null));
+    try testing.expectEqual(@as(u64, 20_000), store.miss(null));
+    try testing.expectEqual(@as(u64, 40_000), store.miss(null));
+    try testing.expectEqual(@as(u64, 60_000), store.miss(null));
+    try testing.expectEqual(@as(u64, 60_000), retryDelayMs(255, null));
     try testing.expectEqual(Status.unavailable, store.status);
+    // The station's own window wins over a shorter backoff, up to the minute.
+    try testing.expectEqual(@as(u64, 10_000), retryDelayMs(0, 10_000));
+    try testing.expectEqual(@as(u64, 20_000), retryDelayMs(2, 10_000));
+    try testing.expectEqual(@as(u64, 60_000), retryDelayMs(0, 600_000));
+}
 
+test "an outage while lines show takes them down, as on the web" {
+    var store: Store = .{};
+    store.begin("s1");
     const parsed = try parseLyrics(
-        \\{"songId":"s1","synced":false,"offsetMs":0,"pending":true,"lines":[{"startMs":null,"text":"Kept"}]}
+        \\{"songId":"s1","synced":false,"offsetMs":0,"pending":true,"lines":[{"startMs":null,"text":"Gone"}]}
     );
     defer parsed.deinit();
-    _ = store.accept(parsed.value);
-    try testing.expectEqual(@as(?u64, pending_recheck_ms), store.miss());
+    try testing.expectEqual(@as(?u64, pending_recheck_ms), store.accept(parsed.value));
+    try testing.expectEqual(@as(u64, 5_000), store.miss(null));
+    try testing.expect(!store.plainReady());
+    try testing.expectEqual(Status.unavailable, store.status);
+    try testing.expectEqualStrings("The station isn’t answering. Trying again…", note(&store, true));
+    // The next answer is shown again, and the pending budget carries on.
+    try testing.expectEqual(@as(?u64, pending_recheck_ms), store.accept(parsed.value));
     try testing.expect(store.plainReady());
+    try testing.expectEqual(@as(u8, 2), store.pending_asks);
 }
 
 test "reply retries only a station that did not answer" {
@@ -438,6 +539,13 @@ test "reply retries only a station that did not answer" {
     store.begin("s1");
     try testing.expectEqual(@as(?u64, 5_000), store.reply(503, ""));
     try testing.expectEqual(@as(?u64, 10_000), store.reply(200, "not json"));
+    // The outage's body repeats Retry-After, which the backoff never undercuts.
+    store.begin("s1");
+    try testing.expectEqual(@as(?u64, 10_000), store.reply(503,
+        \\{"error":"The music server did not answer for lyrics","retryAfter":10}
+    ));
+    try testing.expectEqual(@as(?u64, 10_000), store.reply(503, "{\"retryAfter\":-3}"));
+    try testing.expectEqual(@as(?u64, 20_000), store.reply(502, "<html>Bad gateway</html>"));
     inline for (.{ .{ 401, Status.locked }, .{ 403, Status.disabled }, .{ 409, Status.gone } }) |case| {
         store.begin("s1");
         try testing.expectEqual(@as(?u64, null), store.reply(case[0], "{\"error\":\"no\"}"));
@@ -524,8 +632,62 @@ test "split lights the first word at once and keeps the whitespace" {
     try testing.expectEqualStrings("Hold  ", mid.sung);
     try testing.expectEqualStrings("the", mid.word);
     try testing.expectEqualStrings(" line", mid.rest);
-    try testing.expectEqualStrings("line", split(text, 1).word);
     try testing.expectEqualStrings("   ", split("   ", 0.5).rest);
+}
+
+test "split lets the accent go once the line is sung through" {
+    const done = split("Hold the line ", 1);
+    try testing.expectEqualStrings("Hold the line", done.sung);
+    try testing.expectEqualStrings("", done.word);
+    try testing.expectEqualStrings(" ", done.rest);
+    try testing.expectEqualStrings("line", split("Hold the line", 0.99).word);
+}
+
+test "words part on the spaces the web splits on, not only ASCII ones" {
+    // No-break, ideographic and narrow no-break spaces; é is not a space.
+    const text = "un\u{00A0}deux\u{3000}trois\u{202F}café";
+    try testing.expectEqual(@as(usize, 4), wordCount(text));
+    const mid = split(text, 0.5);
+    try testing.expectEqualStrings("un\u{00A0}", mid.sung);
+    try testing.expectEqualStrings("deux", mid.word);
+    try testing.expectEqualStrings("\u{3000}trois\u{202F}café", mid.rest);
+    try testing.expectEqualStrings("café", split(text, 0.9).word);
+    // A lone lead byte at the end is part of a word, never read past.
+    try testing.expectEqual(@as(usize, 2), wordCount("a \xE3"));
+}
+
+test "stage cuts the sung line and names its neighbours" {
+    var store: Store = .{};
+    syncedStore(&store, &.{
+        .{ .startMs = 0, .text = "Before it" },
+        .{ .startMs = 2_000, .text = "one two three four" },
+        .{ .startMs = 6_000, .text = "After it" },
+    });
+    const now = store.stage(2_760);
+    try testing.expectEqualStrings("Before it", now.before);
+    try testing.expectEqualStrings("one ", now.sung);
+    try testing.expectEqualStrings("two", now.word);
+    try testing.expectEqualStrings(" three four", now.rest);
+    try testing.expectEqualStrings("After it", now.next);
+    try testing.expect(!now.resting);
+    const held = store.stage(5_000);
+    try testing.expectEqualStrings("one two three four", held.sung);
+    try testing.expectEqualStrings("", held.word);
+    const intro: Store = .{};
+    try testing.expectEqualDeep(Stage{}, intro.stage(0));
+}
+
+test "rows lay every untimed line out, a blank one as a stanza break" {
+    var store: Store = .{};
+    store.begin("s1");
+    var lines = [_]json.LyricLine{ .{ .text = " First \r" }, .{ .text = "  " }, .{ .text = "Second" } };
+    _ = store.accept(.{ .songId = "s1", .synced = false, .lines = &lines });
+    var out: [max_lines]Row = undefined;
+    const rows = store.rows(&out);
+    try testing.expectEqual(@as(usize, 3), rows.len);
+    try testing.expectEqualStrings("First", rows[0].text);
+    try testing.expect(rows[1].blank);
+    try testing.expect(!rows[2].blank);
 }
 
 test "offsets clamp to the station's bound and format with a sign" {
@@ -543,7 +705,7 @@ test "the note says why there is nothing, and credits LRCLIB" {
     try testing.expectEqualStrings("No lyrics right now.", note(&store, true));
     store.begin("s1");
     try testing.expectEqualStrings("Looking for lyrics…", note(&store, true));
-    store.refuse(.disabled);
+    store.forget(.disabled);
     try testing.expectEqualStrings("The station has lyrics switched off.", note(&store, true));
     syncedStore(&store, &.{.{ .startMs = 0, .text = "a" }});
     try testing.expectEqualStrings("Synced lyrics, from the station’s library.", note(&store, true));

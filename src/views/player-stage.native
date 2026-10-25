@@ -85,7 +85,7 @@
         </if>
       </row>
 
-      <if test="{lyrics_layout}">
+      <if test="{lyrics_on_stage}">
         <text size="heading" wrap="false">{title}</text>
       </if>
       <else>
@@ -122,7 +122,7 @@
        with the sidebar and panel open) instead of painting it over the
        spectrum. The synced arm's column stretches to the viewport, which is
        what centres its three lines. -->
-  <if test="{lyrics_layout}">
+  <if test="{lyrics_on_stage}">
     <column grow="1">
       <if test="{lyrics_synced}">
         <scroll grow="1" label="Lyrics">

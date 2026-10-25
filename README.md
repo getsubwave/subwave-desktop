@@ -39,8 +39,9 @@ bottom.](docs/images/player-booth.png)
   breaks. A track with untimed lyrics shows them all to scroll by hand. The
   sleeve, title and DJ line step back to make room. A captions button beside
   the like heart (or Y) shows or hides them; the back panel's LYRICS section
-  has the same switch, a line on what the track has (crediting LRCLIB), and a
-  timing nudge for a speaker or headset that runs behind. Both are saved;
+  has the same switch, a line on what the track has (crediting LRCLIB), and,
+  while synced lyrics show, a timing nudge for a speaker or headset that runs
+  behind. Both are saved;
   lyrics are on by default. Mirrors the web's Classic and Drift skins
   (`src/lyrics.zig`); the operator's per-track station correction is applied,
   but only the web admin console can set it.

@@ -159,6 +159,13 @@ pub const Lyrics = struct {
     pending: ?bool = null,
 };
 
+// A /lyrics/current outage (503) repeats its Retry-After in the body, in
+// seconds: the one place the model can read it, as the SDK hands it no
+// response headers.
+pub const LyricsOutage = struct {
+    retryAfter: ?f64 = null,
+};
+
 // /api/dj — station identity for the masthead + onboarding booth step.
 pub const DjPublic = struct {
     name: ?[]const u8 = null,

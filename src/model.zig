@@ -59,12 +59,13 @@ pub const keys = struct {
     pub const fetch_like: u64 = 36;
     pub const post_like: u64 = 37;
     pub const post_station_auth: u64 = 38;
-    // Lyrics swap a/b keys like the like status: a song change cancels the
-    // old ask, whose terminal must not land on the new song's answer. Both
-    // stay under listener_time.FetchSlots' 59-key window.
+    // Lyrics swap a/b keys like the like status (listener_time.TrackAsk): a
+    // song change cancels the old ask, whose terminal must not land on the
+    // new song's answer.
     pub const fetch_lyrics_a: u64 = 48;
     pub const fetch_lyrics_b: u64 = 49;
     pub const lyrics_retry: u64 = 60;
+    pub const lyrics_linger: u64 = 61;
     pub const save_settings: u64 = 30;
     pub const save_debounce: u64 = 31;
     pub const discord_rpc_a: u64 = 40;
@@ -108,6 +109,18 @@ pub const keys = struct {
 // the 80–99 window these keys share with the request and polling timers.
 comptime {
     std.debug.assert(keys.directory_status_base + directory_status.capacity - 1 <= 99);
+}
+
+// Every key the listener-time asks hand to listener_time.FetchSlots must sit
+// inside its window, or the slot refuses it and the ask is never sent.
+comptime {
+    for ([_]u64{
+        keys.fetch_np,         keys.fetch_state,        keys.fetch_session,
+        keys.listener_np_a,    keys.listener_np_b,      keys.listener_state_a,
+        keys.listener_state_b, keys.listener_session_a, keys.listener_session_b,
+        keys.fetch_like,       keys.listener_like_a,    keys.listener_like_b,
+        keys.fetch_lyrics_a,   keys.fetch_lyrics_b,
+    }) |key| std.debug.assert(key < listener_time.FetchSlots.capacity);
 }
 
 pub const max_themes = 12;
@@ -497,12 +510,10 @@ pub const Model = struct {
     listener_np_key: u64 = keys.fetch_np,
     listener_state_key: u64 = keys.fetch_state,
     listener_session_key: u64 = keys.fetch_session,
-    listener_like_key: u64 = keys.fetch_like,
+    listener_like: listener_time.TrackAsk = .{ .key = keys.fetch_like, .a = keys.listener_like_a, .b = keys.listener_like_b },
     listener_fetches: listener_time.FetchSlots = .{},
     listener_generation: u64 = 0,
-    listener_like_generation: u64 = 0,
     listener_feed_deferred: bool = false,
-    listener_like_deferred: bool = false,
     dj_talking: bool = false,
 
     // recents (persisted) + discover (community directory)
@@ -517,12 +528,14 @@ pub const Model = struct {
     discover_count: usize = 0,
     directory_status: directory_status.Cache = .{},
 
+    // The subsonic id of the track the listener is hearing, which the like
+    // state, the booth ticker and the lyrics all refer to.
+    heard_song_buf: [64]u8 = undefined,
+    heard_song: []const u8 = "",
     // Listener like for the current airing (mirrors web useTrackLike): the
     // heart stays hidden until GET /api/like confirms the station has likes
     // enabled and something likeable is on air, and only fills on server
     // confirmation — no optimistic state.
-    like_song_buf: [64]u8 = undefined,
-    like_song: []const u8 = "", // subsonic id the like state refers to
     like_body_buf: [96]u8 = undefined, // POST body must outlive the frame
     like_available: bool = false,
     like_liked: bool = false,
@@ -535,16 +548,16 @@ pub const Model = struct {
     // their timing for a speaker or headset that runs behind (persisted, the
     // same for every track: a track's own mistiming is the station's to fix).
     // syncLyrics, run after every update, keeps the answer on the listener's
-    // track. lyrics_held keeps the stage laid out for lyrics while the next
-    // track's answer loads, so two lyric tracks back to back don't flick it.
+    // track, and keeps the stage laid out for lyrics for a moment after lines
+    // stop showing (lyrics_lingering), so the next track's answer loading
+    // doesn't flick the page (mirrors web useLingeringPresence).
     lyrics_enabled: bool = false,
     lyrics_shown: bool = true,
     lyrics_device_offset_ms: i64 = 0,
     track_lyrics: lyrics.Store = .{},
-    lyrics_key: u64 = keys.fetch_lyrics_a,
-    lyrics_generation: u64 = 0,
-    lyrics_deferred: bool = false,
-    lyrics_held: bool = false,
+    lyrics_ask: listener_time.TrackAsk = .{ .key = keys.fetch_lyrics_a, .a = keys.fetch_lyrics_a, .b = keys.fetch_lyrics_b },
+    lyrics_was_showing: bool = false,
+    lyrics_lingering: bool = false,
 
     // schedule / station guide
     timezone_store: [96]u8 = undefined,
@@ -897,7 +910,7 @@ pub const Model = struct {
 
     /// The DJ line stands aside while lyrics share the stage.
     pub fn booth_on_stage(self: *const Model) bool {
-        return self.has_booth() and !self.lyrics_layout();
+        return self.has_booth() and !self.lyrics_on_stage();
     }
     pub fn has_booth(self: *const Model) bool {
         return self.booth_line.len > 0;
@@ -1603,15 +1616,19 @@ pub const Model = struct {
     pub fn lyrics_plain(self: *const Model) bool {
         return self.lyrics_shown and self.track_lyrics.plainReady();
     }
-    /// Whether the stage makes room for lyrics: lines showing, or held while
-    /// the next track's lyrics load.
-    pub fn lyrics_layout(self: *const Model) bool {
-        return self.lyrics_synced() or self.lyrics_plain() or self.lyrics_held;
+    fn lyrics_showing(self: *const Model) bool {
+        return self.lyrics_synced() or self.lyrics_plain();
+    }
+    /// Whether the stage makes room for lyrics: lines showing, or lingering a
+    /// moment after they stop. Hiding them, or the operator switching them
+    /// off, gives the room back at once.
+    pub fn lyrics_on_stage(self: *const Model) bool {
+        return self.lyrics_enabled and self.lyrics_shown and (self.lyrics_showing() or self.lyrics_lingering);
     }
     /// The sleeve's edge. It gives up a third while lyrics share the stage,
     /// which is what keeps three lines of them inside the minimum window.
     pub fn sleeve_px(self: *const Model) f32 {
-        return if (self.lyrics_layout()) 120 else 180;
+        return if (self.lyrics_on_stage()) 120 else 180;
     }
     pub fn lyrics_hint(self: *const Model) []const u8 {
         return if (self.lyrics_shown) "Hide lyrics" else "Show lyrics";
@@ -1635,52 +1652,21 @@ pub const Model = struct {
         return self.track_elapsed_ms +| self.track_lyrics.station_offset_ms +| self.lyrics_device_offset_ms;
     }
 
-    /// The three lines the stage shows: the one just sung, the one being
-    /// sung cut around its newest lit word, and the next one waiting.
-    pub const LyricNow = struct {
-        before: []const u8 = "",
-        sung: []const u8 = "",
-        word: []const u8 = "",
-        rest: []const u8 = "",
-        next: []const u8 = "",
-        resting: bool = false,
-    };
-
-    pub fn lyric_now(self: *const Model) LyricNow {
-        const store = &self.track_lyrics;
-        const moment = store.moment(self.lyricPositionMs());
-        var out: LyricNow = .{ .resting = moment.resting };
-        if (moment.current) |current| {
-            const cut = lyrics.split(store.line(current), moment.progress);
-            out.sung = cut.sung;
-            out.word = cut.word;
-            out.rest = cut.rest;
-            if (current > 0) out.before = store.line(current - 1);
-        }
-        if (moment.next) |next| out.next = store.line(next);
-        return out;
+    /// The lines the stage shows now, on the lyric clock.
+    pub fn lyric_now(self: *const Model) lyrics.Stage {
+        return self.track_lyrics.stage(self.lyricPositionMs());
     }
 
-    pub fn lyric_now_list(self: *const Model, arena: std.mem.Allocator) []const LyricNow {
-        const out = arena.alloc(LyricNow, 1) catch return &.{};
+    pub fn lyric_now_list(self: *const Model, arena: std.mem.Allocator) []const lyrics.Stage {
+        const out = arena.alloc(lyrics.Stage, 1) catch return &.{};
         out[0] = self.lyric_now();
         return out;
     }
 
-    pub const LyricRow = struct {
-        text: []const u8 = "",
-        blank: bool = false,
-    };
-
     /// Untimed lines, every one at once; a blank line is a stanza break.
-    pub fn lyric_rows(self: *const Model, arena: std.mem.Allocator) []const LyricRow {
-        const store = &self.track_lyrics;
-        const out = arena.alloc(LyricRow, store.count) catch return &.{};
-        for (out, 0..) |*row, i| {
-            const text = std.mem.trim(u8, store.line(i), " \t\r\n");
-            row.* = .{ .text = text, .blank = text.len == 0 };
-        }
-        return out;
+    pub fn lyric_rows(self: *const Model, arena: std.mem.Allocator) []const lyrics.Row {
+        const out = arena.alloc(lyrics.Row, self.track_lyrics.count) catch return &.{};
+        return self.track_lyrics.rows(out);
     }
 
     /// The untimed scroller's identity: one per track, so a new song starts
@@ -1766,7 +1752,7 @@ pub const Model = struct {
         "discover_name_store", "discover_url_store", "discover_sub_store",  "discover_rows",
         "discover_count",
         // like state consumed by the Zig stage view / update, not markup
-        "like_song_buf",      "like_song",           "like_body_buf",       "like_pending",
+        "heard_song_buf",     "heard_song",          "like_body_buf",       "like_pending",
         "like_count",         "like_count_str",      "like_hint",
         // consumed by derived methods, not bound directly
         "elapsed_str",        "vol_pct",             "listeners",           "genre",
@@ -1793,12 +1779,12 @@ pub const Model = struct {
         // per-track elapsed plumbing (surfaced via elapsed_str/np_head)
         "track_started_at_s", "track_anchor_ms",     "track_elapsed_ms",
         "listener", "listener_np_key", "listener_state_key", "listener_session_key",
-        "listener_like_key", "listener_fetches", "listener_generation",
-        "listener_like_generation", "listener_feed_deferred", "listener_like_deferred",
+        "listener_like", "listener_fetches", "listener_generation",
+        "listener_feed_deferred",
         "raw_booth", "raw_booth_count", "booth_persona_store", "dj_talking",
         // lyrics plumbing (surfaced via lyrics_synced/lyric_now_list/…)
-        "track_lyrics", "lyrics_key", "lyrics_generation", "lyrics_deferred",
-        "lyrics_held", "lyrics_device_offset_ms", "lyricPositionMs", "lyric_now",
+        "track_lyrics", "lyrics_ask", "lyrics_was_showing", "lyrics_lingering",
+        "lyrics_device_offset_ms", "lyricPositionMs", "lyric_now",
     };
 };
 
@@ -1833,6 +1819,7 @@ pub const Msg = union(enum) {
     got_like_post: native_sdk.EffectResponse,
     got_lyrics: native_sdk.EffectResponse,
     tick_lyrics: native_sdk.EffectTimer,
+    tick_lyrics_linger: native_sdk.EffectTimer,
     got_reqpost: native_sdk.EffectResponse,
     got_reqstat: native_sdk.EffectResponse,
     got_ob_health: native_sdk.EffectResponse,
@@ -1964,7 +1951,7 @@ pub const Msg = union(enum) {
         "got_reqpost",   "got_reqstat",    "got_health",  "got_dj",
         "got_directory", "got_beacon",     "got_ob_health", "got_ob_dj",
         "got_like_status", "got_like_post",
-        "got_lyrics",    "tick_lyrics",
+        "got_lyrics",    "tick_lyrics",    "tick_lyrics_linger",
         "audio_event",   "saved",          "got_schedule", "tick_save",
         "chrome_changed", "toggle_play",   "vol_up",      "vol_down",
         "escape",        "mini_closed",    "tune_out",    "toggle_mini",
@@ -2381,7 +2368,7 @@ pub fn applySettingsJson(model: *Model, bytes: []const u8) void {
     restoreStationSettings(model);
     if (s.notifyTrack) |v| model.notify_track = v;
     if (s.showLyrics) |v| model.lyrics_shown = v;
-    if (s.lyricsOffsetMs) |v| model.lyrics_device_offset_ms = lyrics.clampOffset(displayInteger(@round(v), 0));
+    if (s.lyricsOffsetMs) |v| model.lyrics_device_offset_ms = lyrics.offsetMs(v);
     if (s.discordEnabled) |v| model.discord_enabled = v;
     if (s.discordClientId) |id| {
         // Same gate as the sheet's input — a hand-edited invalid ID is
@@ -2590,12 +2577,8 @@ fn armAuthRecheck(model: *Model, fx: *Effects) void {
 fn fetchLikeStatus(model: *Model, fx: *Effects) void {
     var b: [256]u8 = undefined;
     if (api.like(&b, model.base)) |u| {
-        if (!model.listener_fetches.start(model.listener_like_key, model.listener_like_generation)) {
-            model.listener_like_deferred = true;
-            return;
-        }
-        model.listener_like_deferred = false;
-        fx.fetch(.{ .key = model.listener_like_key, .url = u, .on_response = Effects.responseMsg(.got_like_status) });
+        if (!model.listener_like.start(&model.listener_fetches)) return;
+        fx.fetch(.{ .key = model.listener_like.key, .url = u, .on_response = Effects.responseMsg(.got_like_status) });
     } else |_| {}
 }
 
@@ -2604,13 +2587,20 @@ fn likeCount(v: ?i64) u32 {
     return if (c <= 0) 0 else @intCast(@min(c, std.math.maxInt(u32)));
 }
 
-// The song lyrics are for: the listener's track (like_song is the audible
-// track's id), while the station has its panel on, this listener shows them,
-// and no privacy gate stands in front of the player. "" asks for nothing.
+// The song lyrics are for: the listener's track, while the station has its
+// panel on, this listener shows them, and no privacy gate stands in front of
+// the player. "" asks for nothing.
 fn lyricsTarget(model: *const Model) []const u8 {
     if (model.phase != .player or model.station_locked()) return "";
     if (!model.lyrics_enabled or !model.lyrics_shown) return "";
-    return model.like_song;
+    return model.heard_song;
+}
+
+// The model's track id and the lyrics store's copy of it are compared whole,
+// so the store must hold every id the model can.
+comptime {
+    std.debug.assert(@typeInfo(@FieldType(lyrics.Store, "song_buf")).array.len >=
+        @typeInfo(@FieldType(Model, "heard_song_buf")).array.len);
 }
 
 // Keep the answer on the track the listener is hearing. Runs after every
@@ -2619,39 +2609,44 @@ fn lyricsTarget(model: *const Model) []const u8 {
 // library, or a station switch forgets the old answer.
 fn syncLyrics(model: *Model, fx: *Effects) void {
     const target = lyricsTarget(model);
-    if (std.mem.eql(u8, target, model.track_lyrics.song())) return;
-    // From one lyric track to the next the stage stays laid out for lyrics
-    // until the new answer lands, instead of collapsing for a moment.
-    model.lyrics_held = target.len > 0 and model.lyrics_layout();
-    fx.cancel(model.lyrics_key);
-    fx.cancelTimer(keys.lyrics_retry);
-    model.lyrics_generation +%= 1;
-    model.lyrics_deferred = false;
-    model.lyrics_key = if (model.lyrics_key == keys.fetch_lyrics_a) keys.fetch_lyrics_b else keys.fetch_lyrics_a;
-    model.track_lyrics.begin(target);
-    if (target.len > 0) fetchLyrics(model, fx);
+    if (!std.mem.eql(u8, target, model.track_lyrics.song())) {
+        fx.cancel(model.lyrics_ask.abandon());
+        fx.cancelTimer(keys.lyrics_retry);
+        model.track_lyrics.begin(target);
+        if (target.len > 0) fetchLyrics(model, fx);
+    }
+    lingerLyrics(model, fx);
+}
+
+// The stage keeps its room for lyrics.layout_hold_ms after lines stop
+// showing, so the moment the next track's lines take to load doesn't flick
+// the page; never before lines have shown at all.
+fn lingerLyrics(model: *Model, fx: *Effects) void {
+    if (model.lyrics_showing()) {
+        if (model.lyrics_lingering) fx.cancelTimer(keys.lyrics_linger);
+        model.lyrics_was_showing = true;
+        model.lyrics_lingering = false;
+    } else if (model.lyrics_was_showing) {
+        model.lyrics_was_showing = false;
+        model.lyrics_lingering = true;
+        fx.startTimer(.{ .key = keys.lyrics_linger, .interval_ms = lyrics.layout_hold_ms, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick_lyrics_linger) });
+    }
 }
 
 fn fetchLyrics(model: *Model, fx: *Effects) void {
     var b: [512]u8 = undefined;
     const url = api.lyricsCurrent(&b, model.base, model.track_lyrics.song()) catch return;
-    if (!model.listener_fetches.start(model.lyrics_key, model.lyrics_generation)) {
-        model.lyrics_deferred = true;
-        return;
-    }
-    model.lyrics_deferred = false;
-    // A private station gates this read on its password: the header, never
-    // ?auth=, which would land in the station's proxy logs.
-    const auth = [_]std.http.Header{.{ .name = "x-station-auth", .value = model.station_pw }};
+    if (!model.lyrics_ask.start(&model.listener_fetches)) return;
+    const auth = [_]std.http.Header{.{ .name = api.station_auth_header, .value = model.station_pw }};
     fx.fetch(.{
-        .key = model.lyrics_key,
+        .key = model.lyrics_ask.key,
         .url = url,
         .headers = if (model.station_pw.len > 0) &auth else &.{},
         .on_response = Effects.responseMsg(.got_lyrics),
     });
 }
 
-fn nudgeLyrics(model: *Model, fx: *Effects, offset_ms: i64) void {
+fn setLyricsOffset(model: *Model, fx: *Effects, offset_ms: i64) void {
     model.lyrics_device_offset_ms = lyrics.clampOffset(offset_ms);
     scheduleSave(model, fx);
 }
@@ -2856,11 +2851,9 @@ fn retune(model: *Model, fx: *Effects) void {
     fx.cancel(model.listener_np_key);
     fx.cancel(model.listener_state_key);
     fx.cancel(model.listener_session_key);
-    fx.cancel(model.listener_like_key);
+    fx.cancel(model.listener_like.invalidate());
     model.listener_generation +%= 1;
-    model.listener_like_generation +%= 1;
     model.listener_feed_deferred = false;
-    model.listener_like_deferred = false;
     // Old terminal responses can already be queued when cancellation runs.
     // Each station uses the other pair so they cannot complete its feed join.
     const use_a = model.listener_np_key != keys.listener_np_a;
@@ -2923,12 +2916,12 @@ fn retune(model: *Model, fx: *Effects) void {
     model.ctx_cond = "";
     model.ctx_temp = -999;
     model.ctx_festival = "";
-    model.like_song = "";
+    model.heard_song = "";
     model.like_available = false;
     model.like_liked = false;
     model.like_pending = false;
     model.like_count = 0;
-    // The new station's /state says whether it has lyrics; with like_song
+    // The new station's /state says whether it has lyrics; with heard_song
     // gone, syncLyrics drops the old answer and its fetch.
     model.lyrics_enabled = false;
     // Only this station's remembered format and password can carry over.
@@ -3033,13 +3026,10 @@ fn publishTrack(model: *Model, fx: *Effects, publication: listener_time.Publicat
         setStr(&model.cover_sid_buf, &model.cover_sid, track.song_id);
         if (track.song_id.len > 0) loadCover(model, fx, track.song_id) else dropCover(model, fx);
     }
-    if (!std.mem.eql(u8, track.song_id, model.like_song) or (changed and publication.changed)) {
-        fx.cancel(model.listener_like_key);
-        model.listener_like_generation +%= 1;
-        model.listener_like_deferred = false;
-        model.listener_like_key = if (model.listener_like_key == keys.listener_like_a) keys.listener_like_b else keys.listener_like_a;
+    if (!std.mem.eql(u8, track.song_id, model.heard_song) or (changed and publication.changed)) {
+        fx.cancel(model.listener_like.abandon());
         fx.cancel(keys.post_like);
-        setStr(&model.like_song_buf, &model.like_song, track.song_id);
+        setStr(&model.heard_song_buf, &model.heard_song, track.song_id);
         model.like_available = false;
         model.like_liked = false;
         model.like_pending = false;
@@ -3108,7 +3098,7 @@ fn refreshBooth(model: *Model, now_ms: i64) void {
         index -= 1;
         const raw = &model.raw_booth[index];
         if (!raw.visible(model.listener.lead_ms, now_ms)) continue;
-        if (model.booth_line.len == 0 and raw.ticker(model.like_song))
+        if (model.booth_line.len == 0 and raw.ticker(model.heard_song))
             setStr(&model.booth_buf, &model.booth_line, raw.text.slice());
         if (model.booth_count >= max_booth or (raw.class == .system and !raw.boundary)) continue;
         var body = raw.text.slice();
@@ -4430,14 +4420,14 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             // Guarded so the L key (and a stale heart) is a no-op when there
             // is nothing likeable, it's already liked, or a POST is in flight.
             if (!model.like_available or model.like_liked or model.like_pending) return;
-            if (model.like_song.len == 0) return;
+            if (model.heard_song.len == 0) return;
             var b: [256]u8 = undefined;
             const url = api.like(&b, model.base) catch return;
             // The client sends what it thinks is on air so a tap that lands
             // just after a track change cannot like the wrong song (409).
             var w = std.Io.Writer.fixed(&model.like_body_buf);
             var esc: [64]u8 = undefined;
-            w.print("{{\"songId\":\"{s}\"}}", .{jsonEscape(&esc, model.like_song)}) catch return;
+            w.print("{{\"songId\":\"{s}\"}}", .{jsonEscape(&esc, model.heard_song)}) catch return;
             model.like_pending = true;
             fx.fetch(.{
                 .key = keys.post_like,
@@ -4449,9 +4439,8 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             });
         },
         .got_like_status => |r| {
-            const current_reply = model.listener_fetches.finish(r.key, model.listener_like_generation);
-            if (!current_reply or r.key != model.listener_like_key) {
-                if (model.listener_like_deferred and model.like_song.len > 0) fetchLikeStatus(model, fx);
+            if (!model.listener_like.finish(&model.listener_fetches, r.key)) {
+                if (model.listener_like.deferred and model.heard_song.len > 0) fetchLikeStatus(model, fx);
                 return;
             }
             if (r.outcome != .ok or r.status != 200) return;
@@ -4469,24 +4458,25 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             };
             // An answer about some other song is stale — the next now-playing
             // poll re-asks with the fresh id.
-            if (model.like_song.len == 0 or !std.mem.eql(u8, sid, model.like_song)) return;
+            if (model.heard_song.len == 0 or !std.mem.eql(u8, sid, model.heard_song)) return;
             model.like_available = true;
             model.like_liked = st.liked orelse false;
             model.like_count = likeCount(st.count);
         },
         .got_lyrics => |r| {
-            const current_reply = model.listener_fetches.finish(r.key, model.lyrics_generation);
-            if (!current_reply or r.key != model.lyrics_key) {
-                if (model.lyrics_deferred and model.track_lyrics.song_len > 0) fetchLyrics(model, fx);
+            if (!model.lyrics_ask.finish(&model.listener_fetches, r.key)) {
+                if (model.lyrics_ask.deferred and model.track_lyrics.song_len > 0) fetchLyrics(model, fx);
                 return;
             }
-            model.lyrics_held = false;
-            const again = if (r.outcome == .ok) model.track_lyrics.reply(r.status, r.body) else model.track_lyrics.miss();
+            const again = if (r.outcome == .ok) model.track_lyrics.reply(r.status, r.body) else model.track_lyrics.miss(null);
             if (again) |delay|
                 fx.startTimer(.{ .key = keys.lyrics_retry, .interval_ms = delay, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick_lyrics) });
         },
         .tick_lyrics => |t| {
             if (t.outcome == .fired and model.track_lyrics.song_len > 0) fetchLyrics(model, fx);
+        },
+        .tick_lyrics_linger => |t| {
+            if (t.outcome == .fired) model.lyrics_lingering = false;
         },
         .toggle_lyrics => {
             // Like the web's L, only while the station offers lyrics at all.
@@ -4494,9 +4484,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.lyrics_shown = !model.lyrics_shown;
             saveSettings(model, fx);
         },
-        .lyrics_delay => nudgeLyrics(model, fx, model.lyrics_device_offset_ms - lyrics.offset_nudge_ms),
-        .lyrics_advance => nudgeLyrics(model, fx, model.lyrics_device_offset_ms + lyrics.offset_nudge_ms),
-        .lyrics_reset_timing => nudgeLyrics(model, fx, 0),
+        .lyrics_delay => setLyricsOffset(model, fx, model.lyrics_device_offset_ms - lyrics.offset_nudge_ms),
+        .lyrics_advance => setLyricsOffset(model, fx, model.lyrics_device_offset_ms + lyrics.offset_nudge_ms),
+        .lyrics_reset_timing => setLyricsOffset(model, fx, 0),
         .got_like_post => |r| {
             model.like_pending = false;
             if (r.outcome != .ok) return;
@@ -4510,7 +4500,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             defer parsed.deinit();
             const st = parsed.value;
             if (st.songId) |sid| {
-                if (model.like_song.len > 0 and !std.mem.eql(u8, sid, model.like_song)) return;
+                if (model.heard_song.len > 0 and !std.mem.eql(u8, sid, model.heard_song)) return;
             }
             model.like_liked = st.liked orelse true;
             model.like_count = likeCount(st.count);
@@ -4931,7 +4921,7 @@ test "a buffered live-edge track keeps the audible title cover and like target" 
     update(&m, .{ .got_np = .{ .key = keys.fetch_np, .outcome = .ok, .status = 200, .body = next } }, &fx);
     try testing.expectEqualStrings("Audible song", m.title);
     try testing.expectEqualStrings("old", m.cover_sid);
-    try testing.expectEqualStrings("old", m.like_song);
+    try testing.expectEqualStrings("old", m.heard_song);
     try testing.expectEqual(@as(u64, 1000), m.cover_id);
     try testing.expect(m.like_liked);
 }
@@ -5337,15 +5327,15 @@ test "like flow: song change resets, status arms the heart, press likes once" {
     var m: Model = .{};
     // A new song on air resets the state and asks the station for status.
     update(&m, .{ .got_np = .{ .key = keys.fetch_np, .outcome = .ok, .status = 200, .body = "{\"nowPlaying\":{\"title\":\"T\",\"subsonic_id\":\"s1\"}}" } }, &fx);
-    try testing.expectEqualStrings("s1", m.like_song);
+    try testing.expectEqualStrings("s1", m.heard_song);
     try testing.expect(!m.like_available);
     // Status for the current song arms the heart with the airing's count.
-    update(&m, .{ .got_like_status = .{ .key = m.listener_like_key, .outcome = .ok, .status = 200, .body = "{\"enabled\":true,\"songId\":\"s1\",\"liked\":false,\"count\":2}" } }, &fx);
+    update(&m, .{ .got_like_status = .{ .key = m.listener_like.key, .outcome = .ok, .status = 200, .body = "{\"enabled\":true,\"songId\":\"s1\",\"liked\":false,\"count\":2}" } }, &fx);
     try testing.expect(m.like_available);
     try testing.expect(!m.like_liked);
     try testing.expectEqual(@as(u32, 2), m.like_count);
     // A stale status (some other song) changes nothing.
-    update(&m, .{ .got_like_status = .{ .key = m.listener_like_key, .outcome = .ok, .status = 200, .body = "{\"enabled\":true,\"songId\":\"sX\",\"liked\":true,\"count\":9}" } }, &fx);
+    update(&m, .{ .got_like_status = .{ .key = m.listener_like.key, .outcome = .ok, .status = 200, .body = "{\"enabled\":true,\"songId\":\"sX\",\"liked\":true,\"count\":9}" } }, &fx);
     try testing.expectEqual(@as(u32, 2), m.like_count);
     // Press → pending; a second press is a no-op; the server confirm fills.
     update(&m, .press_like, &fx);
@@ -5356,7 +5346,7 @@ test "like flow: song change resets, status arms the heart, press likes once" {
     try testing.expect(!m.like_pending);
     try testing.expectEqual(@as(u32, 3), m.like_count);
     // Likes disabled station-side hides the heart entirely.
-    update(&m, .{ .got_like_status = .{ .key = m.listener_like_key, .outcome = .ok, .status = 200, .body = "{\"enabled\":false}" } }, &fx);
+    update(&m, .{ .got_like_status = .{ .key = m.listener_like.key, .outcome = .ok, .status = 200, .body = "{\"enabled\":false}" } }, &fx);
     try testing.expect(!m.like_available);
 }
 
@@ -5380,14 +5370,16 @@ test "lyrics follow the listener's track, and only while the station offers them
     var m: Model = .{ .phase = .player };
     update(&m, .{ .got_np = .{ .key = keys.fetch_np, .outcome = .ok, .status = 200, .body = "{\"nowPlaying\":{\"title\":\"T\",\"subsonic_id\":\"s1\"}}" } }, &fx);
     // A station without the panel on (or from before it) is never asked.
-    try testing.expect(lyricsAsk(&fx, m.lyrics_key) == null);
+    try testing.expect(lyricsAsk(&fx, m.lyrics_ask.key) == null);
     update(&m, .{ .got_state = .{ .key = keys.fetch_state, .outcome = .ok, .status = 200, .body = "{\"lyrics\":{\"enabled\":true}}" } }, &fx);
-    const ask = lyricsAsk(&fx, m.lyrics_key).?;
+    const ask = lyricsAsk(&fx, m.lyrics_ask.key).?;
     try testing.expectEqualStrings("https://www.getsubwave.com/api/lyrics/current?songId=s1", ask.url);
     try testing.expectEqual(@as(usize, 0), ask.headers.len);
     try testing.expectEqualStrings("Looking for lyrics…", m.lyrics_note());
+    // The stage makes no room before there are lines to show.
+    try testing.expect(!m.lyrics_on_stage());
 
-    try fx.feedResponse(m.lyrics_key, 200, synced_s1);
+    try fx.feedResponse(m.lyrics_ask.key, 200, synced_s1);
     while (fx.takeMsg()) |msg| update(&m, msg, &fx);
     try testing.expect(m.lyrics_synced());
     try testing.expectEqual(@as(f32, 120), m.sleeve_px());
@@ -5395,29 +5387,34 @@ test "lyrics follow the listener's track, and only while the station offers them
     try testing.expectEqualStrings("Synced lyrics, from LRCLIB.", m.lyrics_note());
 
     // A new track asks on the other key, and the old ask's late answer is
-    // never taken for it. The stage stays laid out for lyrics meanwhile.
-    const old_key = m.lyrics_key;
+    // never taken for it. The stage lingers, laid out for lyrics, meanwhile.
+    const old_key = m.lyrics_ask.key;
     update(&m, .{ .got_np = .{ .key = keys.fetch_np, .outcome = .ok, .status = 200, .body = "{\"nowPlaying\":{\"title\":\"U\",\"subsonic_id\":\"s2\"}}" } }, &fx);
-    try testing.expect(m.lyrics_key != old_key);
+    try testing.expect(m.lyrics_ask.key != old_key);
     try testing.expectEqualStrings("s2", m.track_lyrics.song());
-    try testing.expect(lyricsAsk(&fx, m.lyrics_key) != null);
+    try testing.expect(lyricsAsk(&fx, m.lyrics_ask.key) != null);
     try testing.expect(!m.lyrics_synced());
-    try testing.expect(m.lyrics_layout());
+    try testing.expect(m.lyrics_on_stage());
+    try testing.expectEqual(@as(?u64, lyrics.layout_hold_ms), timerInterval(&fx, keys.lyrics_linger));
     while (fx.takeMsg()) |msg| update(&m, msg, &fx);
     update(&m, .{ .got_lyrics = .{ .key = old_key, .outcome = .ok, .status = 200, .body = synced_s1 } }, &fx);
     try testing.expectEqual(lyrics.Status.loading, m.track_lyrics.status);
 
-    // A station that does not answer is asked again on a backoff, and the
-    // held layout lets go.
-    try fx.feedResponse(m.lyrics_key, 503, "");
+    // A station that does not answer is asked again on a backoff, never
+    // sooner than the Retry-After its outage repeats in the body.
+    try fx.feedResponse(m.lyrics_ask.key, 503, "{\"error\":\"The music server did not answer for lyrics\",\"retryAfter\":10}");
     while (fx.takeMsg()) |msg| update(&m, msg, &fx);
     try testing.expectEqual(lyrics.Status.unavailable, m.track_lyrics.status);
-    try testing.expectEqual(@as(?u64, 5_000), timerInterval(&fx, keys.lyrics_retry));
-    try testing.expect(!m.lyrics_layout());
+    try testing.expectEqual(@as(?u64, 10_000), timerInterval(&fx, keys.lyrics_retry));
+    // The layout lets go once the hold runs out, however long the ask takes.
+    try testing.expect(m.lyrics_on_stage());
+    update(&m, .{ .tick_lyrics_linger = .{ .key = keys.lyrics_linger, .outcome = .fired, .timestamp_ns = 0 } }, &fx);
+    try testing.expect(!m.lyrics_on_stage());
+    try testing.expectEqual(@as(f32, 180), m.sleeve_px());
     // A private station's password rides the header on the retry.
     setStr(&m.station_pw_buf, &m.station_pw, "hunter2");
     update(&m, .{ .tick_lyrics = .{ .key = keys.lyrics_retry, .outcome = .fired, .timestamp_ns = 0 } }, &fx);
-    const retry = lyricsAsk(&fx, m.lyrics_key).?;
+    const retry = lyricsAsk(&fx, m.lyrics_ask.key).?;
     try testing.expectEqual(@as(usize, 1), retry.headers.len);
     try testing.expectEqualStrings("x-station-auth", retry.headers[0].name);
     try testing.expectEqualStrings("hunter2", retry.headers[0].value);
@@ -5437,15 +5434,16 @@ test "hiding lyrics stops asking, and Y does nothing without the station's panel
     try testing.expect(m.lyrics_shown);
     m.lyrics_enabled = true;
     update(&m, .{ .got_np = .{ .key = keys.fetch_np, .outcome = .ok, .status = 200, .body = "{\"nowPlaying\":{\"title\":\"T\",\"subsonic_id\":\"s1\"}}" } }, &fx);
-    update(&m, .{ .got_lyrics = .{ .key = m.lyrics_key, .outcome = .ok, .status = 200, .body = synced_s1 } }, &fx);
+    update(&m, .{ .got_lyrics = .{ .key = m.lyrics_ask.key, .outcome = .ok, .status = 200, .body = synced_s1 } }, &fx);
     try testing.expect(m.lyrics_synced());
+    // Hiding them gives the stage back at once, without the hold.
     update(&m, .toggle_lyrics, &fx);
     try testing.expect(!m.lyrics_shown);
-    try testing.expect(!m.lyrics_layout());
+    try testing.expect(!m.lyrics_on_stage());
     try testing.expectEqualStrings("Hidden on this device.", m.lyrics_note());
     try testing.expectEqualStrings("", m.track_lyrics.song());
     update(&m, .toggle_lyrics, &fx);
-    try testing.expect(lyricsAsk(&fx, m.lyrics_key) != null);
+    try testing.expect(lyricsAsk(&fx, m.lyrics_ask.key) != null);
     // The privacy gate stops the asking too, until it lifts.
     m.privacy_private = true;
     update(&m, .{ .tick_listener = .{ .key = keys.listener_timer, .outcome = .fired, .timestamp_ns = 0 } }, &fx);
@@ -6974,14 +6972,14 @@ test "likes during a hold post the audible song and leave a 409 unchanged" {
     update(&m, .{ .got_like_post = .{ .key = keys.post_like, .outcome = .ok, .status = 409, .body = "{}" } }, &fx);
     try testing.expect(!m.like_pending and m.like_available and !m.like_liked);
     try testing.expectEqual(@as(u32, 5), m.like_count);
-    update(&m, .{ .got_like_status = .{ .key = m.listener_like_key, .outcome = .ok, .status = 200, .body =
+    update(&m, .{ .got_like_status = .{ .key = m.listener_like.key, .outcome = .ok, .status = 200, .body =
         \\{"enabled":true,"songId":"new","liked":true,"count":9}
     } }, &fx);
     try testing.expectEqual(@as(u32, 5), m.like_count);
     refreshListener(&m, &fx, 127_000);
     try testing.expectEqualStrings("Next", m.title);
     try testing.expectEqualStrings("new", m.cover_sid);
-    try testing.expectEqualStrings("new", m.like_song);
+    try testing.expectEqualStrings("new", m.heard_song);
     try testing.expect(!m.like_available and !m.like_liked);
     try testing.expectEqual(@as(u32, 0), m.like_count);
 }
@@ -7030,20 +7028,20 @@ test "track promotion fetches likes on a fresh key while the previous GET is out
     var m: Model = .{};
     m.listener.receiveTrack(.{ .title = "First", .song_id = "first" }, 0, 100_000);
     refreshListener(&m, &fx, 100_000);
-    const first_key = m.listener_like_key;
+    const first_key = m.listener_like.key;
     m.listener.receiveTrack(.{ .title = "Second", .song_id = "second" }, 0, 105_000);
     refreshListener(&m, &fx, 105_000);
-    try testing.expect(m.listener_like_key != first_key);
+    try testing.expect(m.listener_like.key != first_key);
     var fetched = false;
     for (0..fx.pendingFetchCount()) |index| {
-        if (fx.pendingFetchAt(index).?.key == m.listener_like_key) fetched = true;
+        if (fx.pendingFetchAt(index).?.key == m.listener_like.key) fetched = true;
     }
     try testing.expect(fetched);
     update(&m, .{ .got_like_status = .{ .key = first_key, .outcome = .ok, .status = 200, .body =
         \\{"enabled":true,"songId":"first","liked":true,"count":20}
     } }, &fx);
     try testing.expect(!m.like_available);
-    update(&m, .{ .got_like_status = .{ .key = m.listener_like_key, .outcome = .ok, .status = 200, .body =
+    update(&m, .{ .got_like_status = .{ .key = m.listener_like.key, .outcome = .ok, .status = 200, .body =
         \\{"enabled":true,"songId":"second","liked":false,"count":3}
     } }, &fx);
     try testing.expect(m.like_available);
@@ -7093,10 +7091,10 @@ test "rapid promotions defer a reused like key until its old terminal drains" {
         m.listener.receiveTrack(.{ .title = title, .song_id = title }, 0, now_ms);
         refreshListener(&m, &fx, now_ms);
     }
-    try testing.expect(m.listener_like_deferred);
+    try testing.expect(m.listener_like.deferred);
     try testDrainEffects(&m, &fx);
-    try testing.expect(!m.listener_like_deferred);
-    try fx.feedResponseOutcome(m.listener_like_key, .ok, 200,
+    try testing.expect(!m.listener_like.deferred);
+    try fx.feedResponseOutcome(m.listener_like.key, .ok, 200,
         \\{"enabled":true,"songId":"Third","liked":false,"count":3}
     );
     try testDrainEffects(&m, &fx);
