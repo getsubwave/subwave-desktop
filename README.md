@@ -287,8 +287,8 @@ one per CPU flavor):
 
 | Workflow | Runner | Asset | Notes |
 | --- | --- | --- | --- |
-| `release-macos.yml` | `macos-15` | `.dmg` | Apple Silicon; Developer ID signed and notarized |
-| `release-macos.yml` | `macos-15-intel` | `-intel.dmg` | Intel (x86_64), built and tested natively, signed and notarized the same way; label supported until Aug 2027 |
+| `release-macos.yml` | `macos-15` | `.dmg` | Apple Silicon; ad-hoc signed, so first launch needs System Settings → Privacy & Security → Open Anyway |
+| `release-macos.yml` | `macos-15-intel` | `-intel.dmg` | Intel (x86_64), built and tested natively, ad-hoc signed the same way; label supported until Aug 2027 |
 | `release-windows.yml` | `windows-latest` | `-windows-x64.zip` | built and launched on real Windows |
 | `release-linux.yml` | `ubuntu-24.04` | `-linux-x64.tar.gz` | needs glibc 2.39+ and GTK4 |
 
@@ -345,13 +345,12 @@ cross-compiling never runs the target's suite.
 Linux reach: Ubuntu 24.04+, Fedora 40+, Arch. **Not** Ubuntu 22.04 or
 Debian 12 (glibc 2.35/2.36) — those build from source.
 
-The macOS legs sign with a Developer ID Application identity and notarize
-with an App Store Connect API key, both held in repository secrets that
-`scripts/setup-macos-signing.sh` walks you through creating. A leg with a
-missing secret fails rather than shipping an ad-hoc DMG. To exercise signing
-and notarization without touching a release,
-`gh workflow run release-macos.yml -f tag=vX.Y.Z -f dry_run=true` keeps the
-DMGs as workflow artifacts.
+The macOS legs are ad-hoc signed again for now. Developer ID signing and
+notarization (#50) went back out until the repository secrets exist: once
+`scripts/setup-macos-signing.sh` has created them, revert the commit that
+restored the ad-hoc `release-macos.yml`, then prove it with
+`gh workflow run release-macos.yml -f tag=vX.Y.Z -f dry_run=true` before the
+next release. The wizard's own dry-run step needs that workflow back first.
 
 Not yet done for release: auto-update (out of scope v1), and crash reporting
 beyond the SDK's panic capture.

@@ -1,21 +1,13 @@
-# Attach the macOS DMGs to a published GitHub release.
+# Attach the macOS DMG to a published GitHub release.
 #
-# Each leg signs the app with the Developer ID Application identity held in
-# repository secrets (hardened runtime, secure timestamp), and the SDK then
-# notarizes the app, builds the DMG, and signs, notarizes, staples and
-# validates the DMG too, so a listener's first launch opens with no Gatekeeper
-# prompt. There is deliberately no ad-hoc fallback: a leg with missing secrets
-# fails instead of quietly shipping a DMG that macOS refuses to open.
+# This mirrors the macOS half of scripts/make-release.sh so a release no longer
+# requires a Mac to be powered on. The script stays the way to cut one by hand.
 #
-# Repository secrets (scripts/setup-macos-signing.sh walks through making them):
-#   MACOS_CERTIFICATE_P12       base64 of the Developer ID Application .p12
-#   MACOS_CERTIFICATE_PASSWORD  that .p12's export password
-#   APPLE_API_KEY_P8            App Store Connect API key, the .p8 file's text
-#   APPLE_API_KEY_ID            that key's ID
-#   APPLE_API_ISSUER_ID         the team's App Store Connect issuer ID
-#
-# A manual dispatch with dry_run=true does everything except touch the
-# release: the signed, notarized DMGs are kept as workflow artifacts instead.
+# Signing is ad-hoc, matching what the script does by default and therefore
+# what ships today: users get the right-click -> Open dance on first launch.
+# Moving to a real Developer ID identity means putting the .p12 and an App
+# Store Connect key into repository secrets and doing keychain setup here
+# first; until then, do not claim the DMG is notarized.
 name: Release (macOS)
 
 on:
@@ -26,10 +18,6 @@ on:
       tag:
         description: "Existing release tag to attach the macOS build to (e.g. v0.1.0)"
         required: true
-      dry_run:
-        description: "Sign and notarize, but keep the DMGs as workflow artifacts instead of uploading them to the release"
-        type: boolean
-        default: false
 
 permissions:
   contents: write
@@ -105,64 +93,7 @@ jobs:
       - name: Test
         run: native test
 
-      - name: Import signing identity and notary credentials
-        # A throwaway keychain, made the user's default so codesign finds the
-        # identity and `notarytool store-credentials` writes the profile where
-        # the SDK's `--notary-profile` lookup (which names no keychain) reads
-        # it back.
-        env:
-          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
-          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
-          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
-        run: |
-          missing=""
-          for name in MACOS_CERTIFICATE_P12 MACOS_CERTIFICATE_PASSWORD APPLE_API_KEY_P8 APPLE_API_KEY_ID APPLE_API_ISSUER_ID; do
-            [ -n "${!name}" ] || missing="$missing $name"
-          done
-          if [ -n "$missing" ]; then
-            echo "error: repository secrets not set:$missing (scripts/setup-macos-signing.sh creates them)" >&2
-            exit 1
-          fi
-
-          keychain="$RUNNER_TEMP/signing.keychain-db"
-          keychain_password="$(openssl rand -base64 32)"
-          security create-keychain -p "$keychain_password" "$keychain"
-          security set-keychain-settings -lut 21600 "$keychain"
-          security unlock-keychain -p "$keychain_password" "$keychain"
-          security default-keychain -d user -s "$keychain"
-          # Search ours first, and keep the runner's own keychains after it.
-          searchable=("$keychain")
-          while IFS= read -r line; do
-            line="${line#*\"}"
-            searchable+=("${line%\"*}")
-          done < <(security list-keychains -d user)
-          security list-keychains -d user -s "${searchable[@]}"
-          echo "SIGNING_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
-
-          printf '%s' "$MACOS_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/signing.p12"
-          security import "$RUNNER_TEMP/signing.p12" -k "$keychain" -P "$MACOS_CERTIFICATE_PASSWORD" \
-            -T /usr/bin/codesign -T /usr/bin/security
-          rm -f "$RUNNER_TEMP/signing.p12"
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" >/dev/null
-
-          identity="$(security find-identity -v -p codesigning "$keychain" \
-            | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)"
-          if [ -z "$identity" ]; then
-            echo "error: MACOS_CERTIFICATE_P12 holds no valid Developer ID Application identity:" >&2
-            security find-identity -v -p codesigning "$keychain" >&2
-            exit 1
-          fi
-          echo "signing as: $identity"
-          echo "SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
-
-          printf '%s\n' "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/notary.p8"
-          xcrun notarytool store-credentials subwave-notary \
-            --key "$RUNNER_TEMP/notary.p8" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID"
-          rm -f "$RUNNER_TEMP/notary.p8"
-
-      - name: Build, sign and notarize
+      - name: Build and package
         # -Dcpu=baseline is load bearing on both legs: a plain `native build`
         # bakes the runner's CPU features into the binary. The Intel runners
         # are AVX-512 Xeons while most Intel Macs are not, and an M2+ arm64
@@ -174,16 +105,9 @@ jobs:
         # message loop thread. That is what stalls the Windows message pump
         # in issue #23; every shipping build drops it, guarded by
         # scripts/check-release-flags.sh.
-        # Identity signing turns on the hardened runtime and a secure
-        # timestamp. --notarize submits the .app, then the --archive DMG, and
-        # staples and validates both tickets; a rejection fails the leg with
-        # notarytool's own report. Apple's queue is usually minutes, rarely
-        # much longer.
-        timeout-minutes: 45
         run: |
           native build -Dcpu=baseline -Dtrace=off
-          native package --target macos --signing identity --identity "$SIGNING_IDENTITY" \
-            --archive --notarize --notary-profile subwave-notary
+          native package --target macos --signing adhoc
 
       - name: Audit CPU baseline
         # x86-64 only — the audit greps for AVX register references, which
@@ -191,73 +115,35 @@ jobs:
         if: matrix.runner == 'macos-15-intel'
         run: ./scripts/audit-cpu-baseline.sh zig-out/package/subwave-desktop.app/Contents/MacOS/subwave-desktop
 
-      - name: Collect the DMG
-        # The SDK names it subwave-desktop-<version>-macos-<optimize>.dmg (with
-        # "SUBWAVE Player.app" and an Applications link inside). Renaming the
-        # file keeps the release's asset names; the ticket is stapled inside,
-        # so the name is not part of what was notarized.
+      - name: Build DMG
         env:
           DMG_SUFFIX: ${{ matrix.dmg_suffix }}
         run: |
-          shopt -s nullglob
-          built=(zig-out/package/*.dmg)
-          if [ "${#built[@]}" -ne 1 ]; then
-            echo "error: expected one DMG from native package, found ${#built[@]}: ${built[*]}" >&2
-            exit 1
-          fi
-          mkdir -p dist
+          app_name="SUBWAVE Player"
+          rm -rf zig-out/dmg-stage
+          mkdir -p zig-out/dmg-stage dist
+          cp -R zig-out/package/subwave-desktop.app "zig-out/dmg-stage/$app_name.app"
+          ln -s /Applications zig-out/dmg-stage/Applications
+          codesign --verify --deep "zig-out/dmg-stage/$app_name.app"
           dmg="dist/SUBWAVE-Player-${version}${DMG_SUFFIX}.dmg"
-          cp "${built[0]}" "$dmg"
+          hdiutil create -volname "$app_name" -srcfolder zig-out/dmg-stage -ov -format UDZO "$dmg" >/dev/null
           hdiutil verify "$dmg" >/dev/null
           ls -lh "$dmg"
           echo "dmg=$dmg" >> "$GITHUB_ENV"
 
-      - name: Verify the DMG the way Gatekeeper will
-        # Run against the exact file being uploaded: the DMG's own signature
-        # and stapled ticket, then the app inside it. stapler validate is the
-        # hard proof of notarization; spctl is what a listener's Mac runs, and
-        # is only waived when the runner has Gatekeeper assessments turned off.
+      - name: Smoke-check the DMG
+        # Mount it and launch the binary inside the way the release skill does
+        # by hand, so a DMG that builds but cannot start never reaches anyone.
         run: |
-          gatekeeper() {
-            out="$(spctl --assess "$@" 2>&1 || true)"
-            echo "$out"
-            case "$out" in
-              *"source=Notarized Developer ID"*) ;;
-              *"override=security disabled"*) echo "::warning::Gatekeeper assessments are off on this runner; relying on stapler validate" ;;
-              *) echo "error: Gatekeeper does not accept $* as notarized Developer ID" >&2; return 1 ;;
-            esac
-          }
-
-          gatekeeper --type open --context context:primary-signature --verbose=2 "$dmg"
-          xcrun stapler validate "$dmg"
-
           mnt="$(mktemp -d)"
           hdiutil attach "$dmg" -nobrowse -quiet -mountpoint "$mnt"
-          trap 'hdiutil detach "$mnt" -quiet || true' EXIT
-          app="$mnt/SUBWAVE Player.app"
-          test -x "$app/Contents/MacOS/subwave-desktop" || { echo "error: no executable inside the app bundle" >&2; ls -la "$mnt" >&2; exit 1; }
-          test -L "$mnt/Applications" || { echo "error: the DMG has no Applications link" >&2; exit 1; }
-
-          codesign --verify --deep --strict --verbose=2 "$app"
-          details="$(codesign --display --verbose=2 "$app" 2>&1)"
-          echo "$details"
-          grep -q '^Authority=Developer ID Application: ' <<<"$details" || { echo "error: the app is not signed with a Developer ID Application identity" >&2; exit 1; }
-          grep -q '^CodeDirectory .*flags=.*(runtime)' <<<"$details" || { echo "error: the hardened runtime is off" >&2; exit 1; }
-          grep -q '^Timestamp=' <<<"$details" || { echo "error: the signature carries no secure timestamp" >&2; exit 1; }
-          gatekeeper --type execute --verbose=2 "$app"
-          xcrun stapler validate "$app"
-          echo "DMG and app: Developer ID signed, hardened runtime, notarized and stapled"
-
-      - name: Keep the DMG as a workflow artifact (dry run)
-        if: ${{ inputs.dry_run }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: dry-run-${{ matrix.runner }}
-          path: ${{ env.dmg }}
-          if-no-files-found: error
+          bin="$mnt/SUBWAVE Player.app/Contents/MacOS/subwave-desktop"
+          test -x "$bin" || { echo "error: no executable inside the app bundle" >&2; hdiutil detach "$mnt" -quiet; exit 1; }
+          codesign --verify --deep --strict "$mnt/SUBWAVE Player.app"
+          hdiutil detach "$mnt" -quiet
+          echo "DMG mounts, bundle verifies, binary present"
 
       - name: Upload to release
-        if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.tag.outputs.tag }}
@@ -266,10 +152,3 @@ jobs:
           gh release upload "$TAG" --clobber \
             "${dmg}#SUBWAVE Player ${version} (macOS, ${ARCH_LABEL})"
           gh release view "$TAG" --json assets --jq '.assets[].name'
-
-      - name: Remove the signing keychain
-        if: always()
-        run: |
-          if [ -n "${SIGNING_KEYCHAIN:-}" ]; then
-            security delete-keychain "$SIGNING_KEYCHAIN" || true
-          fi
