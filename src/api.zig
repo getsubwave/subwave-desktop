@@ -66,11 +66,27 @@ pub fn withStreamAuth(buf: []u8, url: []const u8, token: []const u8) ![]const u8
     var w = std.Io.Writer.fixed(buf);
     const sep: u8 = if (std.mem.indexOfScalar(u8, url, '?') != null) '&' else '?';
     try w.print("{s}{c}auth=", .{ url, sep });
-    for (token) |ch| {
+    try writeQueryValue(&w, token);
+    return w.buffered();
+}
+
+// GET the lyrics of the track the LISTENER is hearing — now-playing's
+// subsonic_id, a stream buffer behind the live edge. The station answers for
+// the on-air track or one of the three before it. The id is opaque, so it is
+// encoded like a password. Station-gated: the password rides the
+// x-station-auth header, never this query string.
+pub fn lyricsCurrent(buf: []u8, base: []const u8, song_id: []const u8) ![]const u8 {
+    var w = std.Io.Writer.fixed(buf);
+    try w.print("{s}/api/lyrics/current?songId=", .{std.mem.trimEnd(u8, base, "/")});
+    try writeQueryValue(&w, song_id);
+    return w.buffered();
+}
+
+fn writeQueryValue(w: *std.Io.Writer, value: []const u8) !void {
+    for (value) |ch| {
         const unreserved = std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '.' or ch == '_' or ch == '~';
         if (unreserved) try w.writeByte(ch) else try w.print("%{X:0>2}", .{ch});
     }
-    return w.buffered();
 }
 
 // Community stations directory — published by the featured station's web
@@ -120,6 +136,7 @@ test "url builders join base and path" {
     try testing.expectError(error.InvalidAvatarPath, personaAvatarUrl(&buf, "https://x.test", "https://other.test/p1"));
     try testing.expectEqualStrings("https://x.test/api/like", try like(&buf, "https://x.test/"));
     try testing.expectEqualStrings("https://x.test/api/station-auth", try stationAuth(&buf, "https://x.test/"));
+    try testing.expectEqualStrings("https://x.test/api/lyrics/current?songId=a1%2Fb%20c", try lyricsCurrent(&buf, "https://x.test/", "a1/b c"));
 }
 
 test "withStreamAuth appends a percent-encoded auth token" {

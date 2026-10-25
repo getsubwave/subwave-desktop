@@ -1,7 +1,12 @@
 <!-- Player fragment: the LIVE stage — record sleeve left, track text right,
      spectrum wave underneath. This was the one Zig-built view in the player:
      it needed `ui.image` for the square cover art, which markup excluded until
-     SDK 0.6.0 added the `<image>` leaf. -->
+     SDK 0.6.0 added the `<image>` leaf.
+
+     While the track has lyrics (and this listener shows them) a band between
+     the track and the spectrum carries them, and the sleeve, title and DJ
+     line step back to make room: the web's Drift and Classic-on-a-phone
+     arrangement, sized so three lines still fit the minimum window. -->
 <column grow="1" min-width="0">
 
   <row grow="1" gap="32" padding="24" cross="center">
@@ -21,10 +26,10 @@
         <menu-item on-press="copy_station">Copy station link</menu-item>
       </context-menu>
       <if test="{has_cover}">
-        <image image="{cover_id}" width="180" height="180" label="Cover art"/>
+        <image image="{cover_id}" width="{sleeve_px}" height="{sleeve_px}" label="Cover art"/>
       </if>
       <else>
-        <panel width="180" height="180" background="surface_subtle">
+        <panel width="{sleeve_px}" height="{sleeve_px}" background="surface_subtle">
           <column grow="1" main="center" cross="center">
             <text size="heading" foreground="text_muted">{initials}</text>
           </column>
@@ -57,6 +62,21 @@
             <tooltip anchor="above">{like_hint} · L</tooltip>
           </stack>
         </if>
+        <!-- Only while the station has its Lyrics panel on: the switch is
+             the operator's, and this is the listener's choice within it. -->
+        <if test="{lyrics_enabled}">
+          <stack>
+            <row cross="center" on-press="toggle_lyrics" label="{lyrics_hint}">
+              <if test="{lyrics_shown}">
+                <icon name="app:captions" width="14" height="14" foreground="text_muted"/>
+              </if>
+              <else>
+                <icon name="app:captions-off" width="14" height="14" foreground="text_muted"/>
+              </else>
+            </row>
+            <tooltip anchor="above">{lyrics_hint} · Y</tooltip>
+          </stack>
+        </if>
         <if test="{has_tokens}">
           <row gap="4" cross="center" label="LLM tokens">
             <icon name="app:spark" width="12" height="12" foreground="text_muted"/>
@@ -65,7 +85,12 @@
         </if>
       </row>
 
-      <text size="display" wrap="false">{title}</text>
+      <if test="{lyrics_layout}">
+        <text size="heading" wrap="false">{title}</text>
+      </if>
+      <else>
+        <text size="display" wrap="false">{title}</text>
+      </else>
 
       <!-- Artist · album · year as one paragraph of styled runs. No whitespace
            between the span tags: the runs abut and album_line brings its own
@@ -79,12 +104,58 @@
         <text><span foreground="text_muted">{meta_line}</span><span foreground="text_muted">{meta_mood_sep}</span><span foreground="accent">{mood_line}</span></text>
       </if>
 
-      <if test="{has_booth}">
+      <if test="{booth_on_stage}">
         <text size="sm" wrap="false" foreground="text_muted"
               on-press="open_booth" label="Open booth feed">DJ — {booth_line}</text>
       </if>
     </column>
   </row>
+
+  <!-- Lyrics band. Synced: the line just sung, small and muted; the line
+       being sung, its sung words in ink, the newest in the accent and the
+       rest muted (LRC times lines, not words, so lyrics.zig paces them); and
+       the next line waiting. An intro or a break rests on an ellipsis.
+       Untimed: every line, quieter, to scroll by hand, keyed per track so a
+       new song starts at its top. The band grows with the stage, so the page
+       around it never moves as lines come and go; both arms sit in a scroll
+       viewport, which clips a line that wraps past the band (a narrow stage
+       with the sidebar and panel open) instead of painting it over the
+       spectrum. The synced arm's column stretches to the viewport, which is
+       what centres its three lines. -->
+  <if test="{lyrics_layout}">
+    <column grow="1">
+      <if test="{lyrics_synced}">
+        <scroll grow="1" label="Lyrics">
+          <column gap="6" padding="12" main="center" grow="1">
+            <for each="lyric_now_list" as="l">
+              <text size="sm" foreground="text_muted" wrap="false" text-alignment="center">{l.before}</text>
+              <if test="{l.resting}">
+                <text size="heading" foreground="text_muted" wrap="false" text-alignment="center">· · ·</text>
+              </if>
+              <else>
+                <text size="heading" text-alignment="center"><span>{l.sung}</span><span foreground="accent">{l.word}</span><span foreground="text_muted">{l.rest}</span></text>
+              </else>
+              <text foreground="text_muted" wrap="false" text-alignment="center">{l.next}</text>
+            </for>
+          </column>
+        </scroll>
+      </if>
+      <if test="{lyrics_plain}">
+        <scroll grow="1" global-key="{lyrics_scroll_key}" label="Lyrics">
+          <column gap="4" padding="12">
+            <for each="lyric_rows" as="r">
+              <if test="{r.blank}">
+                <spacer height="8"/>
+              </if>
+              <else>
+                <text foreground="text_muted" wrap="true" text-alignment="center">{r.text}</text>
+              </else>
+            </for>
+          </column>
+        </scroll>
+      </if>
+    </column>
+  </if>
 
   <!-- Spectrum wave under the stage: 32 FFT bands, pinned to an absolute
        0..1 domain so the bars mean the same thing frame to frame. -->

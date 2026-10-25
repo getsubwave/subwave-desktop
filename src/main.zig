@@ -36,6 +36,8 @@ pub const AppUi = canvas.Ui(Msg);
 // `pub const app_icons` is the model-contract mirror `native check` verifies
 // markup names against.
 const bell_icon = canvas.svg_icon.parseComptime(@embedFile("icons/bell.svg"));
+const captions_icon = canvas.svg_icon.parseComptime(@embedFile("icons/captions.svg"));
+const captions_off_icon = canvas.svg_icon.parseComptime(@embedFile("icons/captions-off.svg"));
 const disc_icon = canvas.svg_icon.parseComptime(@embedFile("icons/disc.svg"));
 const heart_icon = canvas.svg_icon.parseComptime(@embedFile("icons/heart.svg"));
 const heart_fill_icon = canvas.svg_icon.parseComptime(@embedFile("icons/heart-fill.svg"));
@@ -46,6 +48,8 @@ const radio_icon = canvas.svg_icon.parseComptime(@embedFile("icons/radio.svg"));
 const spark_icon = canvas.svg_icon.parseComptime(@embedFile("icons/spark.svg"));
 pub const app_icons = [_]canvas.icons.Entry{
     .{ .name = "bell", .icon = &bell_icon },
+    .{ .name = "captions", .icon = &captions_icon },
+    .{ .name = "captions-off", .icon = &captions_off_icon },
     .{ .name = "disc", .icon = &disc_icon },
     .{ .name = "heart", .icon = &heart_icon },
     .{ .name = "heart-fill", .icon = &heart_fill_icon },
@@ -59,9 +63,10 @@ pub const app_icons = [_]canvas.icons.Entry{
 // ------------------------------------------------------- OS integration seams
 // App-level key fallback — consulted only for keys no focused widget consumed
 // (typing in the request/station fields is never stolen). Space = play/pause,
-// [ / ] = volume, M = mute, cmd/ctrl+K = stations, cmd/ctrl+shift+M = mini
-// player (plain cmd+M is the macOS system minimize), Esc = back to LIVE,
-// 1–5 = dial stops.
+// [ / ] = volume, M = mute, L = like, Y = show/hide lyrics, cmd/ctrl+K =
+// stations, cmd/ctrl+shift+M = mini player (plain cmd+M is the macOS system
+// minimize), Esc = back to LIVE, 1–5 = dial stops. The web player's lyrics
+// key is L, which has been the like key here since before lyrics existed.
 //
 // Volume is NOT on the arrow keys. The SDK claims bare arrows for spatial
 // focus movement (canvasWidgetSpatialFocusDirection) before this fallback
@@ -88,6 +93,7 @@ fn onKey(keyboard: canvas.WidgetKeyboardEvent) ?Msg {
     if (std.mem.eql(u8, key, "[")) return .vol_down;
     if (std.ascii.eqlIgnoreCase(key, "m")) return .toggle_mute;
     if (std.ascii.eqlIgnoreCase(key, "l")) return .press_like;
+    if (std.ascii.eqlIgnoreCase(key, "y")) return .toggle_lyrics;
     if (std.ascii.eqlIgnoreCase(key, "escape")) return .escape;
     if (key.len == 1) {
         switch (key[0]) {
@@ -606,6 +612,7 @@ test "key fallback maps transport, navigation, and dial keys" {
     try testing.expect(onKey(.{ .phase = .key_down, .key = "arrowdown" }) == null);
     try testing.expect(onKey(.{ .phase = .key_down, .key = "M" }).? == .toggle_mute);
     try testing.expect(onKey(.{ .phase = .key_down, .key = "L" }).? == .press_like);
+    try testing.expect(onKey(.{ .phase = .key_down, .key = "y" }).? == .toggle_lyrics);
     try testing.expect(onKey(.{ .phase = .key_down, .key = "Escape" }).? == .escape);
     try testing.expect(onKey(.{ .phase = .key_down, .key = "k", .modifiers = .{ .super = true } }).? == .toggle_sidebar);
     try testing.expect(onKey(.{ .phase = .key_down, .key = "m", .modifiers = .{ .control = true, .shift = true } }).? == .toggle_mini);

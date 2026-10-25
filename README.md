@@ -31,6 +31,19 @@ bottom.](docs/images/player-booth.png)
   loop thread into the stage's square record sleeve (initials placeholder while
   it loads), keeping a disk cache under the OS caches dir so a track that aired
   recently comes back without touching the network.
+- **Synced lyrics** — when the station has its Lyrics panel on (`/api/state`
+  carries `lyrics.enabled`), the LIVE stage shows the lyrics of the track you
+  are hearing from `/api/lyrics/current?songId=`: the line just sung, the line
+  being sung with its words lighting up (the newest in the station accent),
+  and the next line waiting, resting on an ellipsis through intros and
+  breaks. A track with untimed lyrics shows them all to scroll by hand. The
+  sleeve, title and DJ line step back to make room. A captions button beside
+  the like heart (or Y) shows or hides them; the back panel's LYRICS section
+  has the same switch, a line on what the track has (crediting LRCLIB), and a
+  timing nudge for a speaker or headset that runs behind. Both are saved;
+  lyrics are on by default. Mirrors the web's Classic and Drift skins
+  (`src/lyrics.zig`); the operator's per-track station correction is applied,
+  but only the web admin console can set it.
 - **Real spectrum** — the SDK's FFT `.spectrum` feed (32 bands) rendered as an
   accent-themed bar analyzer with classic attack/decay ballistics.
 - **Station themes** — 30 s poll of `/api/themes` repaints live via
@@ -72,7 +85,8 @@ bottom.](docs/images/player-booth.png)
   SDK offers — there is still no MPRIS / MPNowPlayingInfoCenter / SMTC
   integration.
 - **Keyboard transport** — space play/pause, `[` volume down, `]` volume up,
-  M mute, L like the current track, Esc back to LIVE, Cmd/Ctrl+K stations,
+  M mute, L like the current track, Y show/hide lyrics, Esc back to LIVE,
+  Cmd/Ctrl+K stations,
   Cmd/Ctrl+Shift+M mini player, 1–5 dial stops (app-level fallback; never steals
   typing from the text fields).
 - **Private stations** — when `/api/state` reports a privacy lock
@@ -82,7 +96,8 @@ bottom.](docs/images/player-booth.png)
   stream URL as `?auth=` for Icecast listener auth. Switching stations forgets
   it. Mirrors the web player's StationGate.
 - **Settings persistence** — volume / theme override / stream format / station
-  (+ name) / recents / notification opt-in survive restarts (`settings.json` in
+  (+ name) / recents / notification opt-in / lyrics shown + device timing
+  survive restarts (`settings.json` in
   the OS per-app config dir), saved debounced + serialized via `fx.writeFile`.
 - **Discord Rich Presence** — opt-in; shows the current track/artist (title
   clickable through to the station, cover art included) on your Discord
@@ -104,6 +119,7 @@ src/
   theme.zig             7 station tokens → DesignTokens (tokens_fn)
   spectrum.zig          band ballistics (pure) + tests
   stream_format.zig     format ↔ mount table + platform decode gate + tests
+  lyrics.zig            one track's lyrics answer, line pacing, retry + timing (pure) + tests
   views.zig             view registry; composes the markup fragments
   views/*.native        onboarding, mini, player-top/-sidebar/-stage/-panel/-deck/-sheets
   icons/*.svg           app icons, registered at boot as icon="app:<name>"

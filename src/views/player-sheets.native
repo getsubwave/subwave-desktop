@@ -93,6 +93,32 @@
                 <icon name="chevron-right" width="14" height="14" foreground="text_muted"/>
               </row>
             </row>
+            <!-- Only while the station has its Lyrics panel on. The timing
+                 nudge is this device's alone and the same for every track: a
+                 track's own mistiming is the operator's to fix, for everyone. -->
+            <if test="{lyrics_enabled}">
+              <use template="section-label" title="LYRICS"/>
+              <row main="space_between" cross="center" gap="10" padding="10" label="Show lyrics">
+                <row gap="10" cross="center" grow="1" min-width="0">
+                  <icon name="app:captions" width="16" height="16" foreground="text_muted"/>
+                  <column gap="2" grow="1" min-width="0">
+                    <text>Show lyrics · Y</text>
+                    <text size="sm" foreground="text_muted" wrap="true">{lyrics_note}</text>
+                  </column>
+                </row>
+                <switch selected="{lyrics_shown}" on-toggle="toggle_lyrics" label="Show lyrics"/>
+              </row>
+              <column gap="6" padding="10">
+                <text>Timing on this device</text>
+                <text size="sm" foreground="text_muted" wrap="true">For a speaker or headset that runs behind. Only changes this player.</text>
+                <row gap="6" cross="center">
+                  <button variant="outline" size="sm" label="Delay lyrics on this device" on-press="lyrics_delay">−</button>
+                  <text size="sm" width="56" text-alignment="center"><span mono="true">{lyrics_offset_label}</span></text>
+                  <button variant="outline" size="sm" label="Advance lyrics on this device" on-press="lyrics_advance">+</button>
+                  <button variant="ghost" size="sm" label="Reset lyrics timing on this device" disabled="{lyrics_offset_zero}" on-press="lyrics_reset_timing">Reset</button>
+                </row>
+              </column>
+            </if>
             <use template="section-label" title="NOTIFICATIONS"/>
             <row main="space_between" cross="center" padding="10" label="Track notifications">
               <row gap="10" cross="center">
