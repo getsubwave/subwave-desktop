@@ -5450,6 +5450,22 @@ test "hiding lyrics stops asking, and Y does nothing without the station's panel
     try testing.expectEqualStrings("", m.track_lyrics.song());
 }
 
+test "lyrics in a script this player can't draw leave the stage alone off macOS" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{ .phase = .player };
+    m.lyrics_enabled = true;
+    update(&m, .{ .got_np = .{ .key = keys.fetch_np, .outcome = .ok, .status = 200, .body = "{\"nowPlaying\":{\"title\":\"T\",\"subsonic_id\":\"s1\"}}" } }, &fx);
+    update(&m, .{ .got_lyrics = .{ .key = m.lyrics_ask.key, .outcome = .ok, .status = 200, .body =
+        \\{"songId":"s1","synced":false,"offsetMs":0,"lines":[{"startMs":null,"text":"ਇਕ ਤੇਰਾ ਪਿਆਰ ਬਾਕੀ ਦੁਨੀਆ ਬੇਕਾਰ"}]}
+    } }, &fx);
+    try testing.expectEqual(lyrics.system_fallback, m.lyrics_on_stage());
+    try testing.expectEqual(@as(f32, if (lyrics.system_fallback) 120 else 180), m.sleeve_px());
+    if (!lyrics.system_fallback)
+        try testing.expectEqualStrings("These lyrics are in a script this player can’t draw yet.", m.lyrics_note());
+}
+
 test "the lyric clock adds the station's correction and this device's nudge" {
     var fx = Effects.init(testing.allocator);
     defer fx.deinit();

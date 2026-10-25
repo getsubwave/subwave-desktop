@@ -44,7 +44,11 @@ bottom.](docs/images/player-booth.png)
   behind. Both are saved;
   lyrics are on by default. Mirrors the web's Classic and Drift skins
   (`src/lyrics.zig`); the operator's per-track station correction is applied,
-  but only the web admin console can set it.
+  but only the web admin console can set it. On Windows and Linux the app
+  draws only what its bundled Geist font covers (Latin and Cyrillic), so a
+  song whose lyrics are mostly in another script (Gurmukhi, Greek, Hangul…)
+  keeps them off the stage and says so in the LYRICS note rather than
+  showing boxes; macOS draws every script through CoreText.
 - **Real spectrum** — the SDK's FFT `.spectrum` feed (32 bands) rendered as an
   accent-themed bar analyzer with classic attack/decay ballistics.
 - **Station themes** — 30 s poll of `/api/themes` repaints live via
