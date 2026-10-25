@@ -4,8 +4,16 @@
 //! `Store.moment` says where in its lines the song stands, and the rest is the
 //! retry and timing arithmetic, kept pure so the suite can pin it.
 const std = @import("std");
+const builtin = @import("builtin");
+const font_ttf = @import("native_sdk").canvas.font_ttf;
 const json = @import("json.zig");
 const utf8 = @import("utf8.zig");
+
+// Only macOS draws text through the system (CoreText), which falls back to
+// whatever installed font has the glyph. Windows (DirectWrite, with the SDK's
+// fallback switched off) and Linux (the bundled outlines alone) draw only what
+// Geist covers, so a song in Gurmukhi, Greek or Hangul is a wall of boxes there.
+pub const system_fallback = builtin.os.tag == .macos;
 
 pub const max_lines = 200;
 pub const text_capacity = 12 * 1024;
@@ -117,6 +125,9 @@ pub const Store = struct {
     text_len: usize = 0,
     misses: u8 = 0,
     pending_asks: u8 = 0,
+    /// Whether this player can draw the lines (see `drawable`). Lines it
+    /// can't stay off the stage rather than show as boxes.
+    fits_font: bool = true,
 
     pub fn song(self: *const Store) []const u8 {
         return self.song_buf[0..self.song_len];
@@ -136,12 +147,12 @@ pub const Store = struct {
 
     /// Synced lines, which the stage plays along with the song.
     pub fn syncedReady(self: *const Store) bool {
-        return self.status == .ready and self.synced and self.count > 0;
+        return self.status == .ready and self.synced and self.count > 0 and self.fits_font;
     }
 
     /// Untimed lines, which the stage shows to scroll through by hand.
     pub fn plainReady(self: *const Store) bool {
-        return self.status == .ready and !self.synced and self.count > 0;
+        return self.status == .ready and !self.synced and self.count > 0 and self.fits_font;
     }
 
     /// The station's answer for this song. Returns when to ask again: while
@@ -168,6 +179,7 @@ pub const Store = struct {
             self.text_len += text.len;
             self.count += 1;
         }
+        self.fits_font = system_fallback or drawable(self.text[0..self.text_len]);
         self.status = .ready;
         self.synced = payload.synced orelse false;
         self.station_offset_ms = offsetMs(payload.offsetMs);
@@ -390,6 +402,45 @@ pub fn wordCount(text: []const u8) usize {
     return count;
 }
 
+/// Whether the bundled face draws enough of `text` to show it: at most one
+/// visible code point in ten missing, so a stray ♪ or emoji doesn't hide a
+/// whole song, while a sheet in a script Geist lacks never reaches the stage.
+/// Spaces, joiners and selectors draw nothing, so they don't count.
+pub fn drawable(text: []const u8) bool {
+    var visible: usize = 0;
+    var missing: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        const space = spaceLen(text, i);
+        if (space > 0) {
+            i += space;
+            continue;
+        }
+        // utf8Decode takes a lone byte as its own code point, so a byte that
+        // can't lead a sequence must be caught before it decodes as Latin-1.
+        const len = std.unicode.utf8ByteSequenceLength(text[i]) catch 0;
+        const decoded: ?u21 = if (len > 0 and len <= text.len - i) std.unicode.utf8Decode(text[i..][0..len]) catch null else null;
+        i += if (decoded != null) len else 1;
+        // A broken byte draws as a box like any other missing glyph.
+        const cp = decoded orelse {
+            visible += 1;
+            missing += 1;
+            continue;
+        };
+        if (cp < 0x20 or invisible(cp)) continue;
+        visible += 1;
+        if (font_ttf.geist_regular.glyphIndex(cp) == 0) missing += 1;
+    }
+    return missing * 10 <= visible;
+}
+
+fn invisible(cp: u21) bool {
+    return switch (cp) {
+        0x7F, 0x200B...0x200F, 0x2060...0x2064, 0xFE00...0xFE0F, 0xE0100...0xE01EF => true,
+        else => false,
+    };
+}
+
 /// A sung line cut around its newest lit word: the words already sung, the
 /// newest one, and those still to come. Whitespace stays with the runs, so
 /// laid end to end they are the line again.
@@ -435,6 +486,7 @@ pub fn note(store: *const Store, shown: bool) []const u8 {
         .gone, .locked => return "No lyrics for this song.",
         .ready => {},
     }
+    if (store.count > 0 and !store.fits_font) return "These lyrics are in a script this player can’t draw yet.";
     if (store.syncedReady()) {
         return if (store.source == .lrclib) "Synced lyrics, from LRCLIB." else "Synced lyrics, from the station’s library.";
     }
@@ -675,6 +727,39 @@ test "stage cuts the sung line and names its neighbours" {
     try testing.expectEqualStrings("", held.word);
     const intro: Store = .{};
     try testing.expectEqualDeep(Stage{}, intro.stage(0));
+}
+
+test "drawable tells a sheet Geist covers from one in a script it lacks" {
+    try testing.expect(drawable(""));
+    try testing.expect(drawable("Hold the line, café, Привет, “quoted” — and…"));
+    try testing.expect(!drawable("ਇਕ ਤੇਰਾ ਪਿਆਰ ਬਾਕੀ ਦੁਨੀਆ ਬੇਕਾਰ"));
+    try testing.expect(!drawable("사랑해 사랑해 oh"));
+    // Instrumental markers and an emoji are a stray box, not a reason to hide.
+    try testing.expect(drawable("♪Hold the line\nLove isn't always on time♪ ❤"));
+    // One visible code point in ten may be missing, two may not.
+    try testing.expect(drawable("♪abcdefghi"));
+    try testing.expect(!drawable("♪♪abcdefgh"));
+    // Spaces, joiners and variation selectors draw nothing and don't count.
+    try testing.expect(drawable("a\u{200D}b\u{FE0F}\u{3000}c"));
+    // Broken bytes draw as boxes.
+    try testing.expect(!drawable("\xFF\xFE ok"));
+}
+
+test "a sheet this player can't draw stays off the stage, and the note says why" {
+    var store: Store = .{};
+    store.begin("s1");
+    var lines = [_]json.LyricLine{ .{ .startMs = 0, .text = "ਇਕ ਤੇਰਾ ਪਿਆਰ" }, .{ .startMs = 4_000, .text = "ਬਾਕੀ ਦੁਨੀਆ ਬੇਕਾਰ" } };
+    _ = store.accept(.{ .songId = "s1", .synced = true, .lines = &lines });
+    // macOS draws through CoreText, which falls back to a font that has them.
+    try testing.expectEqual(system_fallback, store.fits_font);
+    try testing.expectEqual(system_fallback, store.syncedReady());
+    if (!system_fallback)
+        try testing.expectEqualStrings("These lyrics are in a script this player can’t draw yet.", note(&store, true));
+    _ = store.accept(.{ .songId = "s1", .synced = false, .lines = &lines });
+    try testing.expectEqual(system_fallback, store.plainReady());
+    // The next song starts over.
+    store.begin("s2");
+    try testing.expect(store.fits_font);
 }
 
 test "rows lay every untimed line out, a blank one as a stanza break" {
