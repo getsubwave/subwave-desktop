@@ -28,7 +28,9 @@ sudo zypper install --allow-unsigned-rpm ./SUBWAVE-Player-<version>-linux-x64.rp
 sudo pacman -U ./SUBWAVE-Player-<version>-linux-x64.pkg.tar.zst      # Arch, Manjaro, EndeavourOS
 ```
 
-`pacman -U` and `dnf install` also take the release asset's URL directly.
+Install the downloaded file, not its URL: the packages are unsigned, and
+pacman refuses an unsigned package it fetched itself (it goes looking for a
+`.sig`) while accepting the same file from disk.
 Anything else can unpack the `-linux-x64.tar.gz` and run
 `bin/subwave-desktop`. None of these add a repository, so updates are a fresh
 download — the app tells you when one is out. (An AUR package,
@@ -315,7 +317,7 @@ one per CPU flavor):
 | `release-linux.yml` | `ubuntu-24.04` | `-linux-x64.tar.gz` | needs glibc 2.39+ and GTK4 |
 | `release-linux.yml` | `ubuntu-24.04` | `-linux-x64.deb` | Debian 13+ / Ubuntu 24.04+; repackages the tarball's build |
 | `release-linux.yml` | `ubuntu-24.04` | `-linux-x64.rpm` | Fedora and openSUSE; repackages the tarball's build |
-| `release-linux.yml` | `ubuntu-24.04` | `-linux-x64.pkg.tar.zst` | Arch (`pacman -U`); repackages the tarball's build |
+| `release-linux.yml` | `ubuntu-24.04` | `-linux-x64.pkg.tar.zst` | Arch (`pacman -U ./file`, not the URL); repackages the tarball's build |
 
 Each one applies the local SDK patch before building
 (`scripts/apply-sdk-patches.sh`), so a release cannot ship without it, and
