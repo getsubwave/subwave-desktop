@@ -7,7 +7,7 @@
 pkgname=subwave-desktop-bin
 _pkgname=subwave-desktop
 _appid=dev.subwave.player
-pkgver=0.11.0
+pkgver=0.11.1
 pkgrel=1
 pkgdesc='Native desktop player for SUB/WAVE internet radio stations'
 arch=('x86_64')
@@ -29,7 +29,7 @@ options=('!strip' '!debug')
 source=("SUBWAVE-Player-$pkgver-linux-x64.tar.gz::$url/releases/download/v$pkgver/SUBWAVE-Player-$pkgver-linux-x64.tar.gz"
         "LICENSE-$pkgver::https://raw.githubusercontent.com/getsubwave/subwave-desktop/v$pkgver/LICENSE"
         "$_appid.desktop")
-sha256sums=('7a18f5001b904ee850c1a466ff761a769f098ba2a6b78ad823c66ff5f64bc54f'
+sha256sums=('3ab3f44b2beeb897dfdcc18417bb1b8c399be95be28acbc1f064ebadef56a4d6'
             '0735adbd0d3294cc8b3f498f345d22a3b605b9a5be6ddf28eebc6d96a62d3406'
             '7af0ff26d199c9a008caf3659278693b02fb07c4580137d0d5b10f2babda9590')
 
