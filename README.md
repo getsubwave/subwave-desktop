@@ -13,6 +13,23 @@ track metadata on the left, the booth feed of DJ picks, voice lines and played
 tracks on the right, and the live FFT spectrum along the
 bottom.](docs/images/player-booth.png)
 
+## Install on Linux
+
+Each [release](https://github.com/getsubwave/subwave-desktop/releases/latest)
+carries an x64 package per distro family. They need GTK 4.12 or newer, which
+means Debian 13+, Ubuntu 24.04+ and any current Fedora or Arch.
+
+```bash
+sudo apt install ./SUBWAVE-Player-<version>-linux-x64.deb    # Debian, Ubuntu
+sudo dnf install ./SUBWAVE-Player-<version>-linux-x64.rpm    # Fedora
+```
+
+On Arch, build `subwave-desktop-bin` from `packaging/aur/` with `makepkg -si`
+(not on the AUR yet; see #48). Anything else can unpack the
+`-linux-x64.tar.gz` and run `bin/subwave-desktop`. None of these add a
+repository, so updates are a fresh download — the app tells you when one is
+out.
+
 ## Features
 
 - **Live stream** — plays the endless Icecast stream via `fx.playAudio` with
@@ -280,7 +297,7 @@ than relying on ICY in-stream metadata).
 
 ## Shipping checklist
 
-All four artifacts are built by CI. Publishing a GitHub release fires
+All six artifacts are built by CI. Publishing a GitHub release fires
 `release: published`, and one workflow per platform builds, verifies and
 uploads its asset onto that release (the macOS workflow is a two-leg matrix,
 one per CPU flavor):
@@ -291,6 +308,8 @@ one per CPU flavor):
 | `release-macos.yml` | `macos-15-intel` | `-intel.dmg` | Intel (x86_64), built and tested natively, ad-hoc signed the same way; label supported until Aug 2027 |
 | `release-windows.yml` | `windows-latest` | `-windows-x64.zip` | built and launched on real Windows |
 | `release-linux.yml` | `ubuntu-24.04` | `-linux-x64.tar.gz` | needs glibc 2.39+ and GTK4 |
+| `release-linux.yml` | `ubuntu-24.04` | `-linux-x64.deb` | Debian 13+ / Ubuntu 24.04+; repackages the tarball's build |
+| `release-linux.yml` | `ubuntu-24.04` | `-linux-x64.rpm` | Fedora; repackages the tarball's build |
 
 Each one applies the local SDK patch before building
 (`scripts/apply-sdk-patches.sh`), so a release cannot ship without it, and
@@ -321,6 +340,15 @@ own: after a release is published, `packaging/aur/bump.sh <version>` updates
 the version, checksums and `.SRCINFO`, and those three files go to the AUR
 repository.
 
+The `.deb` and `.rpm` come from the same build by way of
+[nfpm](https://nfpm.goreleaser.com): `scripts/package-linux-distros.sh` reads
+`packaging/nfpm/nfpm.yaml` and repackages `zig-out/package/subwave-desktop-linux`.
+nfpm computes no dependencies, so both lists in that file are written by hand,
+and `scripts/test-linux-packages.sh` is what keeps them honest: it installs the
+`.deb` in Debian 13 and Ubuntu 24.04 containers and the `.rpm` in a Fedora one.
+That runs on every push in `ci.yml` as well as in the release workflow, so a
+wrong package name blocks a merge rather than a release.
+
 Two runner pins are deliberate. `ubuntu-24.04` because Linux can't be
 cross-compiled (the binary links the GTK4 system stack, 113 shared libraries,
 nothing bundled) and because ubuntu-22.04's GTK 4.6 would compile the
@@ -332,7 +360,8 @@ cross-compiled and hoped for.
 `./scripts/make-release.sh` is the way to cut one. It builds nothing itself:
 it checks that main is clean, in sync, on an unused tag and **already green in
 CI on that exact commit**, then creates the release and follows the three runs
-until every asset is attached (four in all — the macOS run uploads two DMGs).
+until every asset is attached (six in all — the macOS run uploads two DMGs,
+the Linux run a tarball, a `.deb` and an `.rpm`).
 Since nothing is built locally, a release can be cut from any machine.
 
 Every push to main and every pull request also runs `native check`, `native
