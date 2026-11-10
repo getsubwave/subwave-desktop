@@ -1,4 +1,4 @@
-# .deb and .rpm over the Linux build, made by scripts/package-linux-distros.sh.
+# .deb, .rpm and pacman package over the Linux build, made by scripts/package-linux-distros.sh.
 #
 # Like the Arch package in packaging/aur/, these repackage what
 # `native package --target linux` already produced: nothing is compiled here.
@@ -71,6 +71,10 @@ contents:
     packager: rpm
     type: license
     file_info: { mode: 0644 }
+  - src: LICENSE
+    dst: /usr/share/licenses/subwave-desktop/LICENSE
+    packager: archlinux
+    file_info: { mode: 0644 }
 
 # nfpm computes no dependencies, so both lists are written by hand from what
 # the binary needs. It links the GTK4 stack directly (readelf -d: gtk4, pango,
@@ -105,24 +109,53 @@ overrides:
       # AAC stream decoding. MP3 and the Ogg mounts work without it.
       - gstreamer1.0-libav
   rpm:
-    # Fedora package names. Fedora's -good carries the PulseAudio sink.
+    # One .rpm for Fedora and openSUSE, whose package names differ
+    # (gtk4 / libgtk-4-1, gstreamer1-plugins-base / gstreamer-plugins-base).
+    # The linked libraries are named by soname capability — what rpmbuild
+    # would have generated, and identical on both — and the rest are rich
+    # "(a or b)" dependencies, which dnf and zypper both resolve.
     depends:
       - glibc >= 2.36
-      - gtk4 >= 4.12
-      - glib2
-      - pango
-      - gdk-pixbuf2
-      - cairo
-      - graphene
-      - libsoup3
-      - gstreamer1
-      - gstreamer1-plugins-base
-      - gstreamer1-plugins-good
+      - (gtk4 >= 4.12 or libgtk-4-1 >= 4.12)
+      - libgtk-4.so.1()(64bit)
+      - libglib-2.0.so.0()(64bit)
+      - libgobject-2.0.so.0()(64bit)
+      - libgio-2.0.so.0()(64bit)
+      - libpango-1.0.so.0()(64bit)
+      - libgdk_pixbuf-2.0.so.0()(64bit)
+      - libcairo.so.2()(64bit)
+      - libgraphene-1.0.so.0()(64bit)
+      - libsoup-3.0.so.0()(64bit)
+      - libgstreamer-1.0.so.0()(64bit)
+      - (gstreamer1-plugins-base or gstreamer-plugins-base)
+      - (gstreamer1-plugins-good or gstreamer-plugins-good)
       - hicolor-icon-theme
     recommends:
-      # AAC stream decoding. MP3 and the Ogg mounts work without it.
+      # AAC stream decoding, under its Fedora and its openSUSE name; a weak
+      # dependency that does not exist on a distro is simply skipped. MP3 and
+      # the Ogg mounts work without it.
       - gstreamer1-plugin-libav
+      - gstreamer-plugins-libav
+  archlinux:
+    # The same list as packaging/aur/PKGBUILD, which this package conflicts
+    # with by name (that one provides and conflicts subwave-desktop).
+    depends:
+      - glibc
+      - glib2
+      - gtk4
+      - cairo
+      - pango
+      - gdk-pixbuf2
+      - graphene
+      - hicolor-icon-theme
+      - libsoup3
+      - gstreamer
+      - gst-plugins-base
+      - gst-plugins-good
 
 rpm:
   group: Applications/Multimedia
   summary: Native desktop player for SUB/WAVE internet radio stations
+
+archlinux:
+  packager: Parminder Klair <perminder.klair@gmail.com>

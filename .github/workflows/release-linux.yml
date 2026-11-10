@@ -5,7 +5,7 @@
 # stack (113 shared libraries, nothing bundled), so it has to be BUILT on
 # Linux rather than cross-compiled. This workflow is that missing leg — it
 # fires when a release is published and uploads the tarball onto it, along
-# with a .deb and an .rpm that repackage the same build.
+# with a .deb, an .rpm and a pacman package that repackage the same build.
 #
 # ubuntu-24.04 is a deliberate pin, not a default:
 #   - GTK 4.14 — the fractional-HiDPI patch in gtk_host.c is gated behind
@@ -146,14 +146,14 @@ jobs:
           ls -lh "$tarball"
           echo "tarball=$tarball" >> "$GITHUB_ENV"
 
-      - name: Build .deb and .rpm
-        # Both repackage the stripped tree the tarball was just made from, the
+      - name: Build .deb, .rpm and pacman package
+        # All three repackage the stripped tree the tarball was just made from, the
         # way the Arch package repackages the tarball (packaging/nfpm/).
         run: ./scripts/package-linux-distros.sh "$version" dist
 
-      - name: Install the packages on Debian, Ubuntu and Fedora
+      - name: Install the packages on Debian, Ubuntu, Fedora, openSUSE and Arch
         # Their dependency lists are hand-written, so this is the only thing
-        # that proves apt and dnf can resolve them.
+        # that proves apt, dnf, zypper and pacman can resolve them.
         run: ./scripts/test-linux-packages.sh "$version" dist
 
       - name: Upload to release
@@ -164,5 +164,6 @@ jobs:
           gh release upload "$TAG" --clobber \
             "${tarball}#SUBWAVE Player ${version} (Linux x64, glibc 2.39+, needs GTK4)" \
             "dist/SUBWAVE-Player-${version}-linux-x64.deb#SUBWAVE Player ${version} (Debian 13+ / Ubuntu 24.04+, x64)" \
-            "dist/SUBWAVE-Player-${version}-linux-x64.rpm#SUBWAVE Player ${version} (Fedora, x64)"
+            "dist/SUBWAVE-Player-${version}-linux-x64.rpm#SUBWAVE Player ${version} (Fedora / openSUSE, x64)" \
+            "dist/SUBWAVE-Player-${version}-linux-x64.pkg.tar.zst#SUBWAVE Player ${version} (Arch, x64)"
           gh release view "$TAG" --json assets --jq '.assets[].name'

@@ -96,10 +96,10 @@ jobs:
         run: native build -Dcpu=baseline -Dtrace=off
 
       - name: Build and install the Linux packages
-        # The .deb and .rpm dependency lists are hand-written
+        # The .deb, .rpm and pacman dependency lists are hand-written
         # (packaging/nfpm/nfpm.yaml), so a wrong package name is invisible
-        # until apt or dnf tries to resolve it. Doing that here, in Debian,
-        # Ubuntu and Fedora containers, blocks the merge; the release
+        # until a package manager tries to resolve it. Doing that here, in Debian,
+        # Ubuntu, Fedora, openSUSE and Arch containers, blocks the merge; the release
         # workflow's copy would only catch it with a release already public.
         if: runner.os == 'Linux'
         run: |

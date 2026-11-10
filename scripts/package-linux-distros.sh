@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Build the .deb and .rpm from a packaged Linux build.
+# Build the .deb, .rpm and pacman package from a packaged Linux build.
 #
-# Both repackage zig-out/package/subwave-desktop-linux — the same tree the
+# All three repackage zig-out/package/subwave-desktop-linux — the same tree the
 # release tarball is made from — so run `native package --target linux` (and
 # the strip step, at release time) first. Nothing is compiled here.
 #
@@ -11,7 +11,8 @@
 # as root, so a tampered download has to fail the job rather than ship.
 #
 # Usage: scripts/package-linux-distros.sh <MAJOR.MINOR.PATCH> [output-dir]
-#   Writes <output-dir>/SUBWAVE-Player-<version>-linux-x64.deb and .rpm
+#   Writes <output-dir>/SUBWAVE-Player-<version>-linux-x64.deb, .rpm and
+#   .pkg.tar.zst
 #   (output-dir defaults to dist/).
 set -euo pipefail
 
@@ -58,8 +59,10 @@ else
 fi
 
 mkdir -p "$out"
-for fmt in deb rpm; do
-    target="$out/SUBWAVE-Player-${version}-linux-x64.${fmt}"
+for fmt in deb rpm archlinux; do
+    ext="$fmt"
+    [ "$fmt" = archlinux ] && ext="pkg.tar.zst"
+    target="$out/SUBWAVE-Player-${version}-linux-x64.${ext}"
     VERSION="$version" "$nfpm" package \
         --config packaging/nfpm/nfpm.yaml --packager "$fmt" --target "$target"
     ls -lh "$target"

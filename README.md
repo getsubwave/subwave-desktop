@@ -17,18 +17,23 @@ bottom.](docs/images/player-booth.png)
 
 Each [release](https://github.com/getsubwave/subwave-desktop/releases/latest)
 carries an x64 package per distro family. They need GTK 4.12 or newer, which
-means Debian 13+, Ubuntu 24.04+ and any current Fedora or Arch.
+means Debian 13+, Ubuntu 24.04+ and any current Fedora, openSUSE or Arch.
+Download the one for your distro and install it with the system package
+manager, which pulls in the dependencies and adds the menu entry:
 
 ```bash
-sudo apt install ./SUBWAVE-Player-<version>-linux-x64.deb    # Debian, Ubuntu
-sudo dnf install ./SUBWAVE-Player-<version>-linux-x64.rpm    # Fedora
+sudo apt install ./SUBWAVE-Player-<version>-linux-x64.deb            # Debian, Ubuntu, Mint, Pop!_OS
+sudo dnf install ./SUBWAVE-Player-<version>-linux-x64.rpm            # Fedora
+sudo zypper install --allow-unsigned-rpm ./SUBWAVE-Player-<version>-linux-x64.rpm   # openSUSE
+sudo pacman -U ./SUBWAVE-Player-<version>-linux-x64.pkg.tar.zst      # Arch, Manjaro, EndeavourOS
 ```
 
-On Arch, build `subwave-desktop-bin` from `packaging/aur/` with `makepkg -si`
-(not on the AUR yet; see #48). Anything else can unpack the
-`-linux-x64.tar.gz` and run `bin/subwave-desktop`. None of these add a
-repository, so updates are a fresh download — the app tells you when one is
-out.
+`pacman -U` and `dnf install` also take the release asset's URL directly.
+Anything else can unpack the `-linux-x64.tar.gz` and run
+`bin/subwave-desktop`. None of these add a repository, so updates are a fresh
+download — the app tells you when one is out. (An AUR package,
+`subwave-desktop-bin`, is ready in `packaging/aur/` but not published yet; see
+#48.)
 
 ## Features
 
@@ -297,7 +302,7 @@ than relying on ICY in-stream metadata).
 
 ## Shipping checklist
 
-All six artifacts are built by CI. Publishing a GitHub release fires
+All seven artifacts are built by CI. Publishing a GitHub release fires
 `release: published`, and one workflow per platform builds, verifies and
 uploads its asset onto that release (the macOS workflow is a two-leg matrix,
 one per CPU flavor):
@@ -309,7 +314,8 @@ one per CPU flavor):
 | `release-windows.yml` | `windows-latest` | `-windows-x64.zip` | built and launched on real Windows |
 | `release-linux.yml` | `ubuntu-24.04` | `-linux-x64.tar.gz` | needs glibc 2.39+ and GTK4 |
 | `release-linux.yml` | `ubuntu-24.04` | `-linux-x64.deb` | Debian 13+ / Ubuntu 24.04+; repackages the tarball's build |
-| `release-linux.yml` | `ubuntu-24.04` | `-linux-x64.rpm` | Fedora; repackages the tarball's build |
+| `release-linux.yml` | `ubuntu-24.04` | `-linux-x64.rpm` | Fedora and openSUSE; repackages the tarball's build |
+| `release-linux.yml` | `ubuntu-24.04` | `-linux-x64.pkg.tar.zst` | Arch (`pacman -U`); repackages the tarball's build |
 
 Each one applies the local SDK patch before building
 (`scripts/apply-sdk-patches.sh`), so a release cannot ship without it, and
@@ -340,12 +346,13 @@ own: after a release is published, `packaging/aur/bump.sh <version>` updates
 the version, checksums and `.SRCINFO`, and those three files go to the AUR
 repository.
 
-The `.deb` and `.rpm` come from the same build by way of
+The `.deb`, `.rpm` and pacman package come from the same build by way of
 [nfpm](https://nfpm.goreleaser.com): `scripts/package-linux-distros.sh` reads
 `packaging/nfpm/nfpm.yaml` and repackages `zig-out/package/subwave-desktop-linux`.
-nfpm computes no dependencies, so both lists in that file are written by hand,
+nfpm computes no dependencies, so the lists in that file are written by hand,
 and `scripts/test-linux-packages.sh` is what keeps them honest: it installs the
-`.deb` in Debian 13 and Ubuntu 24.04 containers and the `.rpm` in a Fedora one.
+`.deb` in Debian 13 and Ubuntu 24.04 containers, the `.rpm` in Fedora and
+openSUSE Tumbleweed ones, and the pacman package in an Arch one.
 That runs on every push in `ci.yml` as well as in the release workflow, so a
 wrong package name blocks a merge rather than a release.
 
@@ -360,8 +367,8 @@ cross-compiled and hoped for.
 `./scripts/make-release.sh` is the way to cut one. It builds nothing itself:
 it checks that main is clean, in sync, on an unused tag and **already green in
 CI on that exact commit**, then creates the release and follows the three runs
-until every asset is attached (six in all — the macOS run uploads two DMGs,
-the Linux run a tarball, a `.deb` and an `.rpm`).
+until every asset is attached (seven in all — the macOS run uploads two DMGs,
+the Linux run a tarball, a `.deb`, an `.rpm` and a pacman package).
 Since nothing is built locally, a release can be cut from any machine.
 
 Every push to main and every pull request also runs `native check`, `native
