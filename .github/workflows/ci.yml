@@ -95,6 +95,20 @@ jobs:
         # workflow drops it, guarded by scripts/check-release-flags.sh.
         run: native build -Dcpu=baseline -Dtrace=off
 
+      - name: Build and install the Linux packages
+        # The .deb, .rpm and pacman dependency lists are hand-written
+        # (packaging/nfpm/nfpm.yaml), so a wrong package name is invisible
+        # until a package manager tries to resolve it. Doing that here, in Debian,
+        # Ubuntu, Fedora, openSUSE and Arch containers, blocks the merge; the release
+        # workflow's copy would only catch it with a release already public.
+        if: runner.os == 'Linux'
+        run: |
+          version="$(sed -n 's/.*\.version = "\([^"]*\)".*/\1/p' app.zon | head -1)"
+          [ -n "$version" ] || { echo "error: could not read .version from app.zon" >&2; exit 1; }
+          native package --target linux
+          ./scripts/package-linux-distros.sh "$version" dist
+          ./scripts/test-linux-packages.sh "$version" dist
+
       - name: Smoke-test the player phase
         # Windows only. This is NOT a reproduction of issue #23 — that needs
         # a real AV minifilter, a native-sdk.jsonl grown to hundreds of

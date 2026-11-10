@@ -1,0 +1,161 @@
+# .deb, .rpm and pacman package over the Linux build, made by scripts/package-linux-distros.sh.
+#
+# Like the Arch package in packaging/aur/, these repackage what
+# `native package --target linux` already produced: nothing is compiled here.
+# Paths are relative to the repository root, which is where the script runs
+# nfpm from, and VERSION comes from its first argument.
+name: subwave-desktop
+arch: amd64
+platform: linux
+version: ${VERSION}
+release: 1
+section: sound
+priority: optional
+maintainer: Parminder Klair <perminder.klair@gmail.com>
+vendor: SUB/WAVE
+homepage: https://github.com/getsubwave/subwave-desktop
+license: MIT
+description: |-
+  Native desktop player for SUB/WAVE internet radio stations
+  Now playing with cover art, the booth feed, synced lyrics and a live
+  spectrum, drawn by a native engine with no browser or WebView.
+
+contents:
+  # resources/ only records the packager's asset manifest; nothing reads it at
+  # runtime, so the executable stands alone. CI already dropped the DWARF and
+  # kept .symtab so panic backtraces still name functions; nfpm does not strip.
+  - src: zig-out/package/subwave-desktop-linux/bin/subwave-desktop
+    dst: /usr/bin/subwave-desktop
+    file_info:
+      mode: 0755
+
+  # The build's own entry is generic (Icon=app-icon, Categories=Utility). This
+  # one is shared with the Arch package and is named after the GTK application
+  # id, which Wayland compositors see as the window's app_id.
+  - src: packaging/aur/dev.subwave.player.desktop
+    dst: /usr/share/applications/dev.subwave.player.desktop
+    file_info:
+      mode: 0644
+
+  - src: zig-out/package/subwave-desktop-linux/share/icons/hicolor/16x16/apps/app-icon.png
+    dst: /usr/share/icons/hicolor/16x16/apps/dev.subwave.player.png
+    file_info: { mode: 0644 }
+  - src: zig-out/package/subwave-desktop-linux/share/icons/hicolor/24x24/apps/app-icon.png
+    dst: /usr/share/icons/hicolor/24x24/apps/dev.subwave.player.png
+    file_info: { mode: 0644 }
+  - src: zig-out/package/subwave-desktop-linux/share/icons/hicolor/32x32/apps/app-icon.png
+    dst: /usr/share/icons/hicolor/32x32/apps/dev.subwave.player.png
+    file_info: { mode: 0644 }
+  - src: zig-out/package/subwave-desktop-linux/share/icons/hicolor/48x48/apps/app-icon.png
+    dst: /usr/share/icons/hicolor/48x48/apps/dev.subwave.player.png
+    file_info: { mode: 0644 }
+  - src: zig-out/package/subwave-desktop-linux/share/icons/hicolor/64x64/apps/app-icon.png
+    dst: /usr/share/icons/hicolor/64x64/apps/dev.subwave.player.png
+    file_info: { mode: 0644 }
+  - src: zig-out/package/subwave-desktop-linux/share/icons/hicolor/128x128/apps/app-icon.png
+    dst: /usr/share/icons/hicolor/128x128/apps/dev.subwave.player.png
+    file_info: { mode: 0644 }
+  - src: zig-out/package/subwave-desktop-linux/share/icons/hicolor/256x256/apps/app-icon.png
+    dst: /usr/share/icons/hicolor/256x256/apps/dev.subwave.player.png
+    file_info: { mode: 0644 }
+  - src: zig-out/package/subwave-desktop-linux/share/icons/hicolor/512x512/apps/app-icon.png
+    dst: /usr/share/icons/hicolor/512x512/apps/dev.subwave.player.png
+    file_info: { mode: 0644 }
+
+  - src: LICENSE
+    dst: /usr/share/doc/subwave-desktop/copyright
+    packager: deb
+    file_info: { mode: 0644 }
+  - src: LICENSE
+    dst: /usr/share/licenses/subwave-desktop/LICENSE
+    packager: rpm
+    type: license
+    file_info: { mode: 0644 }
+  - src: LICENSE
+    dst: /usr/share/licenses/subwave-desktop/LICENSE
+    packager: archlinux
+    file_info: { mode: 0644 }
+
+# nfpm computes no dependencies, so both lists are written by hand from what
+# the binary needs. It links the GTK4 stack directly (readelf -d: gtk4, pango,
+# gdk-pixbuf, cairo, graphene, glib); GStreamer and libsoup are dlopen()ed at
+# runtime by the SDK's GTK host, so no tool would find those anyway. playbin
+# comes from -base; spectrum, souphttpsrc and the MP3/Ogg/FLAC decoders from
+# -good; libsoup also fills the cover-art cache.
+#
+# The two floors are real symbol requirements, not caution: the fractional
+# HiDPI patch calls gdk_surface_get_scale (GTK 4.12), and the binary imports
+# arc4random_buf (glibc 2.36). GTK is the one that bites, since it rules out
+# Debian 12 (4.8) and Ubuntu 22.04 (4.6).
+overrides:
+  deb:
+    depends:
+      - libc6 (>= 2.36)
+      - libgtk-4-1 (>= 4.12)
+      - libglib2.0-0t64 | libglib2.0-0
+      - libpango-1.0-0
+      - libgdk-pixbuf-2.0-0
+      - libcairo2
+      - libgraphene-1.0-0
+      - libsoup-3.0-0
+      - libgstreamer1.0-0
+      - gstreamer1.0-plugins-base
+      - gstreamer1.0-plugins-good
+      - hicolor-icon-theme
+    recommends:
+      # Debian splits the audio sinks out of -good; a desktop install already
+      # has one of these, a minimal one would otherwise play to nowhere.
+      - gstreamer1.0-pipewire | gstreamer1.0-pulseaudio | gstreamer1.0-alsa
+      # AAC stream decoding. MP3 and the Ogg mounts work without it.
+      - gstreamer1.0-libav
+  rpm:
+    # One .rpm for Fedora and openSUSE, whose package names differ
+    # (gtk4 / libgtk-4-1, gstreamer1-plugins-base / gstreamer-plugins-base).
+    # The linked libraries are named by soname capability — what rpmbuild
+    # would have generated, and identical on both — and the rest are rich
+    # "(a or b)" dependencies, which dnf and zypper both resolve.
+    depends:
+      - glibc >= 2.36
+      - (gtk4 >= 4.12 or libgtk-4-1 >= 4.12)
+      - libgtk-4.so.1()(64bit)
+      - libglib-2.0.so.0()(64bit)
+      - libgobject-2.0.so.0()(64bit)
+      - libgio-2.0.so.0()(64bit)
+      - libpango-1.0.so.0()(64bit)
+      - libgdk_pixbuf-2.0.so.0()(64bit)
+      - libcairo.so.2()(64bit)
+      - libgraphene-1.0.so.0()(64bit)
+      - libsoup-3.0.so.0()(64bit)
+      - libgstreamer-1.0.so.0()(64bit)
+      - (gstreamer1-plugins-base or gstreamer-plugins-base)
+      - (gstreamer1-plugins-good or gstreamer-plugins-good)
+      - hicolor-icon-theme
+    recommends:
+      # AAC stream decoding, under its Fedora and its openSUSE name; a weak
+      # dependency that does not exist on a distro is simply skipped. MP3 and
+      # the Ogg mounts work without it.
+      - gstreamer1-plugin-libav
+      - gstreamer-plugins-libav
+  archlinux:
+    # The same list as packaging/aur/PKGBUILD, which this package conflicts
+    # with by name (that one provides and conflicts subwave-desktop).
+    depends:
+      - glibc
+      - glib2
+      - gtk4
+      - cairo
+      - pango
+      - gdk-pixbuf2
+      - graphene
+      - hicolor-icon-theme
+      - libsoup3
+      - gstreamer
+      - gst-plugins-base
+      - gst-plugins-good
+
+rpm:
+  group: Applications/Multimedia
+  summary: Native desktop player for SUB/WAVE internet radio stations
+
+archlinux:
+  packager: Parminder Klair <perminder.klair@gmail.com>
