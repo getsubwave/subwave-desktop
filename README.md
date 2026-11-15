@@ -164,12 +164,12 @@ ones appear.
 ## Build & run
 
 Requires **Zig 0.16.0**, **Node 24.21.0** (pinned in `mise.toml` and CI),
-and `@native-sdk/cli` **0.10.1** — **plus one local SDK patch**. Install the
+and `@native-sdk/cli` **0.11.1** — **plus one local SDK patch**. Install the
 SDK under the repo's Node version so `native` and `npm root -g` agree:
 
 ```bash
 mise install
-mise exec -- npm i -g @native-sdk/cli@0.10.1
+mise exec -- npm i -g @native-sdk/cli@0.11.1
 mise exec -- ./scripts/apply-sdk-patches.sh
 mise exec -- native test
 ```
@@ -263,7 +263,7 @@ serve are listed saying exactly that rather than quietly absent. The same row
 is also in the back panel under SIGNAL.
 
 **Playing through a different output device.** Not offered in-app: the SDK's
-audio surface (re-checked at 0.10.1) is load/play/pause/stop/seek/volume, with
+audio surface (re-checked at 0.11.1) is load/play/pause/stop/seek/volume, with
 no device enumeration or output-device property on any host, so there is
 nothing honest to build a picker on. Route it at the OS instead —
 `pavucontrol` or any PipeWire patchbay on Linux, Settings → System → Sound →
@@ -271,7 +271,7 @@ Volume mixer on Windows. macOS has no per-app routing without a third-party
 virtual audio driver. The API request is written up in
 [`docs/sdk-audio-device-request.md`](docs/sdk-audio-device-request.md).
 
-**OS media integration.** The SDK (re-checked at 0.10.1) has no system
+**OS media integration.** The SDK (re-checked at 0.11.1) has no system
 now-playing or media-key surface — no `MPNowPlayingInfoCenter`/
 `MPRemoteCommandCenter` on macOS, no MPRIS on Linux — so hardware play/pause
 keys and the OS Now Playing widget can't be wired up yet (SDK feature request).
