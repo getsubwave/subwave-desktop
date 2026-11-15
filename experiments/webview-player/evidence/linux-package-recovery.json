@@ -1,0 +1,174 @@
+[
+  {
+    "event": "snapshot",
+    "result": {
+      "protocol": 1,
+      "revision": 18,
+      "generation": 1,
+      "playback": "error",
+      "volume": 0.5,
+      "error": "native audio playback failed"
+    }
+  },
+  {
+    "note": "forced drop reached error after native buffering; not within initial one-second assertion"
+  },
+  {
+    "event": "diagnostics",
+    "result": {
+      "loadCount": 1,
+      "playCount": 2,
+      "spectrumReceived": 10057,
+      "spectrumDelivered": 11807,
+      "spectrumAcked": 11807,
+      "maxPendingPerView": 1,
+      "mainVisible": false,
+      "miniVisible": true,
+      "views": [
+        {
+          "windowId": 1,
+          "ready": true,
+          "visible": false,
+          "awaitingAck": false,
+          "deliveredSequence": 1861,
+          "pendingSequence": 1861,
+          "snapshotCount": 198,
+          "lastSnapshotRevision": 18
+        },
+        {
+          "windowId": 3,
+          "ready": true,
+          "visible": true,
+          "awaitingAck": false,
+          "deliveredSequence": 10057,
+          "pendingSequence": 10057,
+          "snapshotCount": 805,
+          "lastSnapshotRevision": 19
+        }
+      ]
+    }
+  },
+  {
+    "event": "diagnostics",
+    "result": {
+      "loadCount": 1,
+      "playCount": 2,
+      "spectrumReceived": 10057,
+      "spectrumDelivered": 11807,
+      "spectrumAcked": 11807,
+      "maxPendingPerView": 1,
+      "mainVisible": false,
+      "miniVisible": true,
+      "views": [
+        {
+          "windowId": 1,
+          "ready": true,
+          "visible": false,
+          "awaitingAck": false,
+          "deliveredSequence": 1861,
+          "pendingSequence": 1861,
+          "snapshotCount": 198,
+          "lastSnapshotRevision": 18
+        },
+        {
+          "windowId": 3,
+          "ready": true,
+          "visible": true,
+          "awaitingAck": false,
+          "deliveredSequence": 10057,
+          "pendingSequence": 10057,
+          "snapshotCount": 805,
+          "lastSnapshotRevision": 19
+        }
+      ]
+    }
+  },
+  {
+    "event": "snapshot",
+    "result": {
+      "protocol": 1,
+      "revision": 22,
+      "generation": 2,
+      "playback": "playing",
+      "volume": 0.5,
+      "error": null
+    }
+  },
+  {
+    "event": "diagnostics",
+    "result": {
+      "loadCount": 2,
+      "playCount": 3,
+      "spectrumReceived": 10076,
+      "spectrumDelivered": 11823,
+      "spectrumAcked": 11823,
+      "maxPendingPerView": 1,
+      "mainVisible": false,
+      "miniVisible": true,
+      "views": [
+        {
+          "windowId": 1,
+          "ready": true,
+          "visible": false,
+          "awaitingAck": false,
+          "deliveredSequence": 1861,
+          "pendingSequence": 1861,
+          "snapshotCount": 200,
+          "lastSnapshotRevision": 22
+        },
+        {
+          "windowId": 3,
+          "ready": true,
+          "visible": true,
+          "awaitingAck": false,
+          "deliveredSequence": 10076,
+          "pendingSequence": 10076,
+          "snapshotCount": 809,
+          "lastSnapshotRevision": 22
+        }
+      ]
+    }
+  },
+  {
+    "event": "fixture_after_recovery",
+    "result": {
+      "activeConnections": 1,
+      "totalConnections": 3
+    }
+  },
+  {
+    "event": "diagnostics",
+    "result": {
+      "loadCount": 2,
+      "playCount": 3,
+      "spectrumReceived": 10083,
+      "spectrumDelivered": 11833,
+      "spectrumAcked": 11833,
+      "maxPendingPerView": 1,
+      "mainVisible": true,
+      "miniVisible": true,
+      "views": [
+        {
+          "windowId": 1,
+          "ready": true,
+          "visible": true,
+          "awaitingAck": false,
+          "deliveredSequence": 10083,
+          "pendingSequence": 10083,
+          "snapshotCount": 201,
+          "lastSnapshotRevision": 22
+        },
+        {
+          "windowId": 3,
+          "ready": true,
+          "visible": true,
+          "awaitingAck": false,
+          "deliveredSequence": 10083,
+          "pendingSequence": 10083,
+          "snapshotCount": 810,
+          "lastSnapshotRevision": 22
+        }
+      ]
+    }
+  }
+]

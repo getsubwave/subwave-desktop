@@ -4,3 +4,6 @@ zig-out/
 dist/
 .claude/worktrees/
 .DS_Store
+
+# Local agent state and private SDK verification copies.
+.superpowers/

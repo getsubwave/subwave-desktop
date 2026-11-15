@@ -1,0 +1,72 @@
+{
+  "date": "2026-09-07",
+  "baseline": "b2ffb98",
+  "native_tests": {
+    "command": "zig build test -Dtrace=off --summary all",
+    "passed": 13
+  },
+  "frontend_tests": {
+    "command": "npm test",
+    "passed": 14
+  },
+  "browser_contract_tests": {
+    "command": "npm run test:e2e",
+    "passed": 2,
+    "host": "fake"
+  },
+  "fixture_tests": {
+    "command": "node --test fixtures/serve.test.mjs",
+    "passed": 5
+  },
+  "typecheck": "passed",
+  "frontend_build": "passed",
+  "manifest_validation": "passed",
+  "packaged_executable_sha256": "b46cc126ee0fdac875f0d3ffd7b473366d49a8236db9bd846bd260c9bf8ce14b",
+  "runtime_launch_cwd": "/tmp/subwave-package-run",
+  "display": {
+    "width": 3840,
+    "height": 2160,
+    "scale": 1.6,
+    "refresh_hz": 60
+  },
+  "audio_capture": {
+    "sink": "isolated null sink monitor",
+    "baseline_mean_db": -23.6,
+    "baseline_peak_db": -20.4,
+    "webview_mean_db": -21.6,
+    "webview_peak_db": -18.5
+  },
+  "final_package_audio": {
+    "volume": 0.6,
+    "mean_db": -26,
+    "peak_db": -22.9,
+    "mute_peak_db": -91
+  },
+  "atspi_mini_controls": [
+    {
+      "action": "Pause",
+      "returned": true,
+      "playback": "paused",
+      "revision": 5
+    },
+    {
+      "action": "Play",
+      "returned": true,
+      "playback": "playing",
+      "revision": 6
+    }
+  ],
+  "hidden_main_300s_assertions": {
+    "main_fft_sequence_unchanged": true,
+    "mini_fft_sequence_advanced": true,
+    "native_loads": 1,
+    "max_pending_per_view": 1
+  },
+  "cleanup": {
+    "player_processes": 0,
+    "active_fixture_connections_after_player_exit": 0,
+    "audio_sink_inputs_after_exit": 0,
+    "fixture_stopped": true,
+    "temporary_sink_removed": true
+  }
+}
