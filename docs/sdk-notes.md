@@ -9,9 +9,10 @@ mise exec -- native test   # verify
 
 The unified diff lives at `patches/native-sdk-local.patch`, generated against
 the pristine 0.7.1 npm tarball and re-verified against 0.8.0 (whose
-`gtk_host.c` is byte-identical), 0.8.4, 0.9.0 and 0.10.1. Through 0.8.4 the
-patch body never moved at all; 0.9.0 and 0.10.1 each added 60 lines before the
-patched regions, so the eight `@@` hunk headers were re-cut for each release.
+`gtk_host.c` is byte-identical), 0.8.4, 0.9.0, 0.10.1 and 0.11.1. Through 0.8.4
+the patch body never moved at all; 0.9.0 and 0.10.1 each added 60 lines before
+the patched regions and 0.11.1 two or three more, so the eight `@@` hunk
+headers were re-cut for each release.
 Every `+`/`-` line remains unchanged and the hunks still land with zero fuzz.
 Symptom of a lost patch: pixelated text on a fractional-scale Linux display.
 
@@ -75,6 +76,28 @@ workarounds they replaced are still visible in the git log:
 
 [native#148]: https://github.com/vercel-labs/native/issues/148
 [native#149]: https://github.com/vercel-labs/native/issues/149
+
+## What 0.11.1 changed (upgraded 2026-11-15)
+
+0.11.0 and 0.11.1 are source-compatible with this Zig-core app: stock 0.11.1
+passed `native check`, the full test suite and a release build before any app
+edit. The automation protocol is unchanged (`0x51f7889bbe3305e7`), Zig stays
+0.16.0, and the trace default is still `.events`, so `-Dtrace=off` stays.
+
+| Surface | 0.10.1 → 0.11.1 |
+| --- | --- |
+| Existing Zig core and markup | source-compatible; no app edits required |
+| `fx.setGlobalShortcuts` / `clearGlobalShortcuts` | **new**, adopted: opt-in system-wide shortcuts (Carbon hot keys on macOS, `RegisterHotKey` on Windows; Linux reports unsupported) |
+| Global shortcut chords | must carry a modifier (F-keys excepted), at most `platform.max_global_shortcuts`; no bare media keys |
+| Linux tray (`createTray`) | still `UnsupportedService`, so `close_policy` stays per-target |
+| Linux libsecret schema | still missing libsecret's reserved fields; Linux keeps passwords in settings.json |
+| Media controls / audio output device | still absent |
+| `src/platform/linux/gtk_host.c` | 2–3 lines added before the patched regions; patch body unchanged |
+
+**The HiDPI patch is still required.** 0.11.1 still has no
+`gdk_surface_get_scale()` call. The old patch lands with `--fuzz=0` at 2–3 line
+offsets, which the installer refuses by design, so it was regenerated against
+the pristine 0.11.1 tarball. Only the hunk headers moved.
 
 ## What 0.10.1 changed (upgraded 2026-08-26)
 

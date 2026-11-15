@@ -151,14 +151,25 @@
               <use template="section-label" title="PLAYED"/>
               <column gap="0">
                 <for each="history_list" as="t">
-                  <row gap="12" cross="center" padding="7">
+                  <!-- Press or right-click copies the row (issue #53); its clock
+                       reads COPIED for copied_flash_ms as the confirmation. A
+                       <panel> host would paint a shadowed card per row. -->
+                  <row gap="12" cross="center" padding="7" on-press="copy_history:{t.i}" label="Copy {t.title}">
+                    <context-menu>
+                      <menu-item on-press="copy_history:{t.i}">Copy title and artist</menu-item>
+                    </context-menu>
                     <column gap="1" grow="1">
                       <text wrap="false" overflow="ellipsis">{t.title}</text>
                       <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{t.artist}</text>
                     </column>
                     <column gap="1" cross="end">
                       <text size="sm" foreground="text_muted" wrap="false">{t.hhmm}</text>
-                      <text size="sm" foreground="text_muted" wrap="false">{t.ago}</text>
+                      <if test="{t.copied}">
+                        <text size="sm" foreground="accent" wrap="false">COPIED</text>
+                      </if>
+                      <else>
+                        <text size="sm" foreground="text_muted" wrap="false">{t.ago}</text>
+                      </else>
                     </column>
                   </row>
                   <separator/>

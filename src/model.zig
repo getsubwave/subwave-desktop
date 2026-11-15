@@ -76,6 +76,10 @@ pub const keys = struct {
     pub const open_release_spawn: u64 = 45;
     pub const open_support_spawn: u64 = 46;
     pub const copy_clipboard: u64 = 47;
+    // One-shot: the copy glyph's check-mark flash after a track copy.
+    pub const copied_reset: u64 = 62;
+    // The system-wide shortcut session (a channel: reports, then presses).
+    pub const global_shortcuts: u64 = 63;
     pub const station_credentials: u64 = 70;
     pub const auth_recheck_timer: u64 = 71;
     pub const post_auth_recheck: u64 = 72;
@@ -188,6 +192,8 @@ pub const QueueRow = struct {
     hhmm: []const u8 = "", // PLAYED only: aired-at clock
     played_at_s: ?i64 = null,
     ago: []const u8 = "",
+    i: i64 = 0, // PLAYED only: row index, the copy_history payload
+    copied: bool = false, // PLAYED only: this row was just copied
 };
 
 pub const BoothTurn = struct {
@@ -476,6 +482,11 @@ pub const Model = struct {
     // an existing settings.json carries no notifyTrack key, so an update
     // never starts interrupting a listener who never asked for it.
     notify_track: bool = false,
+    // Opt-in system-wide shortcuts (back panel, settings `globalShortcuts`).
+    // Off by default: a global hot key takes the chord from every other app.
+    global_keys: bool = false,
+    global_keys_active: bool = false, // a session is open on keys.global_shortcuts
+    global_keys_note: []const u8 = "", // why a chord did not register; static strings
     // App foreground state, from the app_activated / app_deactivated
     // lifecycle Msgs. Polling and notifications share this focus signal.
     app_active: bool = true,
@@ -558,6 +569,12 @@ pub const Model = struct {
     lyrics_ask: listener_time.TrackAsk = .{ .key = keys.fetch_lyrics_a, .a = keys.fetch_lyrics_a, .b = keys.fetch_lyrics_b },
     lyrics_was_showing: bool = false,
     lyrics_lingering: bool = false,
+    // True for `copied_flash_ms` after a track copy: the strip's copy glyph
+    // shows a check mark, the only confirmation this UI has (no toasts).
+    copied: bool = false,
+    // Which copy `copied` confirms: -1 = the live track (the strip glyph),
+    // otherwise a PLAYED row index (that row's clock reads COPIED).
+    copied_row: i64 = -1,
 
     // schedule / station guide
     timezone_store: [96]u8 = undefined,
@@ -928,6 +945,18 @@ pub const Model = struct {
     pub fn has_track(self: *const Model) bool {
         return self.title.len != 0 and !std.mem.eql(u8, self.title, "Tuning in…");
     }
+    pub fn has_track_artist(self: *const Model) bool {
+        return self.has_track() and self.artist.len > 0;
+    }
+    pub fn has_track_album(self: *const Model) bool {
+        return self.has_track() and self.album.len > 0;
+    }
+    pub fn track_copied(self: *const Model) bool {
+        return self.copied and self.copied_row < 0;
+    }
+    pub fn copy_hint(self: *const Model) []const u8 {
+        return if (self.track_copied()) "Copied" else "Copy title, artist and album";
+    }
 
     // ------------------------------------------------------- signal meter
     pub fn signal_label(self: *const Model) []const u8 {
@@ -1063,6 +1092,15 @@ pub const Model = struct {
 
     pub fn stations_shortcut(_: *const Model) []const u8 {
         return if (builtin.os.tag == .macos) "Cmd K" else "Ctrl K";
+    }
+    pub fn global_keys_offered(_: *const Model) bool {
+        return global_keys_supported;
+    }
+    pub fn global_keys_chord(_: *const Model) []const u8 {
+        return if (builtin.os.tag == .macos) "Ctrl Opt Shift" else "Ctrl Alt Shift";
+    }
+    pub fn has_global_keys_note(self: *const Model) bool {
+        return self.global_keys and self.global_keys_note.len > 0;
     }
     pub fn mini_shortcut(_: *const Model) []const u8 {
         return if (builtin.os.tag == .macos) "Cmd Shift M" else "Ctrl Shift M";
@@ -1269,7 +1307,9 @@ pub const Model = struct {
     }
     pub fn history_list(self: *const Model, arena: std.mem.Allocator) []const QueueRow {
         const out = arena.dupe(QueueRow, self.history_rows[0..self.history_count]) catch return &.{};
-        for (out) |*row| {
+        for (out, 0..) |*row, index| {
+            row.i = @intCast(index);
+            row.copied = self.copied and self.copied_row == row.i;
             row.hhmm = formatStationStamp(arena, row.played_at_s, self.station_offset_minutes, self.station_locale, false);
             if (row.played_at_s) |at| {
                 var buf: [48]u8 = undefined;
@@ -1697,7 +1737,7 @@ pub const Model = struct {
         "show_ids_store", "show_guests_store",
         "ctx_festival_store", "ctx_festival", "poll_cadence", "directory_status",
         "req_return_allowed", "req_return_armed",
-        "main_occluded",
+        "main_occluded", "global_keys_active",
         // fixed backing buffers behind the bound slice fields
         "title_buf",          "artist_buf",          "album_buf",           "genre_buf",
         "dj_buf",             "show_buf",            "host_buf",            "cover_sid_buf",
@@ -1864,10 +1904,16 @@ pub const Msg = union(enum) {
     expand_mini,
     mini_closed,
 
-    // Right-click on the sleeve. The SDK has no OS now-playing surface, so
-    // "what is this track" leaves the app through the clipboard or not at all.
-    copy_track,
+    // The copy button on the NOW PLAYING strip, C, the tray and right-click on
+    // the sleeve. The SDK has no OS now-playing surface, so "what is this
+    // track" leaves the app through the clipboard or not at all (issue #53).
+    copy_track, // "Title — Artist · Album"
+    copy_title,
+    copy_artist,
+    copy_album,
+    copy_history: i64, // right-click on a PLAYED row; payload = row index
     copy_station,
+    tick_copied: native_sdk.EffectTimer,
 
     // sleep timer
     sleep_pick: i64,
@@ -1907,6 +1953,8 @@ pub const Msg = union(enum) {
     pick_theme: []const u8, // payload = theme id
     pick_format: []const u8, // payload = format id ("mp3" | "aac" | "opus" | "flac")
     toggle_notify,
+    toggle_global_keys,
+    global_key: native_sdk.EffectGlobalShortcutEvent,
     toggle_discord,
     discord_id_edit: canvas.TextInputEvent,
     submit_discord_id,
@@ -1951,7 +1999,7 @@ pub const Msg = union(enum) {
         "got_reqpost",   "got_reqstat",    "got_health",  "got_dj",
         "got_directory", "got_beacon",     "got_ob_health", "got_ob_dj",
         "got_like_status", "got_like_post",
-        "got_lyrics",    "tick_lyrics",    "tick_lyrics_linger",
+        "got_lyrics",    "tick_lyrics",    "tick_lyrics_linger", "tick_copied", "global_key",
         "audio_event",   "saved",          "got_schedule", "tick_save",
         "chrome_changed", "toggle_play",   "vol_up",      "vol_down",
         "escape",        "mini_closed",    "tune_out",    "toggle_mini",
@@ -1968,6 +2016,65 @@ pub const Msg = union(enum) {
 // ---------------------------------------------------------------- helpers
 fn setStr(buf: []u8, out: *[]const u8, v: []const u8) void {
     out.* = utf8.copyInto(buf, v);
+}
+
+// ------------------------------------------------- system-wide shortcuts
+// SDK 0.11 registers these through Carbon hot keys on macOS and
+// RegisterHotKey on Windows; the GTK host has no global-shortcut service, so
+// Linux never offers the switch. Ctrl+Alt+Shift (macOS ⌃⌥⇧) rather than
+// Ctrl+Alt: on Windows Ctrl+Alt is AltGr, and a hot key on AltGr+L or AltGr+C
+// would stop Polish or Czech listeners typing ł or ć in every other app.
+pub const global_keys_supported = builtin.os.tag == .macos or builtin.os.tag == .windows;
+const global_mods: native_sdk.platform.ShortcutModifiers = .{ .control = true, .option = true, .shift = true };
+pub const global_shortcuts = [_]native_sdk.platform.Shortcut{
+    .{ .id = "sw-play", .key = "p", .modifiers = global_mods },
+    .{ .id = "sw-mute", .key = "m", .modifiers = global_mods },
+    .{ .id = "sw-like", .key = "l", .modifiers = global_mods },
+    .{ .id = "sw-copy", .key = "c", .modifiers = global_mods },
+};
+
+fn globalShortcutMsg(id: []const u8) ?Msg {
+    if (std.mem.eql(u8, id, "sw-play")) return .toggle_play;
+    if (std.mem.eql(u8, id, "sw-mute")) return .toggle_mute;
+    if (std.mem.eql(u8, id, "sw-like")) return .press_like;
+    if (std.mem.eql(u8, id, "sw-copy")) return .copy_track;
+    return null;
+}
+
+fn syncGlobalShortcuts(model: *Model, fx: *Effects) void {
+    model.global_keys_note = "";
+    if (model.global_keys and global_keys_supported) {
+        fx.setGlobalShortcuts(.{ .key = keys.global_shortcuts, .shortcuts = &global_shortcuts, .on_event = Effects.globalShortcutMsg(.global_key) });
+        model.global_keys_active = true;
+    } else if (model.global_keys_active) {
+        fx.clearGlobalShortcuts(keys.global_shortcuts);
+        model.global_keys_active = false;
+    }
+}
+
+/// How long the copy glyph holds its check mark after a track copy.
+pub const copied_flash_ms: u64 = 1500;
+
+/// "Title — Artist · Album", dropping whichever trailing parts are empty, so a
+/// bare title never carries a dangling separator. The parts are each held in a
+/// fixed store (512 + 256 + 256 bytes), so `buf` (1100) always fits the line.
+fn trackLine(buf: []u8, title: []const u8, artist: []const u8, album: []const u8) []const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    w.writeAll(title) catch return title;
+    if (artist.len > 0) w.print(" — {s}", .{artist}) catch {};
+    if (album.len > 0) w.print(" · {s}", .{album}) catch {};
+    return w.buffered();
+}
+
+// Fire-and-forget: `writeClipboard` copies the text at call time, so stack
+// scratch is safe to let go. A rejected write has no surface to report into,
+// so the flash is the request, not a delivery receipt.
+fn copyTrack(model: *Model, fx: *Effects, row: i64, text: []const u8) void {
+    fx.writeClipboard(.{ .key = keys.copy_clipboard, .text = text });
+    if (model.copied) fx.cancelTimer(keys.copied_reset);
+    model.copied = true;
+    model.copied_row = row;
+    fx.startTimer(.{ .key = keys.copied_reset, .interval_ms = copied_flash_ms, .mode = .one_shot, .on_fire = Effects.timerMsg(.tick_copied) });
 }
 
 // First letters of the first two words, uppercased ("Juno Reyes" -> "JR").
@@ -2367,6 +2474,7 @@ pub fn applySettingsJson(model: *Model, bytes: []const u8) void {
     }
     restoreStationSettings(model);
     if (s.notifyTrack) |v| model.notify_track = v;
+    if (s.globalShortcuts) |v| model.global_keys = v and global_keys_supported;
     if (s.showLyrics) |v| model.lyrics_shown = v;
     if (s.lyricsOffsetMs) |v| model.lyrics_device_offset_ms = lyrics.offsetMs(v);
     if (s.discordEnabled) |v| model.discord_enabled = v;
@@ -2409,10 +2517,11 @@ fn settingsSnapshot(model: *Model) ![]const u8 {
     try std.json.Stringify.value(model.base, .{}, &w);
     try w.writeAll(",\"stationName\":");
     try std.json.Stringify.value(model.station_name, .{}, &w);
-    try w.print(",\"discordEnabled\":{s},\"discordClientId\":\"{s}\",\"notifyTrack\":{s},\"showLyrics\":{s},\"lyricsOffsetMs\":{d},\"recents\":[", .{
+    try w.print(",\"discordEnabled\":{s},\"discordClientId\":\"{s}\",\"notifyTrack\":{s},\"globalShortcuts\":{s},\"showLyrics\":{s},\"lyricsOffsetMs\":{d},\"recents\":[", .{
         if (model.discord_enabled) "true" else "false",
         model.discord_client_id,
         if (model.notify_track) "true" else "false",
+        if (model.global_keys) "true" else "false",
         if (model.lyrics_shown) "true" else "false",
         model.lyrics_device_offset_ms,
     });
@@ -3302,6 +3411,7 @@ pub fn boot(model: *Model, fx: *Effects) void {
         fx.startTimer(.{ .key = keys.update_timer, .interval_ms = 86_400_000, .mode = .repeating, .on_fire = Effects.timerMsg(.tick_update) });
     }
     fetchDirectory(fx); // Discover rows for onboarding + sidebar
+    syncGlobalShortcuts(model, fx);
     if (model.phase == .player) {
         startStream(model, fx);
         fetchFeed(model, fx);
@@ -4139,19 +4249,26 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 model.active_tab = .live;
             }
         },
-        // Both writes are fire-and-forget: `writeClipboard` copies the text at
-        // call time, so the stack scratch here is safe to let go, and a failed
-        // write has no honest surface to report into (no toast in this UI).
+        // Every track copy is gated on has_track, the same gate the markup uses,
+        // so the "Tuning in…" placeholder never reaches the clipboard however
+        // the Msg arrives (button, C, tray, menu).
         .copy_track => {
-            // Same gate the markup uses, so the placeholder title can never
-            // reach the clipboard even if the item is reached another way.
             if (!model.has_track()) return;
-            var buf: [512]u8 = undefined;
-            const text = if (model.artist.len == 0)
-                std.fmt.bufPrint(&buf, "{s}", .{model.title}) catch return
-            else
-                std.fmt.bufPrint(&buf, "{s} — {s}", .{ model.title, model.artist }) catch return;
-            fx.writeClipboard(.{ .key = keys.copy_clipboard, .text = text });
+            var buf: [1100]u8 = undefined;
+            copyTrack(model, fx, -1, trackLine(&buf, model.title, model.artist, model.album));
+        },
+        .copy_title => if (model.has_track()) copyTrack(model, fx, -1, model.title),
+        .copy_artist => if (model.has_track_artist()) copyTrack(model, fx, -1, model.artist),
+        .copy_album => if (model.has_track_album()) copyTrack(model, fx, -1, model.album),
+        .copy_history => |index| {
+            if (index < 0 or index >= model.history_count) return;
+            const row = model.history_rows[@intCast(index)];
+            if (row.title.len == 0) return;
+            var buf: [1100]u8 = undefined;
+            copyTrack(model, fx, index, trackLine(&buf, row.title, row.artist, ""));
+        },
+        .tick_copied => |t| {
+            if (t.outcome == .fired) model.copied = false;
         },
         .copy_station => fx.writeClipboard(.{ .key = keys.copy_clipboard, .text = model.base }),
         .open_panel => model.sheet = .panel,
@@ -4537,6 +4654,19 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .toggle_notify => {
             model.notify_track = !model.notify_track;
             saveSettings(model, fx);
+        },
+        .toggle_global_keys => {
+            if (!global_keys_supported) return;
+            model.global_keys = !model.global_keys;
+            syncGlobalShortcuts(model, fx);
+            saveSettings(model, fx);
+        },
+        .global_key => |event| switch (event.kind) {
+            .pressed => if (globalShortcutMsg(event.shortcut.id)) |action| update(model, action, fx),
+            .registered, .released => {},
+            .conflict => model.global_keys_note = "One of these is taken by another app.",
+            .unsupported, .rejected => model.global_keys_note = "This system did not accept them.",
+            .stopped => model.global_keys_active = false,
         },
         .toggle_discord => {
             model.discord_enabled = !model.discord_enabled;
@@ -5246,6 +5376,74 @@ test "sleeve context menu copies the track and the station link" {
     setStr(&m3.base_buf, &m3.base, "https://radio.example.com");
     update(&m3, .copy_station, &fx3);
     try testing.expectEqualStrings("https://radio.example.com", fx3.pendingClipboardAt(0).?.text);
+}
+
+test "track copy carries the album, single fields, and flashes the glyph (#53)" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+
+    // The boot placeholder is not a track: nothing reaches the clipboard.
+    setStr(&m.title_buf, &m.title, "Tuning in…");
+    update(&m, .copy_title, &fx);
+    try testing.expectEqual(@as(usize, 0), fx.pendingClipboardCount());
+    try testing.expect(!m.copied);
+
+    setStr(&m.title_buf, &m.title, "Echo");
+    setStr(&m.artist_buf, &m.artist, "The Marias");
+    setStr(&m.album_buf, &m.album, "Submarine");
+    update(&m, .copy_track, &fx);
+    try testing.expectEqualStrings("Echo — The Marias · Submarine", fx.pendingClipboardAt(0).?.text);
+    try testing.expect(m.copied);
+    try testing.expectEqualStrings("Copied", m.copy_hint());
+    try testing.expectEqual(@as(?u64, copied_flash_ms), timerInterval(&fx, keys.copied_reset));
+
+    update(&m, .{ .tick_copied = .{ .key = keys.copied_reset, .outcome = .fired, .timestamp_ns = 0 } }, &fx);
+    try testing.expect(!m.copied);
+
+    var line: [1100]u8 = undefined;
+    try testing.expectEqualStrings("Echo · Submarine", trackLine(&line, "Echo", "", "Submarine"));
+    try testing.expectEqualStrings("Echo", trackLine(&line, "Echo", "", ""));
+
+    var fx2 = Effects.init(testing.allocator);
+    defer fx2.deinit();
+    fx2.executor = .fake;
+    update(&m, .copy_artist, &fx2);
+    try testing.expectEqualStrings("The Marias", fx2.pendingClipboardAt(0).?.text);
+
+    // No album: the menu hides the item and the Msg is a no-op.
+    var fx3 = Effects.init(testing.allocator);
+    defer fx3.deinit();
+    fx3.executor = .fake;
+    m.album = "";
+    try testing.expect(!m.has_track_album());
+    update(&m, .copy_album, &fx3);
+    try testing.expectEqual(@as(usize, 0), fx3.pendingClipboardCount());
+}
+
+test "right-click on a PLAYED row copies that row, and ignores stale indexes" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    setStr(&m.hist_title_store[0], &m.history_rows[0].title, "Overload");
+    setStr(&m.hist_artist_store[0], &m.history_rows[0].artist, "Tarsem Jassar");
+    m.history_count = 1;
+
+    update(&m, .{ .copy_history = 3 }, &fx);
+    update(&m, .{ .copy_history = -1 }, &fx);
+    try testing.expectEqual(@as(usize, 0), fx.pendingClipboardCount());
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const rows = m.history_list(arena.allocator());
+    try testing.expect(!rows[0].copied);
+    update(&m, .{ .copy_history = rows[0].i }, &fx);
+    try testing.expectEqualStrings("Overload — Tarsem Jassar", fx.pendingClipboardAt(0).?.text);
+    // The row confirms, not the live track's glyph.
+    try testing.expect(m.history_list(arena.allocator())[0].copied);
+    try testing.expect(!m.track_copied());
 }
 
 test "jsonEscape escapes quotes and drops raw control bytes" {
@@ -6245,6 +6443,37 @@ test "trackNotification carries a stable id and the Open Player action" {
     try testing.expect(bare.title.len > 0);
     try testing.expectEqualStrings("", bare.body);
     try testing.expectEqualStrings("open-player", bare.action_command);
+}
+
+test "system-wide shortcuts: opt-in, persisted, and presses drive the player" {
+    var fx = Effects.init(testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var m: Model = .{};
+    try testing.expect(!m.global_keys);
+
+    update(&m, .toggle_global_keys, &fx);
+    try testing.expectEqual(global_keys_supported, m.global_keys);
+    if (!global_keys_supported) return; // Linux: the switch is never offered
+    try testing.expect(m.global_keys_active);
+    try testing.expect(std.mem.indexOf(u8, try settingsSnapshot(&m), "\"globalShortcuts\":true") != null);
+
+    // A press is the same Msg the in-window key sends.
+    const muted = m.muted;
+    update(&m, .{ .global_key = .{ .key = keys.global_shortcuts, .kind = .pressed, .shortcut = .{ .id = "sw-mute", .key = "m" } } }, &fx);
+    try testing.expectEqual(!muted, m.muted);
+    update(&m, .{ .global_key = .{ .key = keys.global_shortcuts, .kind = .pressed, .shortcut = .{ .id = "nope", .key = "x" } } }, &fx);
+    try testing.expectEqual(!muted, m.muted);
+
+    update(&m, .{ .global_key = .{ .key = keys.global_shortcuts, .kind = .conflict, .shortcut = .{ .id = "sw-play", .key = "p" } } }, &fx);
+    try testing.expect(m.has_global_keys_note());
+
+    update(&m, .toggle_global_keys, &fx);
+    try testing.expect(!m.global_keys and !m.global_keys_active and !m.has_global_keys_note());
+
+    var r: Model = .{};
+    applySettingsJson(&r, "{\"globalShortcuts\":true}");
+    try testing.expect(r.global_keys);
 }
 
 test "notifyTrack round-trips through applySettingsJson" {
