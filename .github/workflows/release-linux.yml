@@ -92,7 +92,7 @@ jobs:
       - name: Test
         run: native test
 
-      - name: Build and package
+      - name: Build
         # -Dcpu=baseline is load bearing: a plain `native build` bakes the CI
         # runner's CPU features into the binary (the v0.2.1 tarball required
         # AVX2; the Windows exe from the same release required AVX-512 and
@@ -103,8 +103,31 @@ jobs:
         # the message loop thread. That's what stalls the Windows message
         # pump in issue #23; scripts/check-release-flags.sh guards that every
         # workflow keeps it dropped.
+        run: native build -Dcpu=baseline -Dtrace=off
+
+      - name: Strip debug info
+        # Nearly all of the unstripped binary is DWARF (76 MB -> 9 MB at
+        # v0.11.1). --strip-debug rather than -s:
+        # it drops the debug sections but keeps .symtab, so panic backtraces
+        # still name functions, and the extra ~0.5 MB that -s would save is
+        # not worth losing them. This brings Linux in line with macOS, which
+        # already ships without embedded debug info (Mach-O keeps it in a
+        # separate .dSYM), rather than degrading it.
+        #
+        # It runs BEFORE `native package`: SDK 0.11's packager reads the whole
+        # binary into memory to look for WebKitGTK, capped at 128 MB, and the
+        # unstripped build is past that (76 MB at 0.11.1 on SDK 0.10.1, more
+        # on 0.11.1), which fails packaging with StreamTooLong.
         run: |
-          native build -Dcpu=baseline -Dtrace=off
+          bin=zig-out/bin/subwave-desktop
+          before=$(stat -c %s "$bin")
+          strip --strip-debug "$bin"
+          after=$(stat -c %s "$bin")
+          echo "stripped $before -> $after bytes ($(( (before - after) * 100 / before ))% smaller)"
+          readelf -S "$bin" | grep -q '\.symtab' || { echo "error: symbol table gone, backtraces would be useless" >&2; exit 1; }
+
+      - name: Package
+        run: |
           native package --target linux
           test -x zig-out/package/subwave-desktop-linux/bin/subwave-desktop
 
@@ -122,21 +145,6 @@ jobs:
             exit 1
           fi
           echo "glibc floor: $(objdump -T "$bin" | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1)"
-
-      - name: Strip debug info
-        # 38 MB of DWARF in a 5.8 MB program. --strip-debug rather than -s:
-        # it drops the debug sections but keeps .symtab, so panic backtraces
-        # still name functions, and the extra ~0.5 MB that -s would save is
-        # not worth losing them. This brings Linux in line with macOS, which
-        # already ships without embedded debug info (Mach-O keeps it in a
-        # separate .dSYM), rather than degrading it.
-        run: |
-          bin=zig-out/package/subwave-desktop-linux/bin/subwave-desktop
-          before=$(stat -c %s "$bin")
-          strip --strip-debug "$bin"
-          after=$(stat -c %s "$bin")
-          echo "stripped $before -> $after bytes ($(( (before - after) * 100 / before ))% smaller)"
-          readelf -S "$bin" | grep -q '\.symtab' || { echo "error: symbol table gone, backtraces would be useless" >&2; exit 1; }
 
       - name: Create tarball
         run: |
