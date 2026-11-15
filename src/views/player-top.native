@@ -3,20 +3,26 @@
   <!-- Masthead — the working titlebar (window-drag under hidden_inset_tall) -->
   <row cross="center" gap="12" height="52" padding="8" window-drag="true">
     <spacer width="{chrome_leading}"/>
-    <row on-press="toggle_sidebar" gap="7" cross="center" label="Stations">
-      <icon name="app:logo" width="16" height="16" foreground="accent"/>
-      <text size="sm">{upper(station_name)}</text>
-      <icon name="chevron-down" width="13" height="13" foreground="text_muted"/>
+    <!-- Station + show on the left, context on the right, each in a
+         grow/min-width="0" row so a long show name or context line elides
+         instead of pushing the mini and back-panel buttons off the window. -->
+    <row gap="12" cross="center" grow="1" min-width="0">
+      <row on-press="toggle_sidebar" gap="7" cross="center" label="Stations">
+        <icon name="app:logo" width="16" height="16" foreground="accent"/>
+        <text size="sm" wrap="false">{upper(station_name)}</text>
+        <icon name="chevron-down" width="13" height="13" foreground="text_muted"/>
+      </row>
+      <if test="{has_show}">
+        <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis" min-width="0">{show_upper}</text>
+      </if>
+      <if test="{has_host}">
+        <text size="sm" foreground="accent" wrap="false">WITH {host_upper}</text>
+      </if>
     </row>
-    <if test="{has_show}">
-      <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{show_upper}</text>
-    </if>
-    <if test="{has_host}">
-      <text size="sm" foreground="accent" wrap="false">WITH {host_upper}</text>
-    </if>
-    <spacer grow="1"/>
     <if test="{has_ctx}">
-      <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis">{ctx_meta}</text>
+      <row cross="center" min-width="0">
+        <text size="sm" foreground="text_muted" wrap="false" overflow="ellipsis" min-width="0">{ctx_meta}</text>
+      </row>
     </if>
     <if test="{update_available}">
       <icon name="circle-dot" width="10" height="10" foreground="accent"/>
