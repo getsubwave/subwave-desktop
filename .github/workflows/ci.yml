@@ -105,9 +105,21 @@ jobs:
         run: |
           version="$(sed -n 's/.*\.version = "\([^"]*\)".*/\1/p' app.zon | head -1)"
           [ -n "$version" ] || { echo "error: could not read .version from app.zon" >&2; exit 1; }
+          # Same order as release-linux.yml: strip before packaging, because
+          # SDK 0.11's packager reads the whole binary into memory (capped
+          # at 128 MB) and the unstripped Linux build is past that.
+          strip --strip-debug zig-out/bin/subwave-desktop
           native package --target linux
           ./scripts/package-linux-distros.sh "$version" dist
           ./scripts/test-linux-packages.sh "$version" dist
+
+      - name: Build the automation binary for the smoke test
+        # Its own step, outside the smoke test's 6-minute timeout. SDK 0.11.1
+        # takes ~20 minutes for a Windows release build (0.10.1 took ~4), so a
+        # build inside the timed step ran out the clock before the app ever
+        # launched.
+        if: runner.os == 'Windows'
+        run: native build -Dautomation=true -Dcpu=baseline -Dtrace=off
 
       - name: Smoke-test the player phase
         # Windows only. This is NOT a reproduction of issue #23 — that needs
@@ -127,7 +139,6 @@ jobs:
         env:
           SUBWAVE_STATION_URL: http://127.0.0.1:9
         run: |
-          native build -Dautomation=true -Dcpu=baseline -Dtrace=off
           "./zig-out/bin/subwave-desktop.exe" &
           app_pid=$!
           fail=0

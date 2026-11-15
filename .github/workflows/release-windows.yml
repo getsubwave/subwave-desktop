@@ -123,6 +123,14 @@ jobs:
           ls -lh "$winzip"
           echo "winzip=$winzip" >> "$GITHUB_ENV"
 
+      - name: Build the automation binary for the smoke test
+        # Its own step, outside the smoke test's 6-minute timeout. SDK 0.11.1
+        # takes ~20 minutes for a Windows release build (0.10.1 took ~4), so a
+        # build inside the timed step ran out the clock before the app ever
+        # launched. The shipped zip is already sealed above, so this binary
+        # never reaches anyone.
+        run: native build -Dautomation=true -Dcpu=baseline -Dtrace=off
+
       - name: Smoke-test on real Windows
         # The whole reason this job runs on windows-latest instead of
         # cross-compiling. Rebuilds with the automation harness (the shipped
@@ -155,7 +163,6 @@ jobs:
         env:
           SUBWAVE_STATION_URL: http://127.0.0.1:9
         run: |
-          native build -Dautomation=true -Dcpu=baseline -Dtrace=off
           app="zig-out/bin/subwave-desktop.exe"
           if [ ! -f "$app" ]; then
             echo "error: automation build produced no exe at $app" >&2

@@ -93,6 +93,8 @@ edit. The automation protocol is unchanged (`0x51f7889bbe3305e7`), Zig stays
 | Linux libsecret schema | still missing libsecret's reserved fields; Linux keeps passwords in settings.json |
 | Media controls / audio output device | still absent |
 | `src/platform/linux/gtk_host.c` | 2–3 lines added before the patched regions; patch body unchanged |
+| Windows release build | ~4 min → ~20 min on `windows-latest`; the smoke tests now build in their own step, outside the 6-minute launch timeout |
+| `native package --target linux` | reads the whole binary into memory (128 MB cap) to look for WebKitGTK; the unstripped Linux build is over it (`StreamTooLong`), so CI strips debug info before packaging |
 
 **The HiDPI patch is still required.** 0.11.1 still has no
 `gdk_surface_get_scale()` call. The old patch lands with `--fuzz=0` at 2–3 line
