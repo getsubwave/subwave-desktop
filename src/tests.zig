@@ -246,6 +246,41 @@ test "dial strip fits the minimum window width" {
     try testing.expect(dial_width <= min_width * 0.6);
 }
 
+test "a long show and context line elide instead of pushing the masthead buttons off" {
+    const min_width: f32 = 880; // app.zon .shell.windows[0].min_width
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var model: Model = .{};
+    model.phase = .player;
+    model.station_name = "A Rather Long Community Station Name";
+    model.show = "The Very Long Late Night Graveyard Shift With Extra Words Here And More Words";
+    model.host = "Nova Ellington-Reyes";
+    model.ctx_show = "graveyard shift after the last bus";
+    model.ctx_vibe = "slow burn with a long tail";
+    model.ctx_cond = "light rain turning to sleet";
+    model.ctx_temp = 12;
+    model.chrome_trailing = 138; // the Windows caption cluster
+
+    registerAppIcons();
+    var view = try AppMarkup.init(arena, player_top_markup);
+    var ui = AppUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+    var nodes: [1024]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(tree.root, native_sdk.geometry.RectF.init(0, 0, min_width, 660), &nodes);
+
+    var buttons: usize = 0;
+    for (layout.nodes) |node| {
+        const label = node.widget.semantics.label;
+        if (std.mem.eql(u8, label, "Mini player") or std.mem.eql(u8, label, "Back panel")) {
+            buttons += 1;
+            try testing.expect(node.frame.width > 0);
+            try testing.expect(node.frame.x + node.frame.width <= min_width - model.chrome_trailing + 0.5);
+        }
+    }
+    try testing.expectEqual(@as(usize, 2), buttons);
+}
+
 const model_dial_stops_len = @typeInfo(@TypeOf(Model.dial_stops)).array.len;
 
 test "station panels lay out in both locales, with disclosures and avatar states" {
