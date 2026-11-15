@@ -15,13 +15,23 @@
          the explicit fallback while the cover loads (or after it fails). -->
     <panel padding="5" background="surface" border-color="border" radius="sm"
            on-press="open_timeline" label="Open timeline">
-      <!-- Metadata, not flow: right-click on the sleeve. The copy item drops
+      <!-- Metadata, not flow: right-click on the sleeve. The copy items drop
            out entirely while nothing is playing, which is how a menu declares
            itself conditionally (the element takes no attributes and cannot sit
            behind a structure tag). -->
       <context-menu>
         <if test="{has_track}">
-          <menu-item on-press="copy_track">Copy title and artist</menu-item>
+          <menu-item on-press="copy_track">Copy title, artist and album</menu-item>
+          <menu-item on-press="copy_title">Copy title</menu-item>
+        </if>
+        <if test="{has_track_artist}">
+          <menu-item on-press="copy_artist">Copy artist</menu-item>
+        </if>
+        <if test="{has_track_album}">
+          <menu-item on-press="copy_album">Copy album</menu-item>
+        </if>
+        <if test="{has_track}">
+          <separator/>
         </if>
         <menu-item on-press="copy_station">Copy station link</menu-item>
       </context-menu>
@@ -75,6 +85,22 @@
               </else>
             </row>
             <tooltip anchor="above">{lyrics_hint} · Y</tooltip>
+          </stack>
+        </if>
+        <!-- Copy the track (issue #53). The glyph turns into a check mark for
+             copied_flash_ms: the only confirmation this UI has. Right-click on
+             the sleeve copies single fields. -->
+        <if test="{has_track}">
+          <stack>
+            <row cross="center" on-press="copy_track" label="{copy_hint}">
+              <if test="{track_copied}">
+                <icon name="check" width="14" height="14" foreground="accent"/>
+              </if>
+              <else>
+                <icon name="copy" width="14" height="14" foreground="text_muted"/>
+              </else>
+            </row>
+            <tooltip anchor="above">{copy_hint} · C</tooltip>
           </stack>
         </if>
         <if test="{has_tokens}">

@@ -98,8 +98,8 @@ download — the app tells you when one is out. (An AUR package,
   full player, and EXPAND — or closing the mini window — brings the full
   player back.
 - **Menu-bar extra** — macOS `NSStatusItem` and the Windows tray (the GTK host
-  still has none): live now-playing rows, tune in/out, mute, sleep cycle, open
-  player, mini player, quit. On macOS and Windows the close button **hides** the
+  still has none): live now-playing rows, tune in/out, mute, copy track, sleep
+  cycle, open player, mini player, quit. On macOS and Windows the close button **hides** the
   main window — playback and the tray stay alive — via `app.zon`'s
   `close_policy`; on Linux it quits, because there is no tray to bring a hidden
   window back (see `docs/sdk-notes.md`).
@@ -114,10 +114,21 @@ download — the app tells you when one is out. (An AUR package,
   SDK offers — there is still no MPRIS / MPNowPlayingInfoCenter / SMTC
   integration.
 - **Keyboard transport** — space play/pause, `[` volume down, `]` volume up,
-  M mute, L like the current track, Y show/hide lyrics, Esc back to LIVE,
-  Cmd/Ctrl+K stations,
+  M mute, L like the current track, Y show/hide lyrics, C copy the track,
+  Esc back to LIVE, Cmd/Ctrl+K stations,
   Cmd/Ctrl+Shift+M mini player, 1–5 dial stops (app-level fallback; never steals
   typing from the text fields).
+- **System-wide shortcuts** — opt-in (back panel, under NOTIFICATIONS), macOS
+  and Windows: Ctrl+Opt+Shift / Ctrl+Alt+Shift with P play/pause, M mute,
+  L like, C copy track, from any app. SDK 0.11's `fx.setGlobalShortcuts`
+  (Carbon hot keys on macOS, `RegisterHotKey` on Windows; the GTK host has no
+  global-shortcut service). Shift is in the chord because Ctrl+Alt is AltGr on
+  Windows, where a hot key on AltGr+L or AltGr+C would swallow ł or ć system-wide.
+  A chord another app already holds is reported under the switch.
+- **Copy the track** — the copy glyph on the NOW PLAYING strip (it flashes a
+  check mark), C, or the tray copies "Title — Artist · Album". Right-click on
+  the sleeve copies the title, artist or album alone, and pressing (or
+  right-clicking) a PLAYED row in the timeline copies that track.
 - **Private stations** — when `/api/state` reports a privacy lock
   (`privatePlayer` / `listenerAuth`), a members-only gate replaces the player
   until the shared station password validates against `POST /api/station-auth`

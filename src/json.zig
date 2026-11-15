@@ -350,6 +350,7 @@ pub const Settings = struct {
     discordClientId: ?[]const u8 = null,
     // Desktop track-change notifications; absent = off (opt-in).
     notifyTrack: ?bool = null,
+    globalShortcuts: ?bool = null,
     // Lyrics on the stage; absent = shown, as on the web. The timing nudge is
     // a whole number of milliseconds, read as a float so a hand-edited
     // fraction cannot fail the whole file.

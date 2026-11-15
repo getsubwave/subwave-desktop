@@ -63,7 +63,8 @@ pub const app_icons = [_]canvas.icons.Entry{
 // ------------------------------------------------------- OS integration seams
 // App-level key fallback — consulted only for keys no focused widget consumed
 // (typing in the request/station fields is never stolen). Space = play/pause,
-// [ / ] = volume, M = mute, L = like, Y = show/hide lyrics, cmd/ctrl+K =
+// [ / ] = volume, M = mute, L = like, Y = show/hide lyrics, C = copy the
+// track (title, artist, album), cmd/ctrl+K =
 // stations, cmd/ctrl+shift+M = mini player (plain cmd+M is the macOS system
 // minimize), Esc = back to LIVE, 1–5 = dial stops. The web player's lyrics
 // key is L, which has been the like key here since before lyrics existed.
@@ -94,6 +95,7 @@ fn onKey(keyboard: canvas.WidgetKeyboardEvent) ?Msg {
     if (std.ascii.eqlIgnoreCase(key, "m")) return .toggle_mute;
     if (std.ascii.eqlIgnoreCase(key, "l")) return .press_like;
     if (std.ascii.eqlIgnoreCase(key, "y")) return .toggle_lyrics;
+    if (std.ascii.eqlIgnoreCase(key, "c")) return .copy_track;
     if (std.ascii.eqlIgnoreCase(key, "escape")) return .escape;
     if (key.len == 1) {
         switch (key[0]) {
@@ -117,6 +119,7 @@ fn onCommand(name: []const u8) ?Msg {
     if (std.mem.eql(u8, name, "tune-toggle")) return .tune_toggle;
     if (std.mem.eql(u8, name, "toggle-mute")) return .toggle_mute;
     if (std.mem.eql(u8, name, "sleep-cycle")) return .sleep_cycle;
+    if (std.mem.eql(u8, name, "copy-track")) return .copy_track;
     if (std.mem.eql(u8, name, "toggle-mini")) return .toggle_mini;
     if (std.mem.eql(u8, name, "open-player")) return .show_player;
     if (std.mem.eql(u8, name, "quit")) return .quit_app;
@@ -142,6 +145,10 @@ fn statusItem(m: *const Model, scratch: *model.App.StatusItemScratch) model.App.
     n += 1;
     scratch.items[n] = .{ .id = 5, .label = m.mute_label(), .command = "toggle-mute" };
     n += 1;
+    if (m.has_track()) {
+        scratch.items[n] = .{ .id = 13, .label = "Copy track", .command = "copy-track" };
+        n += 1;
+    }
     scratch.items[n] = .{ .id = 6, .separator = true };
     n += 1;
     // Cycles off -> 15 -> 30 -> 45 -> 60 -> 90 -> off (flat menu: the SDK
@@ -613,6 +620,7 @@ test "key fallback maps transport, navigation, and dial keys" {
     try testing.expect(onKey(.{ .phase = .key_down, .key = "M" }).? == .toggle_mute);
     try testing.expect(onKey(.{ .phase = .key_down, .key = "L" }).? == .press_like);
     try testing.expect(onKey(.{ .phase = .key_down, .key = "y" }).? == .toggle_lyrics);
+    try testing.expect(onKey(.{ .phase = .key_down, .key = "C" }).? == .copy_track);
     try testing.expect(onKey(.{ .phase = .key_down, .key = "Escape" }).? == .escape);
     try testing.expect(onKey(.{ .phase = .key_down, .key = "k", .modifiers = .{ .super = true } }).? == .toggle_sidebar);
     try testing.expect(onKey(.{ .phase = .key_down, .key = "m", .modifiers = .{ .control = true, .shift = true } }).? == .toggle_mini);
@@ -657,12 +665,18 @@ test "status-item menu derives from the model and maps commands back" {
     try testing.expect(!state.items[0].enabled);
     try testing.expectEqualStrings("Tune out", state.items[2].label);
     try testing.expect(onCommand(state.items[2].command).? == .tune_toggle);
-    try testing.expectEqualStrings("Sleep timer: off", state.items[5].label);
-    try testing.expect(onCommand(state.items[5].command).? == .sleep_cycle);
-    try testing.expectEqualStrings("Open player", state.items[7].label);
-    try testing.expect(onCommand(state.items[7].command).? == .show_player);
-    try testing.expectEqualStrings("Quit SUB/WAVE", state.items[10].label);
-    try testing.expect(onCommand(state.items[10].command).? == .quit_app);
+    try testing.expectEqualStrings("Copy track", state.items[4].label); // a real track is on
+    try testing.expect(onCommand(state.items[4].command).? == .copy_track);
+    try testing.expectEqualStrings("Sleep timer: off", state.items[6].label);
+    try testing.expect(onCommand(state.items[6].command).? == .sleep_cycle);
+    try testing.expectEqualStrings("Open player", state.items[8].label);
+    try testing.expect(onCommand(state.items[8].command).? == .show_player);
+    try testing.expectEqualStrings("Quit SUB/WAVE", state.items[11].label);
+    try testing.expect(onCommand(state.items[11].command).? == .quit_app);
+    // The boot placeholder is not a track, so the copy row drops out.
+    m.title = "Tuning in…";
+    const idle = statusItem(&m, &scratch);
+    for (idle.items) |item| try testing.expect(!std.mem.eql(u8, item.label, "Copy track"));
     try testing.expect(onCommand("toggle-mini").? == .toggle_mini);
     try testing.expect(onCommand("unknown") == null);
 }
