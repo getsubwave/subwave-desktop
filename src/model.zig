@@ -2215,7 +2215,7 @@ fn pollCadence(model: *const Model) polling.Cadence {
 }
 
 fn feedActive(model: *const Model) bool {
-    // Mini mode explicitly minimizes main, including on GTK where the host
+    // Mini mode explicitly hides main, including on GTK where the host
     // cannot report occlusion. Its small view needs the track, not the feeds.
     return model.app_active and !model.main_occluded and !model.mini_open;
 }
@@ -4277,14 +4277,19 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .open_format => model.sheet = .format,
         .open_discord => model.sheet = .discord,
         .close_sheet => model.sheet = .none,
-        // One player surface at a time: entering mini mode tucks the full
-        // player into the Dock/taskbar (minimize is the only reversible
-        // app-driven "get it off the glass" verb the SDK has — fx.closeWindow
-        // is a real close and a closed shell window cannot come back), and
-        // every path out of mini mode brings the full player back.
+        // One player surface at a time: entering mini mode hides the full
+        // player (fx.hideWindow keeps its native window and views alive, so
+        // fx.showWindow brings it straight back), and every path out of mini
+        // mode does exactly that. Hide, not minimize: tiling compositors
+        // (Hyprland, Sway) have no minimized state, so a minimize left the
+        // full player on screen beside the mini; and a hidden window leaves
+        // the Dock/taskbar instead of sitting there as a second entry. A
+        // hidden window still counts as open on every host, so closing the
+        // mini window never reads as "last window closed" and quits the app.
+        // fx.closeWindow is no option: a closed shell window cannot come back.
         .toggle_mini => {
             model.mini_open = !model.mini_open;
-            if (model.mini_open) fx.minimizeWindow("main") else fx.showWindow("main");
+            if (model.mini_open) fx.hideWindow("main") else fx.showWindow("main");
         },
         .expand_mini, .mini_closed => {
             model.mini_open = false;
@@ -5306,7 +5311,7 @@ test "tune_station reports an invalid address instead of failing silently" {
     try testing.expectEqualStrings("", m.station_status);
 }
 
-test "mini flow keeps one player surface: open minimizes main, every exit restores it" {
+test "mini flow keeps one player surface: open hides main, every exit restores it" {
     var fx = Effects.init(testing.allocator);
     defer fx.deinit();
     fx.executor = .fake;
@@ -5314,7 +5319,7 @@ test "mini flow keeps one player surface: open minimizes main, every exit restor
     // Entering mini mode tucks the full player away.
     update(&m, .toggle_mini, &fx);
     try testing.expect(m.mini_open);
-    try testing.expectEqual(@as(u32, 1), fx.windowActionState().minimize_count);
+    try testing.expectEqual(@as(u32, 1), fx.windowActionState().hide_count);
     try testing.expectEqualStrings("main", fx.windowActionState().lastLabel());
     // EXPAND leaves mini mode and restores the full player.
     update(&m, .expand_mini, &fx);
@@ -5336,7 +5341,10 @@ test "mini flow keeps one player surface: open minimizes main, every exit restor
     update(&m, .show_player, &fx);
     try testing.expect(!m.mini_open);
     try testing.expectEqual(@as(u32, 4), fx.windowActionState().show_count);
-    try testing.expectEqual(@as(u32, 4), fx.windowActionState().minimize_count);
+    try testing.expectEqual(@as(u32, 4), fx.windowActionState().hide_count);
+    // Hide replaced minimize: a minimize leaves the full player on screen
+    // on tiling compositors, where there is no minimized state.
+    try testing.expectEqual(@as(u32, 0), fx.windowActionState().minimize_count);
     // The flow never really-closes a window (a closed shell window is gone
     // for good) and never quits the app.
     try testing.expectEqual(@as(u32, 0), fx.windowActionState().close_count);

@@ -94,9 +94,13 @@ download — the app tells you when one is out. (An AUR package,
   playing; sleep timer (15–90 min) from the tray or the back panel.
 - **Mini player** — a compact secondary window (420×168) toggled from the
   masthead button, the tray, or Cmd/Ctrl+Shift+M. One player surface at a
-  time: opening it minimizes the
-  full player, and EXPAND — or closing the mini window — brings the full
-  player back.
+  time: opening it hides the full player (off the Dock/taskbar too, and on
+  tiling desktops, where minimize does nothing), and EXPAND — or closing the
+  mini window — brings the full player back. The mini window stays on top of
+  other windows on macOS, Windows and X11; Wayland leaves that to the
+  compositor (on Hyprland, a `pin` window rule).
+- **Window memory** — the full player reopens at the size and position it was
+  closed at (size only on Wayland, which lets no app place its own window).
 - **Menu-bar extra** — macOS `NSStatusItem` and the Windows tray (the GTK host
   still has none): live now-playing rows, tune in/out, mute, copy track, sleep
   cycle, open player, mini player, quit. On macOS and Windows the close button **hides** the

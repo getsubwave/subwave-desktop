@@ -468,6 +468,14 @@ fn windowsFn(m: *const Model, scratch: *model.App.WindowsScratch) []const model.
             .height = 168,
             .resizable = false,
             .titlebar = .hidden_inset,
+            // A mini player floats over whatever the listener is working in.
+            // Honored on macOS (NSFloatingWindowLevel), Windows (WS_EX_TOPMOST)
+            // and X11 (_NET_WM_STATE_ABOVE). Wayland gives clients no topmost
+            // level, so the GTK host logs that once and the compositor decides
+            // (on Hyprland a `pin` window rule does it).
+            .always_on_top = true,
+            // A fixed 420×168 strip has nothing to fill a screen with.
+            .allows_fullscreen = false,
             .on_close = .mini_closed,
         };
         count += 1;
@@ -490,7 +498,10 @@ const shell_windows = [_]native_sdk.ShellWindow{.{
     .height = window_height,
     .min_width = 880,
     .min_height = 560,
-    .restore_state = false,
+    // Reopen the player at the size and place the listener left it. The
+    // runner restores the startup window (runWithOptions below); this keeps
+    // the scene declaration saying the same thing as app.zon.
+    .restore_state = true,
     .titlebar = .hidden_inset_tall,
     // NOTE: close_policy is NOT set here. Close handling is host window state
     // fixed at create time, so the STARTUP window takes it from app.zon (the
@@ -595,7 +606,10 @@ pub fn main(init: std.process.Init) !void {
         .bundle_id = bundle_id,
         .icon_path = "assets/icon.png",
         .default_frame = geometry.RectF.init(0, 0, window_width, window_height),
-        .restore_state = false,
+        // The saved frame wins over default_frame when there is one; a first
+        // launch (or a frame that no longer fits a screen) falls back to the
+        // centered default.
+        .restore_state = true,
         .js_window_api = false,
         .security = .{
             .permissions = &app_permissions,
