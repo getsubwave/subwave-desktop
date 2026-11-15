@@ -155,7 +155,8 @@ API and mobile hosts, none of which a desktop Zig core has to adopt.
 | Trace default | still `.events` — `-Dtrace=off` stays mandatory |
 | `src/platform/linux/gtk_host.c` | changed (13 hunks), but **not in the patched regions** — see below |
 
-**`fx.hideWindow` is the one worth acting on later.** `model.zig`'s
+**`fx.hideWindow` is the one worth acting on later** (since done: mini mode
+hides the full player, see `toggle_mini`). `model.zig`'s
 `toggle_mini` currently calls `fx.minimizeWindow("main")` because, as the
 comment there says, minimize was "the only reversible app-driven get-it-off-the-glass
 verb the SDK has" — `fx.closeWindow` is a real close and a closed shell window

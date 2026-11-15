@@ -28,8 +28,14 @@
                 .min_width = 880,
                 .min_height = 560,
                 .titlebar = "hidden_inset_tall",
-                .restore_state = false,
-                .restore_policy = "center_on_primary",
+                // Reopen at the last size and position. "clamp_to_visible_screen"
+                // pulls a saved frame back on screen if its display is gone;
+                // "center_on_primary" would throw the saved origin away (macOS
+                // keeps only the size). A first launch, with nothing saved,
+                // still centers. Wayland lets no client place itself, so on
+                // Linux only the size comes back.
+                .restore_state = true,
+                .restore_policy = "clamp_to_visible_screen",
                 // See docs/sdk-notes.md: "hide" (the menu-bar-app close) is what
                 // macOS/Windows want, but the SDK refuses it at comptime on Linux
                 // (GTK host has no tray, so a hidden window would be stranded) and
