@@ -87,7 +87,7 @@ edit. The automation protocol is unchanged (`0x51f7889bbe3305e7`), Zig stays
 | Surface | 0.10.1 → 0.11.1 |
 | --- | --- |
 | Existing Zig core and markup | source-compatible; no app edits required |
-| `fx.setGlobalShortcuts` / `clearGlobalShortcuts` | **new**: system-wide shortcuts (Carbon hot keys on macOS, `RegisterHotKey` on Windows; Linux reports unsupported) |
+| `fx.setGlobalShortcuts` / `clearGlobalShortcuts` | **new**, adopted: opt-in system-wide shortcuts (Carbon hot keys on macOS, `RegisterHotKey` on Windows; Linux reports unsupported) |
 | Global shortcut chords | must carry a modifier (F-keys excepted), at most `platform.max_global_shortcuts`; no bare media keys |
 | Linux tray (`createTray`) | still `UnsupportedService`, so `close_policy` stays per-target |
 | Linux libsecret schema | still missing libsecret's reserved fields; Linux keeps passwords in settings.json |
